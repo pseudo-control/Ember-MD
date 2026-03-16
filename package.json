@@ -1,0 +1,93 @@
+{
+  "name": "ember-md",
+  "version": "1.0.0",
+  "description": "Ember - Molecular Dynamics on Apple Silicon",
+  "main": "electron-dist/electron/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "npm run build:electron && npm run build && electron . --no-sandbox",
+    "dev": "npm run build:electron && npm run build && electron .",
+    "build": "webpack --mode production",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "pack:mac": "npm run build:electron && npm run build && electron-builder --mac dmg",
+    "pack:linux": "npm run build:electron && npm run build && electron-builder --linux",
+    "dist": "bash deps/bundle.sh",
+    "dist:pack": "bash deps/bundle.sh --pack",
+    "dist:mac": "bash scripts/bundle-mac.sh"
+  },
+  "dependencies": {
+    "ngl": "^2.4.0",
+    "solid-js": "^1.8.0",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.0",
+    "@babel/preset-env": "^7.23.0",
+    "@babel/preset-typescript": "^7.23.0",
+    "@types/node": "^20.10.0",
+    "autoprefixer": "^10.4.16",
+    "babel-loader": "^9.1.0",
+    "babel-preset-solid": "^1.8.0",
+    "css-loader": "^6.8.0",
+    "daisyui": "^4.4.0",
+    "electron": "^27.3.11",
+    "electron-builder": "^26.0.12",
+    "html-webpack-plugin": "^5.5.0",
+    "path-browserify": "^1.0.1",
+    "postcss": "^8.4.32",
+    "postcss-loader": "^7.3.3",
+    "process": "^0.11.10",
+    "style-loader": "^3.3.0",
+    "tailwindcss": "^3.3.6",
+    "typescript": "^5.3.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
+  },
+  "build": {
+    "appId": "com.ember-md.app",
+    "productName": "Ember",
+    "files": [
+      "dist-webpack/**/*",
+      "electron-dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "extraResources": [
+      {
+        "from": "bundle-mac/extra-resources/python",
+        "to": "python",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "bundle-mac/extra-resources/scripts",
+        "to": "scripts",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.medical",
+      "identity": null,
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    },
+    "dmg": {
+      "sign": false,
+      "writeUpdateInfo": false
+    },
+    "asar": false,
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Science",
+      "icon": "icon.png",
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    }
+  }
+}

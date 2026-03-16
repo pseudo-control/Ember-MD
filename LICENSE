@@ -1,0 +1,44 @@
+MIT License
+
+Copyright (c) 2026 Ember Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Ember bundles the following open source components:
+
+- OpenMM (MIT/LGPL) - https://openmm.org
+- AMBER Force Fields ff14SB, ff19SB (Public Domain, UCSF)
+- OPC Water Model (Izadi et al. 2014)
+- OpenFF Sage 2.0 (MIT) - https://openforcefield.org
+- OpenMM Force Fields (MIT) - https://github.com/openmm/openmmforcefields
+- openmm-metal (MIT/LGPL) - https://github.com/philipturner/openmm-metal
+- VkFFT (MIT) - https://github.com/DTolm/VkFFT
+- RDKit (BSD-3-Clause) - https://rdkit.org
+- Open Babel (GPL-2.0) - https://openbabel.org
+- PDBFixer (MIT) - https://github.com/openmm/pdbfixer
+- MDAnalysis (GPL-2.0) - https://mdanalysis.org
+- AmberTools (LGPL) - https://ambermd.org/AmberTools.php
+- NGL Viewer (MIT) - https://nglviewer.org
+- Electron (MIT) - https://electronjs.org
+- SolidJS (MIT) - https://solidjs.com
+
+Note: Open Babel and MDAnalysis are GPL-2.0 licensed and are invoked as
+separate processes, not linked into Ember's application code.

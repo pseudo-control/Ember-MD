@@ -1,0 +1,34 @@
+.DS_Store
+.claude/
+
+# Local assistant/project metadata
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Logs
+*.log
+logs/
+
+# Dependency and build output
+node_modules/
+dist/
+dist-webpack/
+electron-dist/
+bundle-mac/
+
+# Local installers and packed archives
+Miniconda3-latest-Linux-x86_64.sh
+*.tar.gz
+
+# Local runtime/config material
+deps/paths.env
+deps/staging/app/
+deps/staging/bin/
+deps/staging/openbabel/
+deps/staging/scripts/__pycache__/
+
+# Local molecular inputs/outputs and scratch data
+*.pka
+*.chk
+FRB4591_01_refine_8.pdb

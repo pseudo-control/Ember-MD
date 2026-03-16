@@ -1,0 +1,8 @@
+# Bundled staging artifacts
+staging/app/
+staging/bin/
+staging/openbabel/
+staging/scripts/__pycache__/
+
+# Conda-pack tarballs
+*.tar.gz
