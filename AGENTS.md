@@ -12,7 +12,7 @@ Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Two modes: 
 - **Frontend**: SolidJS + TypeScript + Tailwind/DaisyUI (wireframe theme, system fonts)
 - **Desktop**: Electron 27, Webpack
 - **MD Engine**: OpenMM 8.1.2 (AMBER ff19SB/ff14SB + OPC/TIP3P + OpenFF Sage 2.0)
-- **GPU**: Apple OpenCL (cl2Metal) + openmm-metal plugin (HIP platform)
+- **GPU**: Native Metal (openmm-metal plugin, registers as HIP) + Apple OpenCL (cl2Metal fallback)
 - **Visualization**: NGL (WebGL molecular viewer)
 - **Cheminformatics**: RDKit, OpenBabel, PDBFixer, MDAnalysis, AmberTools
 
@@ -20,10 +20,10 @@ Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Two modes: 
 ```
 CUDA → HIP (openmm-metal plugin) → OpenCL (cl2Metal) → CPU
 ```
-- **HIP/Metal**: Philip Turner's openmm-metal plugin, registers as "HIP" to bypass OpenMM's energy minimizer checks. Fixed for macOS 26 by disabling VENDOR_APPLE SIMD paths (2 line change in MetalContext.cpp + MetalNonbondedUtilities.cpp). All 34 tests pass.
-- **OpenCL**: Apple's cl2Metal translates OpenCL to Metal GPU instructions. ~2.5% slower than HIP but zero maintenance. Works across all macOS versions (Ventura through Tahoe).
-- **Performance**: ~210 ns/day on M4 for 22K atom protein-ligand system. ~51 ns/day for 92K atom ApoA1.
-- **SIMD note**: macOS 26 blocks `__asm("air....")` inline assembly in cl2Metal. No subgroup extensions available. SIMD intrinsics only accessible via native Metal Shading Language (not implemented).
+- **HIP/Metal (native)**: openmm-metal plugin with native MSL kernels, registers as "HIP". 45/45 tests pass. Command buffer batching for GPU throughput. VENDOR_APPLE enabled for SIMD intrinsics (`simd_sum`, `simdgroup_barrier`). **130.7 ns/day** on M4 (22K atoms), targeting ≥210.
+- **OpenCL (fallback)**: Apple's cl2Metal translates OpenCL to Metal GPU instructions. ~210 ns/day on M4. Works across all macOS versions but deprecated since 10.14.
+- **Performance**: Native Metal at 130.7 ns/day (optimization in progress). OpenCL baseline ~210 ns/day. ~51 ns/day for 92K atom ApoA1.
+- **Architecture**: Persistent command buffer batching — `executeKernel` encodes into shared `MTLCommandBuffer`, `flushQueue()` commits only at sync points (data reads, blit ops, FFT, cross-context dispatches).
 
 ## Project Structure
 ```

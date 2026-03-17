@@ -188,11 +188,40 @@ From `run_md_simulation.py`:
 
 **Validation**: All 45 native Metal tests must pass (27 short + 12 long + 6 very-long). Force deviation vs CPU Reference < 0.01 kJ/mol/nm per atom.
 
-**Current status (2026-03-16)**: 45/45 tests pass on the native Metal branch. All three tiers green: short 27/27, long 12/12, very-long 6/6.
+**Current status (2026-03-16)**: 45/45 tests pass. Correctness locked. **130.7 ns/day** on M4 (22K atoms, ff19SB/OPC) — 62% of 210 ns/day OpenCL baseline. Performance optimization in progress.
 
 **Resolved blockers**:
 - `TestMetalDispersionPME` — fixed by switching from Abramowitz-Stegun 5-term erfc polynomial (max error 1.5e-7, systematic bias accumulated across PME grid) to Numerical Recipes 9-term Chebyshev rational approximation (max error ~1.2e-7, better bias distribution). Energy now within 5e-5 tolerance.
 - `TestMetalLocalEnergyMinimizer` — fixed by clamping `realToFixedPoint()` in `common.metal` to prevent undefined behavior when converting `inf` to `long` (Metal produces 0 for `(long)inf`, unlike OpenCL which saturates). Clamped forces now correctly trigger the existing CPU fallback in L-BFGS for extreme overlapping-particle configurations.
+- `sortBuckets` crash on real proteins (~20K+ atoms) — fixed `addArg`→`setArg` accumulation bug in `MetalSort.mm` and `MetalCompact.mm`. Every `sort()`/`compactStream()` call appended 5+ new arguments instead of overwriting at fixed indices, causing `kIOGPUCommandBufferCallbackErrorInvalidResource` after a few minimizer steps. Unit tests passed because they only called `sort()` once; real systems call it every step.
+- **13x performance regression** (15.8 ns/day) — fixed by command buffer batching in `MetalContext.mm`. The original code created a new `MTLCommandBuffer`, encoded one kernel, committed, and called `waitUntilCompleted` for every single dispatch (~30-50 per MD step). Batching encodes all compute dispatches into a persistent command buffer with `memoryBarrierWithScope:MTLBarrierScopeBuffers` between them, flushing only at sync points (`flushQueue()`). 8.3x speedup to 130.7 ns/day.
+- **Cross-context data races** (`TestMetalCustomCVForce`) — batching exposed a latent race in `CommonKernels.cpp` where `copyState`/`copyForces` kernels dispatched on the outer context wrote to inner context buffers without flushing before the inner context read them. Fixed by adding `cc.flushQueue()` after cross-context kernel dispatches.
+
+### Command Buffer Batching Architecture
+
+`MetalContext` maintains a persistent `currentCommandBuffer` + `currentComputeEncoder`. Multiple kernel dispatches are encoded into the same encoder with memory barriers between them.
+
+**`flushQueue()`** commits the batch and waits: called before any CPU-side data read or non-compute GPU operation. Flush points:
+- `MetalArray::download()` — CPU reads GPU data (shared memory, needs work to complete)
+- `MetalArray::copyTo()` — blit encoder requires ending the compute encoder
+- `clearBuffer()` / `clearAutoclearBuffers()` — blit operations
+- `reduceEnergy()` — needs to read accumulated energy back to CPU
+- `MetalFFT3D::execFFT()` (VkFFT path) — VkFFT creates its own command buffers
+- Cross-context kernel dispatches (`CommonKernels.cpp`) — outer context writes to inner context buffers
+
+**Profiling mode** (`OPENMM_METAL_PROFILE_KERNELS=1`): Falls back to per-dispatch sync for accurate per-kernel GPU timing.
+
+### Performance Optimization Roadmap
+
+Remaining gap: 130.7 → ≥210 ns/day (38%). Ordered by impact:
+
+1. **VkFFT command buffer integration** — VkFFT's `launchParams` accepts an existing `MTLCommandBuffer`. Currently we flush before every FFT and VkFFT creates its own. Passing in the persistent buffer eliminates multiple commit/wait cycles per PME step. Biggest remaining scheduling win.
+2. **Blit operation integration** — fold `clearBuffer`/`clearAutoclearBuffers` into the persistent command buffer (end compute encoder → blit encoder → resume compute encoder on same command buffer). Eliminates flush-per-clear.
+3. **Dynamic threadgroup sizes** — query `threadExecutionWidth` (32 on Apple Silicon) and `maxTotalThreadsPerThreadgroup` at pipeline creation. Use 128 instead of hardcoded `ThreadBlockSize=64`. ~10-20% gain from better occupancy.
+4. **Private buffers + MTLHeap** — switch big arrays (posq, forces, neighbor lists) from `MTLResourceStorageModeShared` to `MTLResourceStorageModePrivate` with explicit blit for host reads. ~5-10%.
+5. **Half-precision floats** — safe for nonbonded kernels on Apple Silicon, halves bandwidth. Incremental.
+
+**Hardware detection**: Use runtime MTL queries (`threadExecutionWidth`, `maxTotalThreadsPerThreadgroup`, `isLowPowerDevice`, `recommendedMaxWorkingSetSize`) — no static chip tables. Same binary runs on M-series desktops and A-series phones.
 
 ### Test Suite Architecture
 
@@ -267,6 +296,12 @@ When porting OpenCL kernels to native MSL, these are non-obvious differences tha
 - Some kernels exist in **both** `platforms/metal/src/kernels/*.metal` (Metal-specific) and `platforms/common/src/kernels/*.cc` (shared). The `.cc` versions are compiled into `CommonKernelSources.cpp` at build time and may be what actually runs at runtime, depending on the code path.
 - Example: `andersenThermostat` has both `.metal` and `.cc` copies. Patching only the `.metal` file won't fix tests that load the common source. **Always check and patch both.**
 
+**Host-side `addArg` vs `setArg` (critical for repeated calls):**
+- `ComputeKernel::addArg()` **appends** to the argument list. `setArg(index, ...)` **overwrites** at a fixed index (auto-grows if needed).
+- Any `.mm` host code that calls `addArg()` inside a method invoked more than once per simulation (e.g., `sort()`, `compactStream()`) will accumulate arguments and eventually crash with `kIOGPUCommandBufferCallbackErrorInvalidResource`.
+- Unit tests often miss this because they only call the method once. Real systems (20K+ atoms) call `sort()` every minimizer step.
+- **Rule**: Use `setArg(index, ...)` and `setThreadgroupMemoryArg(index, ...)` in any method called repeatedly. Reserve `addArg()` for one-time initialization.
+
 **Test file format:**
 - `TestMetalNonbondedForce` was renamed from `.cpp` to `.mm` because it uses `#import <Metal/Metal.h>` for GPU memory queries. The `long_tests/CMakeLists.txt` glob includes `"*Test*.mm"` to pick it up.
 
@@ -291,10 +326,11 @@ All Metal API calls are fail-fast with `fprintf(stderr, "[Metal] ...")` + `throw
 - **Pipeline creation** (`createKernel`, `createUtilityKernel`): Logs available function names on failure.
 - **Source transformation**: STEP 1 logs each wrapped param with kernel name (`kernel 'X': wrapped 'int Y' → 'constant int& Y'`). STEP 1b logs each mutable param fix with kernel name. STEP 2 logs function names and edit count. Pre/post transform dumps for `generateRandomNumbers` kernels.
 
-**GPU Execution:**
-- **Kernel execution** (`executeKernel`): Checks `commandBuffer.status` after every dispatch. Logs argument bindings when `OPENMM_METAL_LOG_ARGS=1`.
-- **FFT** (`execFFT` VkFFT path): Nil checks, VkFFT error code logging, commandBuffer status check. Pipeline creation checks NSError pointer.
-- **Energy reduction** (`reduceEnergy`): Nil checks on commandBuffer/encoder, status check.
+**GPU Execution (batched):**
+- **Kernel execution** (`executeKernel`): Encodes into persistent `currentCommandBuffer`/`currentComputeEncoder` with `memoryBarrierWithScope:MTLBarrierScopeBuffers` between dispatches. No per-dispatch commit/wait. Logs argument bindings when `OPENMM_METAL_LOG_ARGS=1`. Profiling mode falls back to per-dispatch sync.
+- **`flushQueue()`**: Ends encoder, commits command buffer, `waitUntilCompleted`, checks `commandBuffer.status`. Called before data reads, blit ops, FFT, and cross-context dispatches.
+- **FFT** (`execFFT` VkFFT path): `flushQueue()` before VkFFT (which creates its own command buffers). Nil checks, VkFFT error code logging, status check.
+- **Energy reduction** (`reduceEnergy`): `flushQueue()` first (ensures force/energy writes complete), then dispatches reduce kernel in its own command buffer + wait + download.
 
 **Buffer Operations:**
 - **clearBuffer / clearAutoclearBuffers / copyTo**: Nil checks on commandBuffer/encoder, status check after completion.

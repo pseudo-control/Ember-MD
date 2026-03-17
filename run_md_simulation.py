@@ -418,7 +418,7 @@ def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='accur
     # 3. Setup force field with ligand parameters (OpenFF Sage 2.0)
     if force_field_preset == 'accurate':
         print('Setting up force fields (ff19SB + OPC + OpenFF Sage 2.0)...', file=sys.stderr)
-        ff = ForceField('amber19/protein.ff19SB.xml', 'amber/opc_standard.xml')
+        ff = ForceField('amber/protein.ff19SB.xml', 'amber/opc_standard.xml')
     else:
         print('Setting up force fields (ff14SB + TIP3P + OpenFF Sage 2.0)...', file=sys.stderr)
         ff = ForceField('amber14-all.xml', 'amber14/tip3p.xml')
@@ -845,13 +845,13 @@ def run_production(system, modeller, equilibrated_state, output_dir, job_name, p
     integrator = LangevinMiddleIntegrator(300*kelvin, 1/picosecond, 0.004*picoseconds)
 
     # Create new simulation with 4fs integrator
-    # Platform cascade: CUDA → Metal → OpenCL → CPU
+    # Platform cascade: CUDA → HIP (native Metal) → OpenCL (cl2Metal) → CPU
     if platform_name == 'CUDA':
         platform = Platform.getPlatformByName('CUDA')
         properties = {'CudaPrecision': 'mixed'}
         simulation = Simulation(modeller.topology, system, integrator, platform, properties)
-    elif platform_name == 'Metal':
-        platform = Platform.getPlatformByName('Metal')
+    elif platform_name == 'HIP':
+        platform = Platform.getPlatformByName('HIP')
         simulation = Simulation(modeller.topology, system, integrator, platform)
     elif platform_name == 'OpenCL':
         platform = Platform.getPlatformByName('OpenCL')
@@ -922,9 +922,9 @@ def run_benchmark(system, modeller, output_dir):
     # Create simulation for benchmark (4fs timestep, HMR enabled in system)
     integrator = LangevinMiddleIntegrator(300*kelvin, 1/picosecond, 0.004*picoseconds)
 
-    # Try to use CUDA/Metal/OpenCL if available
-    # Note: Metal platform name depends on the OpenMM Metal plugin registration
-    # (may be 'Metal', 'HIP', or another name — update if the plugin uses a different name)
+    # Try to use CUDA/HIP(Metal)/OpenCL if available
+    # The openmm-metal plugin registers as "HIP" to bypass OpenMM's energy minimizer checks.
+    # Cascade: CUDA → HIP (native Metal) → OpenCL (cl2Metal) → CPU
     try:
         platform = Platform.getPlatformByName('CUDA')
         properties = {'CudaPrecision': 'mixed'}
@@ -932,9 +932,9 @@ def run_benchmark(system, modeller, output_dir):
         print('Using CUDA platform', file=sys.stderr)
     except Exception:
         try:
-            platform = Platform.getPlatformByName('Metal')
+            platform = Platform.getPlatformByName('HIP')
             simulation = Simulation(modeller.topology, system, integrator, platform)
-            print('Using Metal platform', file=sys.stderr)
+            print('Using HIP (native Metal) platform', file=sys.stderr)
         except Exception:
             try:
                 platform = Platform.getPlatformByName('OpenCL')
@@ -1033,17 +1033,14 @@ def main():
     # List available platforms
     print(f'Available platforms: {[Platform.getPlatform(i).getName() for i in range(Platform.getNumPlatforms())]}', file=sys.stderr)
 
-    # Try to use CUDA/Metal/OpenCL if available
-    # Platform cascade: CUDA → Metal → OpenCL → CPU
-    # Note: Metal platform name depends on the OpenMM Metal plugin registration
-    # (may be 'Metal', 'HIP', or another name — update if the plugin uses a different name)
+    # Platform cascade: CUDA → HIP (native Metal) → OpenCL (cl2Metal) → CPU
+    # The openmm-metal plugin registers as "HIP" to bypass OpenMM's energy minimizer checks.
     platform_name = 'CPU'
     try:
         platform = Platform.getPlatformByName('CUDA')
         properties = {'CudaPrecision': 'mixed'}
         simulation = Simulation(modeller.topology, system, integrator, platform, properties)
         platform_name = 'CUDA'
-        # Get GPU info
         try:
             device_name = platform.getPropertyValue(simulation.context, 'DeviceName')
             print(f'Using CUDA platform: {device_name}', file=sys.stderr)
@@ -1052,24 +1049,22 @@ def main():
     except Exception as cuda_err:
         print(f'CUDA not available: {cuda_err}', file=sys.stderr)
         try:
-            platform = Platform.getPlatformByName('Metal')
+            platform = Platform.getPlatformByName('HIP')
             simulation = Simulation(modeller.topology, system, integrator, platform)
-            platform_name = 'Metal'
-            print('Using Metal platform (Apple GPU)', file=sys.stderr)
-        except Exception as metal_err:
-            print(f'Metal not available: {metal_err}', file=sys.stderr)
+            platform_name = 'HIP'
+            print('Using HIP (native Metal) platform', file=sys.stderr)
+        except Exception as hip_err:
+            print(f'HIP not available: {hip_err}', file=sys.stderr)
             try:
                 platform = Platform.getPlatformByName('OpenCL')
-                # Try mixed precision first (usually more stable than double on OpenCL)
-                properties = {'Precision': 'mixed'}
+                properties = {'Precision': 'single'}
                 simulation = Simulation(modeller.topology, system, integrator, platform, properties)
                 platform_name = 'OpenCL'
-                # Get GPU info
                 try:
                     device_name = platform.getPropertyValue(simulation.context, 'DeviceName')
-                    print(f'Using OpenCL platform (mixed precision): {device_name}', file=sys.stderr)
+                    print(f'Using OpenCL platform: {device_name}', file=sys.stderr)
                 except:
-                    print('Using OpenCL platform (mixed precision)', file=sys.stderr)
+                    print('Using OpenCL platform', file=sys.stderr)
             except Exception as ocl_err:
                 print(f'OpenCL not available: {ocl_err}', file=sys.stderr)
                 platform = Platform.getPlatformByName('CPU')
