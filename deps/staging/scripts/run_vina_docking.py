@@ -168,6 +168,7 @@ def main():
     parser.add_argument('--cpu', type=int, default=0, help='Number of CPUs (0=auto)')
     parser.add_argument('--core_constrain', action='store_true', help='MCS core-constrained alignment')
     parser.add_argument('--reference_sdf', default=None, help='Reference SDF for MCS alignment')
+    parser.add_argument('--project_name', default=None, help='Project name prefix for output files')
     args = parser.parse_args()
 
     # Validate inputs
@@ -177,7 +178,8 @@ def main():
             sys.exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    name = Path(args.ligand).stem
+    raw_name = Path(args.ligand).stem
+    name = f'{args.project_name}_{raw_name}' if args.project_name else raw_name
     t_start = time.time()
 
     with tempfile.TemporaryDirectory(prefix='vina_') as tmp_dir:

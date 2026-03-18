@@ -1447,6 +1447,9 @@ function dockSingleLigandVina(
     const name = path.basename(ligandPath, '.sdf');
     const scriptPath = path.join(fraggenRoot, 'run_vina_docking.py');
 
+    // Derive project name from output path: .../docking/{runFolder}
+    const vinaProjectName = path.basename(path.resolve(outputDir, '../..'));
+
     const args = [
       scriptPath,
       '--receptor', receptor,
@@ -1457,6 +1460,7 @@ function dockSingleLigandVina(
       '--num_poses', String(config.numPoses),
       '--autobox_add', String(config.autoboxAdd),
       '--cpu', '1',  // Each Vina process uses 1 CPU, concurrency handled by Node.js
+      '--project_name', vinaProjectName,
     ];
 
     if (config.seed > 0) {
@@ -4637,12 +4641,16 @@ ipcMain.handle(
         data: '=== Binding Site Interaction Map ===\n',
       });
 
+      // Derive project name from output path: .../surfaces/binding_site_map
+      const bsmProjectName = path.basename(path.resolve(options.outputDir, '../..'));
+
       const args = [
         scriptPath,
         '--pdb_path', options.pdbPath,
         '--ligand_resname', options.ligandResname,
         '--ligand_resnum', String(options.ligandResnum),
         '--output_dir', options.outputDir,
+        '--project_name', bsmProjectName,
       ];
 
       if (options.boxPadding !== undefined) {
@@ -4668,7 +4676,10 @@ ipcMain.handle(
       proc.on('close', (code: number | null) => {
         childProcesses.delete(proc);
 
-        const resultFile = path.join(options.outputDir, 'binding_site_results.json');
+        // Try prefixed results first, fall back to unprefixed
+        const prefixedResultFile = path.join(options.outputDir, `${bsmProjectName}_binding_site_results.json`);
+        const legacyResultFile = path.join(options.outputDir, 'binding_site_results.json');
+        const resultFile = fs.existsSync(prefixedResultFile) ? prefixedResultFile : legacyResultFile;
         if (code === 0 && fs.existsSync(resultFile)) {
           try {
             const content = fs.readFileSync(resultFile, 'utf-8');

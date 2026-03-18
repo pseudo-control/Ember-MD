@@ -1674,10 +1674,14 @@ const ViewerMode: Component = () => {
     const mapDir = projectDir !== pdbDir
       ? `${projectDir}/surfaces/binding_site_map`
       : `${pdbDir}/binding_site_map`;
-    const resultsPath = `${mapDir}/binding_site_results.json`;
+    // Try prefixed results file first, then legacy unprefixed
+    const projName = projectDir !== pdbDir ? projectDir.split('/').pop() || '' : '';
+    const prefixedPath = projName ? `${mapDir}/${projName}_binding_site_results.json` : null;
+    const legacyPath = `${mapDir}/binding_site_results.json`;
 
     try {
-      const data = await api.readJsonFile(resultsPath) as any;
+      const data = (prefixedPath ? await api.readJsonFile(prefixedPath) as any : null)
+        || await api.readJsonFile(legacyPath) as any;
       if (!data || !data.hydrophobicDx) return;
 
       const mapState = buildMapState(data);

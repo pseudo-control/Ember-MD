@@ -195,7 +195,8 @@ def add_backbone_restraints(system, positions, topology, force_constant):
 
 
 def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-opc',
-                             temperature_k=300, salt_concentration_m=0.15, padding_nm=1.2):
+                             temperature_k=300, salt_concentration_m=0.15, padding_nm=1.2,
+                             project_name=None):
     """Build solvated ligand-only system (no protein).
 
     For studying small molecule dynamics in solution.
@@ -206,7 +207,7 @@ def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-
     print('PROGRESS:building:0', flush=True)
     t_start = time.time()
 
-    job_name = args.project_name if args.project_name else os.path.basename(output_dir.rstrip('/'))
+    job_name = project_name if project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load ligand
     print(f'[{time.time()-t_start:.1f}s] Loading ligand SDF...', file=sys.stderr)
@@ -315,7 +316,8 @@ def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-
 
 
 def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19sb-opc',
-                 temperature_k=300, salt_concentration_m=0.15, padding_nm=1.2):
+                 temperature_k=300, salt_concentration_m=0.15, padding_nm=1.2,
+                 project_name=None):
     """Build solvated protein-ligand system.
 
     Force field presets:
@@ -330,7 +332,7 @@ def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19s
     receptor_pdb = ensure_pdb_format(receptor_pdb)
 
     # Extract job name from output directory for self-contained filenames
-    job_name = args.project_name if args.project_name else os.path.basename(output_dir.rstrip('/'))
+    job_name = project_name if project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load receptor PDB and capture ligand coordinates BEFORE stripping
     print('Loading and fixing receptor PDB...', file=sys.stderr)
@@ -1109,13 +1111,15 @@ def main():
         print(f'Building ligand-only system (preset: {args.force_field_preset}, {args.temperature}K, {args.salt_concentration*1000:.0f}mM)...', file=sys.stderr)
         system, modeller, ff, job_name = build_ligand_only_system(
             args.ligand, args.output_dir, args.force_field_preset,
-            args.temperature, args.salt_concentration, args.padding
+            args.temperature, args.salt_concentration, args.padding,
+            project_name=args.project_name
         )
     else:
         print(f'Building system (preset: {args.force_field_preset}, {args.temperature}K, {args.salt_concentration*1000:.0f}mM)...', file=sys.stderr)
         system, modeller, ff, job_name = build_system(
             args.receptor, args.ligand, args.output_dir, args.force_field_preset,
-            args.temperature, args.salt_concentration, args.padding
+            args.temperature, args.salt_concentration, args.padding,
+            project_name=args.project_name
         )
 
     if args.benchmark_only:

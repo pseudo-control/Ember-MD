@@ -103,8 +103,9 @@ const MDStepProgress: Component = () => {
       const trajectoryPath = successMatch[1].trim();
       // The output dir is the parent of the trajectory file
       const outputDir = path.dirname(trajectoryPath);
-      // File prefix matches the folder name (set by run_md_simulation.py)
-      const jobPrefix = path.basename(outputDir);
+      // File prefix: derive from trajectory filename (e.g. projectName_trajectory.dcd → projectName)
+      const trajBasename = path.basename(trajectoryPath);
+      const jobPrefix = trajBasename.replace(/_trajectory\.dcd$/, '') || path.basename(outputDir);
       setMdResult({
         systemPdbPath: path.join(outputDir, `${jobPrefix}_system.pdb`),
         trajectoryPath: trajectoryPath,

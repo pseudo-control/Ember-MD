@@ -95,6 +95,7 @@ def main():
     parser.add_argument('--output_dir', required=True, help='Output directory')
     parser.add_argument('--box_padding', type=float, default=8.0, help='Box padding in Angstroms')
     parser.add_argument('--grid_spacing', type=float, default=0.75, help='Grid spacing in Angstroms')
+    parser.add_argument('--project_name', default=None, help='Project name prefix for output files')
     args = parser.parse_args()
 
     try:
@@ -259,9 +260,10 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     origin = grid_min.tolist()
 
-    hydro_path = os.path.join(args.output_dir, 'hydrophobic.dx')
-    donor_path = os.path.join(args.output_dir, 'hbond_donor.dx')
-    acceptor_path = os.path.join(args.output_dir, 'hbond_acceptor.dx')
+    prefix = f'{args.project_name}_' if args.project_name else ''
+    hydro_path = os.path.join(args.output_dir, f'{prefix}hydrophobic.dx')
+    donor_path = os.path.join(args.output_dir, f'{prefix}hbond_donor.dx')
+    acceptor_path = os.path.join(args.output_dir, f'{prefix}hbond_acceptor.dx')
 
     print("PROGRESS: Writing DX files...")
     write_dx(hydro_path, hydro_3d, origin, spacing, shape)
@@ -326,7 +328,7 @@ def main():
         'ligandCom': [round(float(c), 3) for c in ligand_com],
     }
 
-    results_path = os.path.join(args.output_dir, 'binding_site_results.json')
+    results_path = os.path.join(args.output_dir, f'{prefix}binding_site_results.json')
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
 

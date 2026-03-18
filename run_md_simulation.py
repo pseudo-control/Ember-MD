@@ -161,7 +161,8 @@ def add_backbone_restraints(system, positions, topology, force_constant):
     return restraint, backbone_indices
 
 
-def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-opc'):
+def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-opc',
+                             project_name=None):
     """Build solvated ligand-only system (no protein).
 
     For studying small molecule dynamics in solution.
@@ -172,7 +173,7 @@ def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-
     print('PROGRESS:building:0', flush=True)
     t_start = time.time()
 
-    job_name = os.path.basename(output_dir.rstrip('/'))
+    job_name = project_name if project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load ligand
     print(f'[{time.time()-t_start:.1f}s] Loading ligand SDF...', file=sys.stderr)
@@ -279,7 +280,8 @@ def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-
     return system, modeller, ff, job_name
 
 
-def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19sb-opc'):
+def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19sb-opc',
+                 project_name=None):
     """Build solvated protein-ligand system.
 
     Force field presets:
@@ -291,7 +293,7 @@ def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19s
     print('PROGRESS:building:0', flush=True)
 
     # Extract job name from output directory for self-contained filenames
-    job_name = os.path.basename(output_dir.rstrip('/'))
+    job_name = project_name if project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load receptor PDB and capture ligand coordinates BEFORE stripping
     print('Loading and fixing receptor PDB...', file=sys.stderr)
@@ -1032,6 +1034,8 @@ def main():
     parser.add_argument('--benchmark_only', action='store_true', help='Only run benchmark')
     parser.add_argument('--restrain_ligand_ns', type=float, default=0,
                         help='Restrain ligand heavy atoms for first N ns of production (0=off, IFD-MD mode)')
+    parser.add_argument('--project_name', default=None,
+                        help='Project name prefix for output files (default: use folder name)')
     args = parser.parse_args()
 
     # Map legacy preset names
@@ -1064,12 +1068,14 @@ def main():
     if args.ligand_only:
         print(f'Building ligand-only system (preset: {args.force_field_preset})...', file=sys.stderr)
         system, modeller, ff, job_name = build_ligand_only_system(
-            args.ligand, args.output_dir, args.force_field_preset
+            args.ligand, args.output_dir, args.force_field_preset,
+            project_name=args.project_name
         )
     else:
         print(f'Building system (preset: {args.force_field_preset})...', file=sys.stderr)
         system, modeller, ff, job_name = build_system(
-            args.receptor, args.ligand, args.output_dir, args.force_field_preset
+            args.receptor, args.ligand, args.output_dir, args.force_field_preset,
+            project_name=args.project_name
         )
 
     if args.benchmark_only:
