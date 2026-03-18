@@ -59,7 +59,7 @@ const DockStepConfigure: Component = () => {
             <div class="card-body p-4">
               <h3 class="text-sm font-semibold mb-2">Output</h3>
               <div class="bg-base-300 rounded-lg px-3 py-2">
-                <span class="text-xs font-mono break-all">{state().jobName}/{outputFolderName()}</span>
+                <span class="text-xs font-mono break-all">{state().jobName}/docking/{outputFolderName()}</span>
               </div>
               <div class="space-y-1.5 text-xs mt-3">
                 <div class="flex justify-between">

@@ -2,6 +2,7 @@ import { Component, onMount, onCleanup, createSignal, Show } from 'solid-js';
 import path from 'path';
 import { workflowStore } from '../../stores/workflow';
 import { buildDockFolderName } from '../../utils/jobName';
+import { projectPaths } from '../../utils/projectPaths';
 import TerminalOutput from '../shared/TerminalOutput';
 
 const DockStepProgress: Component = () => {
@@ -55,12 +56,12 @@ const DockStepProgress: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const jobName = state().jobName.trim();
-    const projectDir = path.join(baseOutputDir, jobName);
+    const paths = projectPaths(baseOutputDir, jobName);
     const dockFolder = buildDockFolderName({
       referenceLigandId: dock.referenceLigandId,
       numLigands: dock.ligandSdfPaths.length,
     });
-    const outputDir = path.join(projectDir, dockFolder);
+    const outputDir = paths.docking(dockFolder);
     setDockOutputDir(outputDir);
 
     try {
@@ -69,7 +70,7 @@ const DockStepProgress: Component = () => {
       // Preprocessing: protonation enumeration
       if (dock.protonationConfig.enabled && ligandPaths.length > 0) {
         appendLog('--- Enumerating protonation states... ---\n');
-        const protonDir = path.join(projectDir, 'protonated');
+        const protonDir = path.join(paths.ligands.sdf, 'protonated');
         const protonResult = await api.enumerateProtonation(
           ligandPaths, protonDir,
           dock.protonationConfig.phMin, dock.protonationConfig.phMax
@@ -85,7 +86,7 @@ const DockStepProgress: Component = () => {
       // Preprocessing: conformer generation
       if (dock.conformerConfig.method !== 'none' && ligandPaths.length > 0) {
         appendLog('--- Generating conformers... ---\n');
-        const confDir = path.join(projectDir, 'conformers');
+        const confDir = path.join(paths.ligands.sdf, 'conformers');
         const confResult = await api.generateConformers(
           ligandPaths, confDir,
           dock.conformerConfig.maxConformers,

@@ -4,6 +4,7 @@ import { workflowStore } from '../../stores/workflow';
 import { useMdOutput } from '../../hooks/useElectronApi';
 import { MDStage } from '../../../shared/types/md';
 import { buildMdRunFolderName, estimateChargeTime } from '../../utils/jobName';
+import { projectPaths } from '../../utils/projectPaths';
 import TerminalOutput from '../shared/TerminalOutput';
 
 interface StageInfo {
@@ -127,11 +128,11 @@ const MDStepProgress: Component = () => {
     setMdCurrentStage('building');
     setMdStageProgress(0);
 
-    // Use global job name as project folder, run folder inside it
+    // Use global job name as project folder, run folder inside simulations/
     const globalJobName = state().jobName.trim();
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
-    const projectDir = path.join(baseOutputDir, globalJobName);
+    const paths = projectPaths(baseOutputDir, globalJobName);
 
     const compoundId = state().md.config.compoundId?.trim() || '';
     const runFolder = buildMdRunFolderName({
@@ -144,11 +145,11 @@ const MDStepProgress: Component = () => {
     // Deduplicate: append _run2, _run3, etc. if folder exists
     let finalRunFolder = runFolder;
     let n = 1;
-    while (await api.fileExists(path.join(projectDir, finalRunFolder))) {
+    while (await api.fileExists(paths.simulations(finalRunFolder))) {
       n++;
       finalRunFolder = `${runFolder}_run${n}`;
     }
-    const outputDir = path.join(projectDir, finalRunFolder);
+    const outputDir = paths.simulations(finalRunFolder);
 
     try {
       const result = await api.runMdSimulation(
