@@ -57,11 +57,17 @@ fi
 cd "$PROJECT_DIR"
 
 # Copy Metal plugin dylibs if available
-if [ -d "$HOME/openmm-metal-project/openmm-metal/.build" ]; then
+METAL_BUILD="$HOME/openmm-metal-project/openmm-metal/.build-metal"
+if [ -d "$METAL_BUILD" ]; then
     echo "  Including Metal plugin dylibs..."
-    for lib in libOpenMMMetal.dylib libOpenMMAmoebaMetal.dylib libOpenMMDrudeMetal.dylib libOpenMMRPMDMetal.dylib; do
-        if [ -f "$HOME/openmm-metal-project/openmm-metal/.build/$lib" ]; then
-            cp "$HOME/openmm-metal-project/openmm-metal/.build/$lib" "$EXTRA_DIR/python/lib/plugins/" 2>/dev/null || true
+    for lib in \
+        "$METAL_BUILD/platforms/metal/libOpenMMMetal.dylib" \
+        "$METAL_BUILD/plugins/amoeba/platforms/metal/libOpenMMAmoebaMetal.dylib" \
+        "$METAL_BUILD/plugins/drude/platforms/metal/libOpenMMDrudeMetal.dylib" \
+        "$METAL_BUILD/plugins/rpmd/platforms/metal/libOpenMMRPMDMetal.dylib"; do
+        if [ -f "$lib" ]; then
+            cp "$lib" "$EXTRA_DIR/python/lib/plugins/"
+            echo "    $(basename "$lib")"
         fi
     done
 fi
