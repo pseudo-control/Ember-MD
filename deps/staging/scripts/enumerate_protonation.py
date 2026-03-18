@@ -250,7 +250,7 @@ def generate_3d_conformer(smiles):
         # Generate 3D conformer using ETKDG
         params = AllChem.ETKDGv3()
         params.randomSeed = 42
-        params.maxAttempts = 100
+        params.maxIterations = 100
 
         result = AllChem.EmbedMolecule(mol, params)
         if result != 0:
@@ -264,11 +264,11 @@ def generate_3d_conformer(smiles):
         # Optimize geometry
         try:
             AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
-        except:
+        except Exception:
             # Fall back to UFF if MMFF fails
             try:
                 AllChem.UFFOptimizeMolecule(mol, maxIters=500)
-            except:
+            except Exception:
                 pass  # Use un-optimized geometry
 
         return mol

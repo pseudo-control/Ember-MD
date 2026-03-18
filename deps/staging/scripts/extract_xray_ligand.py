@@ -21,46 +21,7 @@ import sys
 import tempfile
 
 
-def convert_cif_to_pdb(cif_path):
-    """Convert mmCIF (.cif) file to PDB format.
-
-    Prefers BioPython (preserves all HETATM records including ligands).
-    Falls back to PDBFixer (may drop some non-standard residues).
-    """
-    pdb_path = cif_path.rsplit('.', 1)[0] + '_converted.pdb'
-
-    # Prefer BioPython — preserves all residues including HETATM
-    try:
-        from Bio.PDB import MMCIFParser, PDBIO
-        print(f"  Converting CIF to PDB (BioPython): {os.path.basename(cif_path)}", file=sys.stderr)
-        parser = MMCIFParser(QUIET=True)
-        structure = parser.get_structure('struct', cif_path)
-        io = PDBIO()
-        io.set_structure(structure)
-        io.save(pdb_path)
-        print(f"  Converted to: {os.path.basename(pdb_path)}", file=sys.stderr)
-        return pdb_path
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"  WARNING: BioPython CIF conversion failed: {e}, trying PDBFixer", file=sys.stderr)
-
-    # Fallback to PDBFixer
-    try:
-        from pdbfixer import PDBFixer
-        from openmm.app import PDBFile
-    except ImportError:
-        print("ERROR: Neither BioPython nor PDBFixer available for CIF support", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"  Converting CIF to PDB (PDBFixer): {os.path.basename(cif_path)}", file=sys.stderr)
-    fixer = PDBFixer(filename=cif_path)
-
-    with open(pdb_path, 'w') as f:
-        PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
-
-    print(f"  Converted to: {os.path.basename(pdb_path)}", file=sys.stderr)
-    return pdb_path
+from utils import convert_cif_to_pdb
 
 try:
     import rdkit.Chem as Chem

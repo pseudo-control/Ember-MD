@@ -54,13 +54,13 @@ def extract_mol_data(mol, ligand_name, pose_idx, sdf_path):
     # Get SMILES
     try:
         smiles = Chem.MolToSmiles(mol)
-    except:
+    except Exception:
         smiles = ''
 
     # Get QED
     try:
         qed = Descriptors.qed(mol)
-    except:
+    except Exception:
         qed = 0.0
 
     # Get scores from properties
@@ -73,7 +73,7 @@ def extract_mol_data(mol, ligand_name, pose_idx, sdf_path):
             try:
                 cnn_score = float(mol.GetProp(key))
                 break
-            except:
+            except (ValueError, KeyError):
                 pass
 
     for key in ['CNNaffinity', 'CNN_affinity', 'cnn_affinity']:
@@ -81,7 +81,7 @@ def extract_mol_data(mol, ligand_name, pose_idx, sdf_path):
             try:
                 cnn_affinity = float(mol.GetProp(key))
                 break
-            except:
+            except (ValueError, KeyError):
                 pass
 
     for key in ['minimizedAffinity', 'vina_affinity', 'minimized_affinity']:
@@ -89,7 +89,7 @@ def extract_mol_data(mol, ligand_name, pose_idx, sdf_path):
             try:
                 vina_affinity = float(mol.GetProp(key))
                 break
-            except:
+            except (ValueError, KeyError):
                 pass
 
     return {

@@ -1144,7 +1144,7 @@ def main():
         try:
             device_name = platform.getPropertyValue(simulation.context, 'DeviceName')
             print(f'Using CUDA platform: {device_name}', file=sys.stderr)
-        except:
+        except Exception:
             print('Using CUDA platform', file=sys.stderr)
     except Exception as cuda_err:
         print(f'CUDA not available: {cuda_err}', file=sys.stderr)
@@ -1155,7 +1155,7 @@ def main():
             try:
                 device_name = platform.getPropertyValue(simulation.context, 'DeviceName')
                 print(f'Using OpenCL platform (single precision): {device_name}', file=sys.stderr)
-            except:
+            except Exception:
                 print('Using OpenCL platform (single precision)', file=sys.stderr)
         except Exception as ocl_err:
             print(f'OpenCL not available: {ocl_err}', file=sys.stderr)

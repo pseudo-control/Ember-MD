@@ -80,7 +80,7 @@ def generate_conformers_etkdg(mol, max_conformers, rmsd_cutoff, energy_window):
     params.randomSeed = 42
     params.numThreads = 0  # Use all available
     params.pruneRmsThresh = rmsd_cutoff * 0.8  # Initial pruning
-    params.maxAttempts = 100
+    params.maxIterations = 100
 
     # Generate conformers
     try:
@@ -144,7 +144,7 @@ def generate_conformers_etkdg(mol, max_conformers, rmsd_cutoff, energy_window):
                 if rmsd < rmsd_cutoff:
                     is_diverse = False
                     break
-            except:
+            except Exception:
                 pass  # If RMSD fails, assume diverse
 
         if is_diverse:
@@ -169,7 +169,7 @@ def process_ligand(sdf_path, output_dir, max_conformers, rmsd_cutoff, energy_win
     # Get original SMILES for property storage
     try:
         smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
-    except:
+    except Exception:
         smiles = ""
 
     # Get properties from original molecule
@@ -212,7 +212,7 @@ def process_ligand(sdf_path, output_dir, max_conformers, rmsd_cutoff, energy_win
             if key not in ['_Name', 'SMILES', 'parent_molecule', 'conformer_index', 'conformer_energy']:
                 try:
                     conf_mol.SetProp(key, str(value))
-                except:
+                except Exception:
                     pass
 
         # Write to SDF

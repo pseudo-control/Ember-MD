@@ -36,7 +36,7 @@ def generate_3d_conformer(mol, max_attempts=10):
     # Try ETKDG first
     params = AllChem.ETKDGv3()
     params.randomSeed = 42
-    params.maxAttempts = max_attempts
+    params.maxIterations = max_attempts
 
     result = AllChem.EmbedMolecule(mol, params)
 
@@ -49,10 +49,10 @@ def generate_3d_conformer(mol, max_attempts=10):
     # Optimize geometry
     try:
         AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
-    except:
+    except Exception:
         try:
             AllChem.UFFOptimizeMolecule(mol, maxIters=500)
-        except:
+        except Exception:
             pass  # Keep unoptimized conformer
 
     return mol
@@ -65,16 +65,11 @@ def calculate_properties(mol):
 
     try:
         qed_score = QED.qed(mol)
-    except:
+    except Exception:
         pass
 
-    try:
-        from rdkit.Chem import RDConfig
-        sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
-        import sascorer
-        sa_score = sascorer.calculateScore(mol)
-    except:
-        pass
+    from utils import calculate_sa_score
+    sa_score = calculate_sa_score(mol, default=sa_score)
 
     return qed_score, sa_score
 

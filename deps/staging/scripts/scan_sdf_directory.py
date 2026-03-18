@@ -58,27 +58,16 @@ def calculate_properties(sdf_path):
                     if mol is not None:
                         qed_score = QED.qed(mol)
                         # SA score requires sascorer module, fall back to estimate
-                        try:
-                            from rdkit.Chem import RDConfig
-                            sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
-                            import sascorer
-                            sa_score = sascorer.calculateScore(mol)
-                        except:
-                            # Estimate based on molecular complexity
-                            sa_score = 3.0
+                        from utils import calculate_sa_score
+                        sa_score = calculate_sa_score(mol)
                         break
         else:
             suppl = Chem.SDMolSupplier(sdf_path)
             for mol in suppl:
                 if mol is not None:
                     qed_score = QED.qed(mol)
-                    try:
-                        from rdkit.Chem import RDConfig
-                        sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
-                        import sascorer
-                        sa_score = sascorer.calculateScore(mol)
-                    except:
-                        sa_score = 3.0
+                    from utils import calculate_sa_score
+                    sa_score = calculate_sa_score(mol)
                     break
     except Exception as e:
         print(f"Warning: Could not calculate properties for {sdf_path}: {e}", file=sys.stderr)

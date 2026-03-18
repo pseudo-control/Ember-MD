@@ -79,39 +79,10 @@ def main():
     print(f"Selection: '{sele_str}' ({len(sel)} atoms)")
 
     # Apply PBC transformations to handle periodic boundary wrapping
-    try:
-        from MDAnalysis import transformations as trans
-
-        protein = u.select_atoms('protein')
-        lig_sele = 'not protein and not resname WAT HOH TIP3 TIP4 NA CL SOL and not element H'
-        ligand = u.select_atoms(lig_sele)
-        if len(ligand) == 0:
-            ligand = u.select_atoms('(resname LIG UNL UNK MOL) and not element H')
-
-        if len(protein) > 0:
-            if len(ligand) > 0:
-                complex_group = protein + ligand
-            else:
-                complex_group = protein
-            workflow = [
-                trans.unwrap(complex_group),
-                trans.center_in_box(protein, center='mass'),
-                trans.wrap(complex_group, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-            print("Applied PBC unwrapping and centering transformations")
-        elif len(ligand) > 0:
-            workflow = [
-                trans.unwrap(ligand),
-                trans.center_in_box(ligand, center='mass'),
-                trans.wrap(ligand, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-            print("Applied PBC unwrapping and centering transformations (ligand-only)")
-        else:
-            print("Warning: No protein or ligand found for PBC centering", file=sys.stderr)
-    except Exception as e:
-        print(f"Warning: Could not apply PBC transformations: {e}", file=sys.stderr)
+    from utils import select_ligand_atoms, apply_pbc_transforms
+    protein = u.select_atoms('protein')
+    ligand = select_ligand_atoms(u)
+    apply_pbc_transforms(u, protein, ligand)
 
     # Calculate RMSD matrix
     print("Calculating RMSD matrix...")
@@ -261,6 +232,28 @@ def main():
     results_path = os.path.join(args.output_dir, 'clustering_results.json')
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
+
+    # Create pooled multi-model PDB from centroid PDBs
+    centroid_files = sorted(
+        [c for c in clusters if c.get('centroidPdbPath') and os.path.exists(c['centroidPdbPath'])],
+        key=lambda c: c['clusterId']
+    )
+    if centroid_files:
+        # Derive project name from output directory path
+        # Expected: .../simulations/{run}/clustering/ → project is 3 levels up
+        project_name = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(args.output_dir))))
+        pooled_path = os.path.join(args.output_dir, f'{project_name}_all_clusters.pdb')
+        with open(pooled_path, 'w') as pf:
+            for c in centroid_files:
+                pf.write(f"MODEL     {c['clusterId']}\n")
+                with open(c['centroidPdbPath'], 'r') as cf:
+                    for line in cf:
+                        if line.startswith('END'):
+                            continue
+                        pf.write(line)
+                pf.write("ENDMDL\n")
+            pf.write("END\n")
+        print(f"Pooled {len(centroid_files)} centroids into: {pooled_path}")
 
     print(f"\nResults saved to: {results_path}")
     print("Done!")

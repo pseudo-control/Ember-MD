@@ -91,7 +91,7 @@ def main():
     try:
         resnames = [atom.resname for atom in ca_atoms]
         resnums = [atom.resnum for atom in ca_atoms]
-    except:
+    except AttributeError:
         resnames = ['UNK'] * len(ca_atoms)
         resnums = residue_indices.tolist()
 

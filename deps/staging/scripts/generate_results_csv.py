@@ -13,15 +13,8 @@ from rdkit.Chem import Descriptors, Lipinski, QED, AllChem
 
 def calculate_sa_score(mol):
     """Calculate synthetic accessibility score (1-10, lower is better)."""
-    try:
-        from rdkit.Chem import RDConfig
-        import sys
-        sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
-        import sascorer
-        return sascorer.calculateScore(mol)
-    except:
-        # Fallback: return a placeholder
-        return -1
+    from utils import calculate_sa_score as _sa
+    return _sa(mol, default=-1)
 
 
 def check_lipinski(mol):

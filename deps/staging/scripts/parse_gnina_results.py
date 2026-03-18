@@ -133,13 +133,13 @@ def parse_sdf_file(sdf_path):
                 # Get SMILES
                 try:
                     smiles = Chem.MolToSmiles(mol)
-                except:
+                except Exception:
                     smiles = ''
 
                 # Calculate QED if not present
                 try:
                     qed = Descriptors.qed(mol)
-                except:
+                except Exception:
                     qed = 0.5
 
                 # Determine parent molecule, protonation variant, and conformer index
@@ -173,13 +173,13 @@ def parse_sdf_file(sdf_path):
             # Get SMILES
             try:
                 smiles = Chem.MolToSmiles(mol)
-            except:
+            except Exception:
                 smiles = ''
 
             # Calculate QED if not present
             try:
                 qed = Descriptors.qed(mol)
-            except:
+            except Exception:
                 qed = 0.5
 
             # Determine parent molecule, protonation variant, and conformer index

@@ -38,37 +38,10 @@ def main():
         sys.exit(1)
 
     # Apply PBC transformations to center protein in view
-    try:
-        from MDAnalysis import transformations as trans
-
-        protein = u.select_atoms('protein')
-        # Try to get ligand for centering together
-        lig_sele = 'not protein and not resname WAT HOH TIP3 TIP4 NA CL SOL K MG and not element H'
-        ligand = u.select_atoms(lig_sele)
-        if len(ligand) == 0:
-            ligand = u.select_atoms('(resname LIG UNL UNK MOL) and not element H')
-
-        if len(protein) > 0:
-            if len(ligand) > 0:
-                complex_group = protein + ligand
-            else:
-                complex_group = protein
-            workflow = [
-                trans.unwrap(complex_group),
-                trans.center_in_box(protein, center='mass'),
-                trans.wrap(complex_group, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-        elif len(ligand) > 0:
-            workflow = [
-                trans.unwrap(ligand),
-                trans.center_in_box(ligand, center='mass'),
-                trans.wrap(ligand, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-    except Exception as e:
-        # If PBC transforms fail, continue without them
-        print(f"Warning: Could not apply centering: {e}", file=sys.stderr)
+    from utils import select_ligand_atoms, apply_pbc_transforms
+    protein = u.select_atoms('protein')
+    ligand = select_ligand_atoms(u)
+    apply_pbc_transforms(u, protein, ligand)
 
     # Go to specified frame
     u.trajectory[args.frame]

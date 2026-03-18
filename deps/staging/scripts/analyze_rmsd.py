@@ -61,48 +61,10 @@ def main():
         backbone = u.select_atoms('protein')
     print(f"Backbone atoms: {len(backbone)}")
 
-    # Select ligand early
-    if args.ligand_selection:
-        ligand_sele = args.ligand_selection
-    else:
-        # Try common ligand selections
-        ligand_sele = 'not protein and not resname WAT HOH TIP3 TIP4 NA CL SOL and not element H'
-
-    ligand = u.select_atoms(ligand_sele)
-    if len(ligand) == 0:
-        # Try resname-based selection
-        ligand = u.select_atoms('(resname LIG UNL UNK MOL) and not element H')
-
-    # Apply PBC transformations to handle periodic boundary wrapping
-    # This is critical for correct RMSD calculation, especially for ligands
-    try:
-        from MDAnalysis import transformations as trans
-
-        if len(protein) > 0:
-            # Protein or protein-ligand system
-            if len(ligand) > 0:
-                complex_group = protein + ligand
-            else:
-                complex_group = protein
-
-            workflow = [
-                trans.unwrap(complex_group),
-                trans.center_in_box(protein, center='mass'),
-                trans.wrap(complex_group, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-        elif len(ligand) > 0:
-            # Ligand-only system
-            workflow = [
-                trans.unwrap(ligand),
-                trans.center_in_box(ligand, center='mass'),
-                trans.wrap(ligand, compound='fragments'),
-            ]
-            u.trajectory.add_transformations(*workflow)
-        print("Applied PBC unwrapping and centering transformations")
-    except Exception as e:
-        print(f"Warning: Could not apply PBC transformations: {e}", file=sys.stderr)
-        print("RMSD values may be affected by periodic boundary jumps", file=sys.stderr)
+    # Select ligand and apply PBC transforms
+    from utils import select_ligand_atoms, apply_pbc_transforms
+    ligand = select_ligand_atoms(u, args.ligand_selection)
+    apply_pbc_transforms(u, protein, ligand)
 
     # Use MDAnalysis RMSD analysis class which properly handles alignment
     # This performs superposition (translation + rotation) to reference frame

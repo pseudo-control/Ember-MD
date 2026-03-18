@@ -15,48 +15,7 @@ import tempfile
 from collections import defaultdict
 
 
-def convert_cif_to_pdb(cif_path):
-    """Convert mmCIF (.cif) file to PDB format.
-
-    Uses BioPython's MMCIF parser which preserves HETATM records (ligands, waters, ions).
-    Falls back to PDBFixer if BioPython isn't available (PDBFixer may drop ligands).
-
-    Returns the path to the converted PDB file.
-    """
-    pdb_path = cif_path.rsplit('.', 1)[0] + '_converted.pdb'
-
-    # Prefer BioPython — it preserves all residues including HETATM
-    try:
-        from Bio.PDB import MMCIFParser, PDBIO
-        print(f"  Converting CIF to PDB (BioPython): {os.path.basename(cif_path)}", file=sys.stderr)
-        parser = MMCIFParser(QUIET=True)
-        structure = parser.get_structure('struct', cif_path)
-        io = PDBIO()
-        io.set_structure(structure)
-        io.save(pdb_path)
-        print(f"  Converted to: {os.path.basename(pdb_path)}", file=sys.stderr)
-        return pdb_path
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"  WARNING: BioPython CIF conversion failed: {e}, trying PDBFixer", file=sys.stderr)
-
-    # Fallback to PDBFixer (may drop ligands)
-    try:
-        from pdbfixer import PDBFixer
-        from openmm.app import PDBFile
-    except ImportError:
-        print("ERROR: Neither BioPython nor PDBFixer available for CIF support", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"  Converting CIF to PDB (PDBFixer): {os.path.basename(cif_path)}", file=sys.stderr)
-    fixer = PDBFixer(filename=cif_path)
-
-    with open(pdb_path, 'w') as f:
-        PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
-
-    print(f"  Converted to: {os.path.basename(pdb_path)}", file=sys.stderr)
-    return pdb_path
+from utils import convert_cif_to_pdb
 
 # Common non-ligand HETATM residues to exclude
 EXCLUDE_RESIDUES = {
@@ -496,7 +455,7 @@ def prepare_receptor(pdb_path, ligand_id, output_path, water_distance=0.0, add_h
 def main():
     parser = argparse.ArgumentParser(description='Detect and extract ligands from PDB')
     parser.add_argument('--pdb', required=True, help='Input PDB file')
-    parser.add_argument('--mode', choices=['detect', 'extract', 'prepare_receptor'],
+    parser.add_argument('--mode', choices=['detect', 'extract', 'prepare_receptor', 'add_hydrogens'],
                        default='detect', help='Operation mode')
     parser.add_argument('--ligand_id', help='Ligand ID for extract/prepare modes')
     parser.add_argument('--output', help='Output file path')
@@ -558,6 +517,41 @@ def main():
             print(json.dumps({'success': True, 'output': args.output}))
         else:
             sys.exit(1)
+
+    elif args.mode == 'add_hydrogens':
+        if not args.output:
+            print("ERROR: --output required for add_hydrogens mode", file=sys.stderr)
+            sys.exit(1)
+        try:
+            from pdbfixer import PDBFixer
+            from openmm.app import PDBFile
+
+            print(f"  Adding hydrogens (pH 7.4) via PDBFixer...", file=sys.stderr)
+            fixer = PDBFixer(filename=args.pdb)
+            fixer.findMissingResidues()
+            fixer.findMissingAtoms()
+            fixer.addMissingAtoms()
+            fixer.addMissingHydrogens(7.4)
+
+            os.makedirs(os.path.dirname(args.output), exist_ok=True)
+            with open(args.output, 'w') as f:
+                PDBFile.writeFile(fixer.topology, fixer.positions, f)
+
+            print(f"  Prepared structure saved to {args.output}", file=sys.stderr)
+            print(json.dumps({'success': True, 'output': args.output}))
+        except ImportError:
+            print("WARNING: PDBFixer not available, copying original file", file=sys.stderr)
+            import shutil
+            os.makedirs(os.path.dirname(args.output), exist_ok=True)
+            shutil.copy2(args.pdb, args.output)
+            print(json.dumps({'success': True, 'output': args.output, 'no_hydrogens': True}))
+        except Exception as e:
+            print(f"ERROR: Hydrogen addition failed: {e}", file=sys.stderr)
+            # Fall back to raw file
+            import shutil
+            os.makedirs(os.path.dirname(args.output), exist_ok=True)
+            shutil.copy2(args.pdb, args.output)
+            print(json.dumps({'success': True, 'output': args.output, 'no_hydrogens': True}))
 
 
 if __name__ == '__main__':

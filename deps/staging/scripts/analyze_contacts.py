@@ -267,7 +267,7 @@ def main():
                     donor_hydrogens = u.select_atoms(
                         f'element H and (around 1.3 index {donor.index})'
                     )
-                except:
+                except Exception:
                     donor_hydrogens = mda.AtomGroup([], u)
 
                 if len(donor_hydrogens) > 0:
@@ -308,7 +308,7 @@ def main():
                     donor_hydrogens = u.select_atoms(
                         f'element H and (around 1.3 index {donor.index})'
                     )
-                except:
+                except Exception:
                     donor_hydrogens = mda.AtomGroup([], u)
 
                 if len(donor_hydrogens) > 0:
