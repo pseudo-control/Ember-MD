@@ -1,5 +1,6 @@
 import { Component, Show, createSignal, For } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
+import type { AnalysisResult } from '../../../shared/types/ipc';
 
 interface AnalysisPanelProps {
   onOpenClustering: () => void;
@@ -13,9 +14,9 @@ const AnalysisPanel: Component<AnalysisPanelProps> = (props) => {
   const [analysisType, setAnalysisType] = createSignal<string | null>(null);
   const [logs, setLogs] = createSignal<string>('');
   const [error, setError] = createSignal<string | null>(null);
-  const [rmsdResult, setRmsdResult] = createSignal<any>(null);
-  const [rmsfResult, setRmsfResult] = createSignal<any>(null);
-  const [hbondsResult, setHbondsResult] = createSignal<any>(null);
+  const [rmsdResult, setRmsdResult] = createSignal<AnalysisResult | null>(null);
+  const [rmsfResult, setRmsfResult] = createSignal<AnalysisResult | null>(null);
+  const [hbondsResult, setHbondsResult] = createSignal<AnalysisResult | null>(null);
   const [reportPath, setReportPath] = createSignal<string | null>(null);
 
   const pdbPath = () => state().viewer.pdbPath;
@@ -38,7 +39,10 @@ const AnalysisPanel: Component<AnalysisPanelProps> = (props) => {
     setAnalysisType(type);
 
     const removeListener = api.onMdOutput((data) => {
-      setLogs((prev) => prev + data.data);
+      setLogs((prev) => {
+        const combined = prev + data.data;
+        return combined.length > 50000 ? combined.slice(-50000) : combined;
+      });
     });
 
     try {
@@ -78,7 +82,10 @@ const AnalysisPanel: Component<AnalysisPanelProps> = (props) => {
     setAnalysisType('report');
 
     const removeListener = api.onMdOutput((data) => {
-      setLogs((prev) => prev + data.data);
+      setLogs((prev) => {
+        const combined = prev + data.data;
+        return combined.length > 50000 ? combined.slice(-50000) : combined;
+      });
     });
 
     try {
@@ -89,9 +96,6 @@ const AnalysisPanel: Component<AnalysisPanelProps> = (props) => {
         topologyPath: pdbPath()!,
         trajectoryPath: trajectoryPath()!,
         outputDir,
-        includeRmsd: true,
-        includeRmsf: true,
-        includeHbonds: true,
       });
 
       if (result.ok) {
@@ -112,7 +116,7 @@ const AnalysisPanel: Component<AnalysisPanelProps> = (props) => {
   const openReport = async () => {
     const path = reportPath();
     if (path) {
-      await api.openFolder(path.split('/').slice(0, -1).join('/'));
+      await api.openFolder(path); // macOS 'open' works for files too
     }
   };
 

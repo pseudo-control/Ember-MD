@@ -1,15 +1,21 @@
 import { Component, JSX, Show, Switch, Match, createSignal } from 'solid-js';
-import { workflowStore, WorkflowMode, MDStep } from '../../stores/workflow';
-import { useElectronApi } from '../../hooks/useElectronApi';
+import { workflowStore, WorkflowMode, MDStep, DockStep } from '../../stores/workflow';
 import HelpModal from '../HelpModal';
 import AboutModal from '../AboutModal';
 import path from 'path';
 
 interface StepInfo {
-  id: MDStep;
+  id: string;
   label: string;
   icon: string;
 }
+
+const dockSteps: StepInfo[] = [
+  { id: 'dock-load', label: 'Load', icon: '1' },
+  { id: 'dock-configure', label: 'Configure', icon: '2' },
+  { id: 'dock-progress', label: 'Dock', icon: '3' },
+  { id: 'dock-results', label: 'Results', icon: '4' },
+];
 
 const mdSteps: StepInfo[] = [
   { id: 'md-load', label: 'Load', icon: '1' },
@@ -18,6 +24,7 @@ const mdSteps: StepInfo[] = [
   { id: 'md-results', label: 'Results', icon: '4' },
 ];
 
+const dockStepOrder = dockSteps.map((s) => s.id);
 const mdStepOrder = mdSteps.map((s) => s.id);
 
 interface WizardLayoutProps {
@@ -29,7 +36,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const [showHelp, setShowHelp] = createSignal(false);
   const [showAbout, setShowAbout] = createSignal(false);
   const [isEditingJobName, setIsEditingJobName] = createSignal(false);
-  const api = useElectronApi();
+  const api = window.electronAPI;
 
   const handleSelectWorkingDir = async () => {
     const folderPath = await api.selectOutputFolder();
@@ -40,16 +47,23 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
 
   const getDisplayPath = () => {
     const dir = state().customOutputDir;
-    if (!dir) return 'Desktop (default)';
+    if (!dir) return '~/Ember';
     const basename = path.basename(dir);
     return basename.length > 20 ? basename.slice(0, 17) + '...' : basename;
   };
 
   const getStepStatus = (stepId: string): 'done' | 'active' | 'pending' => {
+    if (state().mode === 'dock') {
+      const currentStep = state().dockStep;
+      const currentIndex = dockStepOrder.indexOf(currentStep);
+      const stepIndex = dockStepOrder.indexOf(stepId);
+      if (stepIndex < currentIndex) return 'done';
+      if (stepIndex === currentIndex) return 'active';
+      return 'pending';
+    }
     const currentStep = state().mdStep;
     const currentIndex = mdStepOrder.indexOf(currentStep);
-    const stepIndex = mdStepOrder.indexOf(stepId as MDStep);
-
+    const stepIndex = mdStepOrder.indexOf(stepId);
     if (stepIndex < currentIndex) return 'done';
     if (stepIndex === currentIndex) return 'active';
     return 'pending';
@@ -74,6 +88,13 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
         <div class="flex items-center gap-3">
           {/* Mode selector segmented control */}
           <div class="tabs tabs-boxed bg-base-300 p-0.5">
+            <button
+              class={`tab tab-sm ${state().mode === 'dock' ? 'tab-active' : ''}`}
+              onClick={() => handleModeSwitch('dock')}
+              disabled={!canSwitchMode()}
+            >
+              Dock
+            </button>
             <button
               class={`tab tab-sm ${state().mode === 'md' ? 'tab-active' : ''}`}
               onClick={() => handleModeSwitch('md')}
@@ -111,8 +132,8 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
           </button>
         </div>
 
-        {/* Working Directory + Job Name */}
-        <Show when={state().mode !== 'viewer'}>
+        {/* Working Directory + Job Name — hidden on home/viewer */}
+        <Show when={state().mode === 'dock' || (state().mode === 'md' && state().mdStep !== 'md-home')}>
           <div class="flex items-center gap-4">
             {/* Working Directory */}
             <div class="flex flex-col items-center">
@@ -120,7 +141,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
               <button
                 class="btn btn-ghost btn-xs gap-1 h-auto py-1"
                 onClick={handleSelectWorkingDir}
-                title={state().customOutputDir || 'Desktop (default)'}
+                title={state().customOutputDir || '~/Ember'}
                 disabled={state().isRunning}
               >
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -169,7 +190,27 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
           </div>
         </Show>
 
-        <Show when={state().mode !== 'viewer'}>
+        {/* Step indicators — dock mode */}
+        <Show when={state().mode === 'dock'}>
+          <ul class="steps steps-horizontal">
+            {dockSteps.map((step) => {
+              const status = getStepStatus(step.id);
+              return (
+                <li
+                  class={`step step-sm ${status === 'done' || status === 'active' ? 'step-primary' : ''}`}
+                  data-content={status === 'done' ? '✓' : step.icon}
+                >
+                  <span class={`text-xs ${status === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
+                    {step.label}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </Show>
+
+        {/* Step indicators — MD mode (not on home) */}
+        <Show when={state().mode === 'md' && state().mdStep !== 'md-home'}>
           <ul class="steps steps-horizontal">
             {mdSteps.map((step) => {
               const status = getStepStatus(step.id);
@@ -197,7 +238,6 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
       <HelpModal
         isOpen={showHelp()}
         onClose={() => setShowHelp(false)}
-        initialTab="md"
       />
       {/* About Modal */}
       <AboutModal

@@ -42,7 +42,10 @@ const ClusteringModal: Component<ClusteringModalProps> = (props) => {
 
     // Set up log listener
     const removeListener = api.onMdOutput((data) => {
-      setLogs((prev) => prev + data.data);
+      setLogs((prev) => {
+        const combined = prev + data.data;
+        return combined.length > 50000 ? combined.slice(-50000) : combined;
+      });
     });
 
     try {

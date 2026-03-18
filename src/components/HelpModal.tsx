@@ -1,9 +1,8 @@
-import { Component, createSignal, createEffect, Show } from 'solid-js';
+import { Component, Show } from 'solid-js';
 
 interface HelpModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialTab?: string;
 }
 
 const HelpModal: Component<HelpModalProps> = (props) => {

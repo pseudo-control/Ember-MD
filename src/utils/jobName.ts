@@ -2,6 +2,8 @@
  * Utilities for generating and formatting job names
  */
 
+import { MDForceFieldPreset, MD_PRESET_PARAMS } from '../../shared/types/md';
+
 // Word lists for random job name generation (chemistry/science themed)
 const ADJECTIVES = [
   'amber', 'azure', 'bold', 'bright', 'calm', 'clear', 'cosmic', 'crisp',
@@ -56,7 +58,7 @@ export function generateJobName(): string {
 /**
  * Job type identifiers for folder naming
  */
-export type JobType = 'MD';
+export type JobType = 'MD' | 'Dock';
 
 /**
  * Build output folder name for MD simulation jobs
@@ -65,21 +67,36 @@ export type JobType = 'MD';
 export function buildMdFolderName(
   jobName: string,
   params: {
-    forceFieldPreset: 'fast' | 'accurate';
+    forceFieldPreset: MDForceFieldPreset;
     temperatureK?: number;
     productionNs: number;
   }
 ): string {
-  const ff = params.forceFieldPreset === 'fast' ? 'ff14sb-TIP3P' : 'ff19sb-OPC';
+  const ff = MD_PRESET_PARAMS[params.forceFieldPreset].folderSuffix;
   const temp = params.temperatureK || 300;
   const ns = params.productionNs;
   return `${jobName}_${ff}_MD-${temp}K-${ns}ns`;
 }
 
 /**
- * Sanitize job name for filesystem use
+ * Build output folder name for docking runs
+ * Format: Vina_{ligand} or Vina_{ligand}_{n}lig
+ * Examples: Vina_VU9, Vina_ATP_5lig
  */
-export function sanitizeJobName(name: string): string {
+export function buildDockFolderName(params: {
+  referenceLigandId?: string | null;
+  numLigands?: number;
+}): string {
+  const resname = params.referenceLigandId?.split('_')[0] || 'dock';
+  const ligCount = params.numLigands && params.numLigands > 1
+    ? `_${params.numLigands}lig` : '';
+  return `Vina_${resname}${ligCount}`;
+}
+
+/**
+ * Sanitize a string for filesystem use (lowercase, alphanumeric + hyphens only)
+ */
+function sanitizeForFilesystem(name: string, maxLength: number): string {
   return name
     .toLowerCase()
     .trim()
@@ -87,5 +104,45 @@ export function sanitizeJobName(name: string): string {
     .replace(/[^a-z0-9-]/g, '')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 50);
+    .slice(0, maxLength);
+}
+
+export function sanitizeJobName(name: string): string {
+  return sanitizeForFilesystem(name, 50);
+}
+
+export function sanitizeCompoundId(name: string): string {
+  return sanitizeForFilesystem(name, 40);
+}
+
+/**
+ * Estimate AM1-BCC charge computation time from ligand atom count
+ */
+export function estimateChargeTime(atoms: number): string {
+  if (atoms <= 20) return '< 10s';
+  if (atoms <= 30) return '~10-30s';
+  if (atoms <= 40) return '~30s-2min';
+  if (atoms <= 50) return '~1-4min';
+  if (atoms <= 65) return '~2-6min';
+  return '~5min+';
+}
+
+/**
+ * Build run folder name for project-based directory structure
+ * Format: {ff}_{compoundId}_MD-{temp}K-{duration}ns or {ff}_MD-{temp}K-{duration}ns
+ */
+export function buildMdRunFolderName(params: {
+  forceFieldPreset: MDForceFieldPreset;
+  temperatureK?: number;
+  productionNs: number;
+  compoundId?: string;
+}): string {
+  const ff = MD_PRESET_PARAMS[params.forceFieldPreset].folderSuffix;
+  const temp = params.temperatureK || 300;
+  const ns = params.productionNs;
+  const compound = params.compoundId?.trim();
+  if (compound) {
+    return `${ff}_${compound}_MD-${temp}K-${ns}ns`;
+  }
+  return `${ff}_MD-${temp}K-${ns}ns`;
 }
