@@ -26,7 +26,8 @@ const DockStepResults: Component = () => {
 
   const receptorPdb = () => {
     const dir = outputDir();
-    return dir ? path.join(dir, 'receptor_prepared.pdb') : '';
+    const jobName = state().jobName.trim();
+    return dir ? path.join(dir, `${jobName}_receptor_prepared.pdb`) : '';
   };
 
   const handleSort = (field: SortField) => {

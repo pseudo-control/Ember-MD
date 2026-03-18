@@ -992,11 +992,11 @@ const ViewerMode: Component = () => {
 
       setSurfacePropsLoading(true);
       try {
-        // Store in a surface_props subdir next to the PDB, or in the project dir
+        // Store in surfaces/ subdir in the project dir, or next to the PDB
         const pdbDir = pdbPath.substring(0, pdbPath.lastIndexOf('/'));
         const outputDir = state().customOutputDir
-          ? `${state().customOutputDir}/${state().jobName}/surface_props`
-          : `${pdbDir}/surface_props`;
+          ? `${state().customOutputDir}/${state().jobName}/surfaces`
+          : `${pdbDir}/surfaces`;
 
         const result = await api.computeSurfaceProps(pdbPath, outputDir);
         if (result.ok) {
@@ -1667,9 +1667,13 @@ const ViewerMode: Component = () => {
   };
 
   const tryAutoLoadBindingSiteMap = async (pdbPath: string) => {
-    // Check if binding_site_map/ exists next to the PDB
+    // Check if binding_site_map/ exists in surfaces/ of the project, or next to the PDB
     const pdbDir = pdbPath.replace(/\/[^/]+$/, '');
-    const mapDir = `${pdbDir}/binding_site_map`;
+    // Walk up to project root (handles simulations/{run}/ or docking/{run}/ nesting)
+    const projectDir = pdbDir.replace(/\/(simulations|docking)\/[^/]+$/, '');
+    const mapDir = projectDir !== pdbDir
+      ? `${projectDir}/surfaces/binding_site_map`
+      : `${pdbDir}/binding_site_map`;
     const resultsPath = `${mapDir}/binding_site_results.json`;
 
     try {
@@ -1712,9 +1716,12 @@ const ViewerMode: Component = () => {
         }
       }
 
-      // Output dir: next to the PDB
+      // Output dir: surfaces/binding_site_map in the project, or next to the PDB
       const pdbDir = pdbPath.replace(/\/[^/]+$/, '');
-      const outputDir = `${pdbDir}/binding_site_map`;
+      const projectDir = pdbDir.replace(/\/(simulations|docking)\/[^/]+$/, '');
+      const outputDir = projectDir !== pdbDir
+        ? `${projectDir}/surfaces/binding_site_map`
+        : `${pdbDir}/binding_site_map`;
 
       const result = await api.mapBindingSite({
         pdbPath: targetPdb,
