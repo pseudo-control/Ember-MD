@@ -206,7 +206,7 @@ def build_ligand_only_system(ligand_sdf, output_dir, force_field_preset='ff19sb-
     print('PROGRESS:building:0', flush=True)
     t_start = time.time()
 
-    job_name = os.path.basename(output_dir.rstrip('/'))
+    job_name = args.project_name if args.project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load ligand
     print(f'[{time.time()-t_start:.1f}s] Loading ligand SDF...', file=sys.stderr)
@@ -330,7 +330,7 @@ def build_system(receptor_pdb, ligand_sdf, output_dir, force_field_preset='ff19s
     receptor_pdb = ensure_pdb_format(receptor_pdb)
 
     # Extract job name from output directory for self-contained filenames
-    job_name = os.path.basename(output_dir.rstrip('/'))
+    job_name = args.project_name if args.project_name else os.path.basename(output_dir.rstrip('/'))
 
     # 1. Load receptor PDB and capture ligand coordinates BEFORE stripping
     print('Loading and fixing receptor PDB...', file=sys.stderr)
@@ -1074,6 +1074,8 @@ def main():
     parser.add_argument('--padding', type=float, default=1.2, help='Box padding in nm (default: 1.2)')
     parser.add_argument('--restrain_ligand_ns', type=float, default=0,
                         help='Restrain ligand heavy atoms for first N ns of production (0=off, IFD-MD mode)')
+    parser.add_argument('--project_name', default=None,
+                        help='Project name prefix for output files (default: use folder name)')
     args = parser.parse_args()
 
     # Map legacy preset names

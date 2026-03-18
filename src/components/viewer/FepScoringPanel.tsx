@@ -207,7 +207,11 @@ const FepScoringPanel: Component<FepScoringPanelProps> = (props) => {
     setProgressText('Starting FEP calculation...');
 
     const trajDir = trajPath.split('/').slice(0, -1).join('/');
-    const outputDir = `${trajDir}/fep_scoring`;
+    // Output to fep/ in the project root (walk up from simulations/{run}/)
+    const projectDir = trajDir.replace(/\/(simulations)\/[^/]+$/, '');
+    const outputDir = projectDir !== trajDir
+      ? `${projectDir}/fep`
+      : `${trajDir}/fep_scoring`;
 
     const removeListener = api.onMdOutput((data) => {
       const text = data.data;

@@ -1557,13 +1557,15 @@ ipcMain.handle(
     fs.mkdirSync(outputDir, { recursive: true });
 
     // Copy receptor and reference ligand to output directory for downstream use (MD)
-    const receptorOutputPath = path.join(outputDir, 'receptor_prepared.pdb');
-    const referenceOutputPath = path.join(outputDir, 'reference_ligand.sdf');
+    // Derive project name from output path: .../docking/{runFolder} → project is grandparent
+    const projectName = path.basename(path.resolve(outputDir, '../..'));
+    const receptorOutputPath = path.join(outputDir, `${projectName}_receptor_prepared.pdb`);
+    const referenceOutputPath = path.join(outputDir, `${projectName}_reference_ligand.sdf`);
     fs.copyFileSync(receptorPdb, receptorOutputPath);
     fs.copyFileSync(referenceLigand, referenceOutputPath);
 
     // Write ligands list to JSON file (for reference)
-    const ligandsJsonPath = path.join(outputDir, 'ligands.json');
+    const ligandsJsonPath = path.join(outputDir, `${projectName}_ligands.json`);
     fs.writeFileSync(ligandsJsonPath, JSON.stringify(ligandSdfPaths, null, 2));
 
     // Vina is CPU-only — concurrency = CPU count (each process uses 1 CPU)
@@ -2823,10 +2825,15 @@ ipcMain.handle(
         });
       }
 
-      // Look for receptor_prepared.pdb in multiple locations
-      // 1. In the docking output directory itself
-      // 2. In parent directories (legacy: receptor was prepared in FragGen job dir)
+      // Look for *_receptor_prepared.pdb (new layout) or receptor_prepared.pdb (legacy)
+      // Search in docking output dir, then parent dirs
+      const files0 = fs.readdirSync(dirPath);
+      const prefixedReceptor = files0.find((f) => f.endsWith('_receptor_prepared.pdb'));
+
       const receptorCandidates = [
+        // New layout: {projectName}_receptor_prepared.pdb in docking dir
+        ...(prefixedReceptor ? [path.join(dirPath, prefixedReceptor)] : []),
+        // Legacy: receptor_prepared.pdb in docking dir or parent dirs
         path.join(dirPath, 'receptor_prepared.pdb'),
         path.join(path.dirname(dirPath), 'receptor_prepared.pdb'),
         path.join(path.dirname(path.dirname(dirPath)), 'receptor_prepared.pdb'),
@@ -3118,6 +3125,9 @@ ipcMain.handle(
 
       fs.mkdirSync(outputDir, { recursive: true });
 
+      // Derive project name from output path: .../simulations/{runFolder}
+      const mdProjectName = path.basename(path.resolve(outputDir, '../..'));
+
       const args = [
         scriptPath,
         '--ligand', ligandSdf,
@@ -3127,6 +3137,7 @@ ipcMain.handle(
         '--temperature', String(config.temperatureK || 300),
         '--salt_concentration', String(config.saltConcentrationM || 0.15),
         '--padding', String(config.paddingNm || 1.2),
+        '--project_name', mdProjectName,
       ];
 
       if (config.restrainLigandNs && config.restrainLigandNs > 0) {
@@ -3247,6 +3258,23 @@ ipcMain.handle(IpcChannels.SCAN_PROJECTS, async (): Promise<any[]> => {
     const entries = fs.readdirSync(emberDir, { withFileTypes: true });
     const legacyGroups: Record<string, any[]> = {};
 
+    // Helper: check a directory for simulation output files and return run info
+    const scanRunDir = (runPath: string, folderName: string): any | null => {
+      try {
+        const runFiles = fs.readdirSync(runPath);
+        const hasSimOutput = runFiles.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log');
+        if (!hasSimOutput) return null;
+        const stat = fs.statSync(runPath);
+        return {
+          folderName,
+          path: runPath,
+          lastModified: stat.mtimeMs,
+          hasTrajectory: runFiles.some((f: string) => f.endsWith('_trajectory.dcd')),
+          hasFinalPdb: runFiles.some((f: string) => f.endsWith('_final.pdb')),
+        };
+      } catch { return null; }
+    };
+
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
       const entryPath = path.join(emberDir, entry.name);
@@ -3257,19 +3285,29 @@ ipcMain.handle(IpcChannels.SCAN_PROJECTS, async (): Promise<any[]> => {
 
       for (const sub of subEntries) {
         if (!sub.isDirectory() || sub.name.startsWith('.')) continue;
-        const runPath = path.join(entryPath, sub.name);
-        const runFiles = fs.readdirSync(runPath);
-        const hasSimOutput = runFiles.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log');
-        if (hasSimOutput) {
+
+        // New layout: runs live under simulations/ and docking/ subdirectories
+        if (sub.name === 'simulations' || sub.name === 'docking') {
+          const typeDir = path.join(entryPath, sub.name);
+          try {
+            const typeEntries = fs.readdirSync(typeDir, { withFileTypes: true });
+            for (const runEntry of typeEntries) {
+              if (!runEntry.isDirectory() || runEntry.name.startsWith('.')) continue;
+              const runInfo = scanRunDir(path.join(typeDir, runEntry.name), `${sub.name}/${runEntry.name}`);
+              if (runInfo) {
+                isProjectDir = true;
+                runs.push(runInfo);
+              }
+            }
+          } catch { /* skip unreadable */ }
+          continue;
+        }
+
+        // Legacy layout: runs directly under project dir
+        const runInfo = scanRunDir(path.join(entryPath, sub.name), sub.name);
+        if (runInfo) {
           isProjectDir = true;
-          const stat = fs.statSync(runPath);
-          runs.push({
-            folderName: sub.name,
-            path: runPath,
-            lastModified: stat.mtimeMs,
-            hasTrajectory: runFiles.some((f: string) => f.endsWith('_trajectory.dcd')),
-            hasFinalPdb: runFiles.some((f: string) => f.endsWith('_final.pdb')),
-          });
+          runs.push(runInfo);
         }
       }
 
