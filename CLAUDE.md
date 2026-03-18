@@ -1,6 +1,6 @@
 # Ember
 
-Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Two modes: **Simulate** (AMBER MD) and **Viewer** (NGL molecular viewer with trajectory playback).
+Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Four modes: **View** (NGL 3D viewer), **Dock** (AutoDock Vina), **Simulate** (OpenMM AMBER MD), **Score** (ABFE FEP binding free energy).
 
 **Repo**: `pseudo-control/Ember-MD` (private, GitHub)
 **Metal Backend Repo**: `pseudo-control/Ember-Metal` (private, GitHub) — native Metal GPU backend for OpenMM, forked from Turner's openmm-metal. Branch `codex/nonbonded-buffer-bindings` is the active development branch.
@@ -41,30 +41,69 @@ CUDA → OpenCL (cl2Metal) → Metal (native MSL) → CPU
   preload.ts            # Context bridge (inlined channel names)
 
 /src/
-  App.tsx               # Root + step routing (Simulate & Viewer modes)
-  stores/workflow.ts    # SolidJS signals (WorkflowState, MDState, ViewerState)
+  App.tsx               # Root + step routing (View, Dock, Simulate, Score modes)
+  stores/workflow.ts    # SolidJS signals (WorkflowState, MDState, DockState, ViewerState)
   utils/jobName.ts      # Job name generation + folder naming
-  components/layout/WizardLayout.tsx  # Mode tabs + step indicators + header
+  utils/projectPaths.ts # Centralized project directory layout (raw/, prepared/, ligands/, etc.)
+  components/layout/WizardLayout.tsx  # Mode tabs + step indicators + project picker
   components/AboutModal.tsx           # License info (MIT + dependencies)
   components/HelpModal.tsx            # Quick reference
   components/steps/
+    MDStepHome.tsx                    # Project selection/creation
     MDStep{Load,Configure,Progress,Results}.tsx  # MD simulation steps
+    DockStep{Load,Configure,Progress,Results}.tsx # Docking workflow steps
   components/viewer/
     ViewerMode.tsx            # NGL molecular viewer
     TrajectoryControls.tsx    # Playback UI
     ClusteringModal.tsx       # Trajectory clustering
     AnalysisPanel.tsx         # MD analysis tools
+    BindingSiteMapPanel.tsx   # Interaction grids (hydrophobic, H-bond donor/acceptor)
+    FepScoringPanel.tsx       # ABFE FEP scoring with internal step progression
 
 /shared/types/
   md.ts                 # MDConfig, MDStage, MDSystemInfo, MDBenchmarkResult
+  dock.ts               # DockConfig, DockStep, DockResult types
   ipc.ts                # IPC channels, trajectory types, clustering types
   electron-api.ts       # window.electronAPI typing
+  errors.ts             # Shared error types
   gnina.ts              # Legacy types (kept for backend compatibility)
 
 /deps/staging/scripts/  # Python scripts called by Electron via subprocess
-  run_md_simulation.py  # Full MD pipeline (build, equilibrate, produce)
-  extract_xray_ligand.py # Ligand extraction with OpenBabel bond orders
-  cluster_trajectory.py, analyze_*.py, generate_md_report.py  # Analysis
+  # Simulation
+  run_md_simulation.py       # Full MD pipeline (build, equilibrate, produce)
+  run_abfe.py                # ABFE FEP binding free energy calculation
+  # Docking
+  run_vina_docking.py        # AutoDock Vina docking pipeline
+  run_gnina_docking.py       # GNINA docking (legacy)
+  # Structure prep
+  detect_pdb_ligands.py      # HETATM ligand detection, receptor preparation
+  extract_xray_ligand.py     # Ligand extraction with OpenBabel bond orders
+  prep_pdb_gui.py            # PDB cleanup for GUI
+  export_complex_pdb.py      # Complex PDB export
+  # Ligand handling
+  enumerate_protonation.py   # Dimorphite-DL protonation state enumeration
+  generate_conformers.py     # ETKDG conformer generation + diversity filtering
+  smiles_to_3d.py            # SMILES CSV → 3D SDF with ETKDG
+  smiles_to_sdf.py           # Single SMILES → SDF
+  scan_sdf_directory.py      # Batch SDF scan with property extraction
+  generate_2d_thumbnail.py   # 2D structure images
+  # Analysis
+  analyze_rmsd.py, analyze_rmsf.py, analyze_hbonds.py  # MD trajectory analysis
+  analyze_contacts.py, analyze_torsions.py, analyze_sse.py
+  analyze_ligand_props.py    # Ligand property calculations
+  # Trajectory
+  cluster_trajectory.py      # K-means/DBSCAN/hierarchical clustering
+  export_frame.py            # Single frame extraction from DCD
+  align_clusters.py          # Cluster centroid alignment
+  # Reporting
+  generate_md_report.py      # Full HTML analysis report
+  export_gnina_csv.py        # Docking results → CSV
+  generate_results_csv.py    # Molecular properties CSV
+  parse_gnina_results.py     # SDF property extraction → JSON
+  # Surface
+  compute_surface_props.py   # Per-atom hydrophobic + electrostatic properties
+  map_binding_site.py        # Interaction grid maps (OpenDX) + hotspot detection
+  generate_pocket_surface.py # MaSIF-style pocket surface (PLY)
 ```
 
 ## Build Commands
@@ -93,28 +132,70 @@ Bundled app checks `process.resourcesPath` first, then falls back to dev paths:
 - **OpenBabel**: `extract_xray_ligand.py` sets `BABEL_LIBDIR` and `DYLD_LIBRARY_PATH` relative to `sys.executable`
 - **OpenMM plugins**: `run_md_simulation.py` loads from both default and bundled plugin directories
 
-## MD Simulation
-**Equilibration Protocol** (AMBER-style, ~270ps protein-ligand, ~170ps ligand-only):
-1. Restrained minimization → graduated minimization
-2. NVT heating 5K→100K → NPT heating 100K→300K (barostat added at 100K)
-3. NPT equilibration with backbone restraints → gradual release
-4. Unrestrained NPT equilibration → production with HMR (4fs)
+## MD Simulation (Simulate mode)
+**Equilibration Protocol** (AMBER-style, ~360ps protein-ligand):
+1. **Restrained minimization** — 10K steps, 10 kcal/mol/A² on heavy atoms
+2. **Graduated minimization** — 10→5→2 kcal/mol/A², 3×10K steps
+3. **NVT heating** — 5K→100K, 7 temperatures × 5K steps = 70ps
+4. **NPT heating** — 100K→300K (barostat added at 100K), 9 temps × 5K steps = 90ps
+5. **NPT restrained** — 300K with backbone restraints, 25K steps = 50ps
+6. **Restraint release** — gradual backbone 10→5→2→0.5→0, heavy 2→1→0.5→0.1→0, 4 × 12.5K steps = 100ps
+7. **Unrestrained equilibration** — NPT, 25K steps = 50ps
+8. **Production** — 4fs timestep (HMR, hydrogen mass 1.5 amu), configurable duration
 
-**Force Field Presets**:
-- Fast: ff14SB + TIP3P
-- Accurate (default): ff19SB + OPC (4-site water)
+**Force Field Presets** (from `PRESETS` dict in `run_md_simulation.py`):
+- `ff14sb-tip3p`: ff14SB + TIP3P (3-site water, fast)
+- `ff19sb-opc` (default): ff19SB + OPC (4-site water, accurate)
+- `ff19sb-opc3`: ff19SB + OPC3 (4-site water, fast variant)
+- `charmm36-mtip3p`: CHARMM36 + mTIP3P (cross-family validation)
 - Ligand: OpenFF Sage 2.0 (AM1-BCC charges via AmberTools sqm)
 
 **Key detail**: Force field path is `amber/protein.ff19SB.xml` (not `amber19/`). Production OpenCL uses single precision (not mixed — Apple doesn't support it).
 
 **Critical**: Restraint forces use `periodicdistance(x,y,z,x0,y0,z0)^2` for PBC compatibility.
 
-## Viewer
+## Docking (Dock mode)
+AutoDock Vina docking pipeline via `run_vina_docking.py`:
+1. **Receptor prep**: PDB → PDBQT (obabel CLI with `-xr` rigid flag)
+2. **Ligand prep**: SDF → PDBQT (obabel Python API, adds hydrogens + Gasteiger charges)
+3. **Autobox**: Compute box center/size from reference ligand with configurable padding (`--autobox_add`, default 4.0 Å)
+4. **Docking**: AutoDock Vina with configurable exhaustiveness (default 8), num_poses (default 9), seed
+5. **Pose output**: Multi-pose PDBQT → SDF.gz with `minimizedAffinity` and `pose_index` properties
+6. **Optional MCS alignment**: Core-constrained RMSD calculation via RDKit FMCS (`--core_constrain`)
+
+**Note**: GNINA types in `shared/types/gnina.ts` are kept for backend compatibility but the active docking engine is Vina.
+
+## Score (Score mode)
+Absolute Binding Free Energy (ABFE) via alchemical FEP, implemented in `run_abfe.py`:
+1. **Snapshot selection**: Load MD trajectory, select N evenly-spaced frames from production
+2. **Complex leg**: Protein+ligand system with Boresch orientational restraints (3 protein CA + 3 ligand heavy atoms)
+3. **Solvent leg**: Ligand-only in water (no restraints)
+4. **Alchemical transformation**: Lambda windows decouple electrostatics then sterics
+5. **Analysis**: MBAR (pymbar) for ΔG, falls back to BAR between consecutive windows
+6. **Result**: ΔG_bind = ΔG_complex − ΔG_solvent − ΔG_restraint (analytical standard state correction)
+
+**Speed Presets**:
+- Fast: 9 lambda windows (5 electrostatic + 4 steric), 1.0 ns/window
+- Accurate: 12 lambda windows (7 electrostatic + 5 steric), 2.0 ns/window
+
+Supports checkpoint resumption via `fep_checkpoint.json`.
+
+## View (View mode)
 - NGL WebGL viewer with multi-PDB queue navigation
 - Trajectory playback: DCD files, 10fps base rate, smoothing=1 (every frame)
 - Auto-centers on ligand after detection
-- Clustering: K-means by ligand RMSD, saves centroid PDBs
-- Analysis: RMSD, RMSF, H-bonds, full HTML report
+- Clustering: K-means/DBSCAN/hierarchical by ligand RMSD, saves centroid PDBs
+- Analysis: RMSD, RMSF, H-bonds, contacts, torsions, SSE, full HTML report
+- Binding site maps: 3D interaction grids (hydrophobic, H-bond donor/acceptor) via `map_binding_site.py`, OpenDX output with hotspot detection
+- Project-aware PDB import (copies to `raw/` directory)
+
+## Logging
+Session log files are written to `~/Ember/logs/ember-<YYYY-MM-DD_HH-MM-SS>.log`. One file per app launch, created at startup in `electron/main.ts`. Captures:
+- **Main process**: `console.log/warn/error` (IPC handlers, child process output, startup diagnostics) — monkey-patched at import time via `logStream.write()`
+- **Renderer**: `console.log/warn/error` from SolidJS components — captured via `webContents.on('console-message', ...)` on the BrowserWindow
+- **Format**: `<ISO timestamp> [<LEVEL>] <message>` (e.g., `2026-03-18T14:32:05.123Z [RENDERER:LOG] [Viewer] Loading PDB: ...`)
+- **Prefixes**: Renderer logs use bracketed tags: `[Viewer]`, `[Dock]`, `[MD Results]`, `[Benchmark]`, `[FEP]`, `[PDB]`
+- **No rotation**: Old log files accumulate in `~/Ember/logs/`; manual cleanup if needed
 
 ## Key Patterns
 ```typescript
@@ -135,9 +216,32 @@ return `[${ligand.resname}] and ${ligand.resnum}`;
 ```
 
 ## Output Structure
+
+### MD Simulation
 **Naming**: `{jobName}_{ff}_MD-{temp}K-{ns}ns` (e.g., `bold-pulse-shark_ff19sb-OPC_MD-300K-1ns`)
 
 Files: `_system.pdb`, `_trajectory.dcd`, `_energy.csv`, `_checkpoint.chk`, `_final.pdb`, `_equilibrated.pdb`, `simulation.log`, `clustering/`
+
+### Docking
+```
+docking/Vina_{ligandId}/
+  {project}_all_docked.sdf           ← pooled best poses (portable, one model per ligand)
+  {project}_receptor_prepared.pdb
+  {project}_reference_ligand.sdf
+  {project}_ligands.json
+  cordial_scores.json                ← CORDIAL rescoring (if enabled)
+  poses/                             ← individual docked files
+    {project}_{ligand}_docked.sdf.gz
+    ...
+```
+
+**Important**: All handlers that scan for `*_docked.sdf.gz` must check `poses/` subfolder first, then fall back to top-level (legacy runs). This includes `PARSE_DOCK_RESULTS`, `EXPORT_DOCK_CSV`, `LOAD_DOCK_OUTPUT_FOR_MD`, `SCAN_PROJECT_ARTIFACTS`, and `score_cordial.py`.
+
+### Clustering
+Centroid PDBs are in `clustering/` under the simulation run directory. A pooled `{project}_all_clusters.pdb` with `MODEL`/`ENDMDL` blocks is created alongside individual `cluster_N_centroid.pdb` files.
+
+## Viewer Architecture
+**NGL Stage persistence**: `ViewerMode` is always mounted (CSS-hidden via `display:none`) to avoid destroying/recreating the WebGL context on mode switches. Previous approach using SolidJS `Switch`/`Match` caused OOM crashes from re-parsing structures. The `createEffect` watching `state().mode` triggers `stage.handleResize()` when the viewer becomes visible again.
 
 ## Known Limitations
 - macOS only (Apple Silicon). No CUDA, no Linux in this version.
@@ -175,7 +279,7 @@ From `run_md_simulation.py`:
 
 ### Verification
 
-1. All 45 native Metal tests must pass (see **Test Suite Architecture** below for tiers and CMake flags)
+1. All 47 native Metal tests must pass (see **Test Suite Architecture** below for tiers and CMake flags)
 2. Run `run_md_simulation.py` on Metal platform and compare forces/energies against CPU Reference
 3. Max deviation: <0.01 kJ/mol per atom
 4. Adapt `test_opc_water_model.py` to validate OPC water on Metal (density, geometry, SETTLE)
@@ -446,6 +550,12 @@ When debugging numerical issues or GPU failures:
 2. Run with `OPENMM_METAL_LOG_ARGS=1` to verify correct buffer bindings — if a kernel produces garbage, check that the right arrays are bound at the right indices
 3. All `[Metal]` prefixed stderr output can be captured with `2>metal_debug.log`
 4. MSL compilation errors include line/column numbers against the dynamically-generated source — the source dump is essential since line numbers refer to the assembled source (defines + common.metal + kernel source), not the original .metal file
+
+## Python Code Health
+Known technical debt in `deps/staging/scripts/`:
+- **Shared utils**: Common patterns (CIF→PDB conversion, ligand selection, PBC transforms, property calculation) are extracted into `utils.py`
+- **No type hints**: Scripts have no type annotations (not planned for cleanup — scripts are subprocess-only)
+- **Legacy scripts**: `train.py`, `train_data_process.py`, `gen_all.py`, `gen_from_pdb.py` are legacy training/generation scripts not used by the app
 
 ## License
 MIT. See LICENSE file. Bundles GPL-2.0 components (OpenBabel, MDAnalysis) as separate processes.

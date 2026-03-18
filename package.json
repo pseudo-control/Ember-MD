@@ -13,7 +13,10 @@
     "pack:linux": "npm run build:electron && npm run build && electron-builder --linux",
     "dist": "bash deps/bundle.sh",
     "dist:pack": "bash deps/bundle.sh --pack",
-    "dist:mac": "bash scripts/bundle-mac.sh"
+    "dist:mac": "bash scripts/bundle-mac.sh",
+    "lint": "eslint src/ shared/ --max-warnings 0",
+    "lint:fix": "eslint src/ shared/ --fix",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "ngl": "^2.4.0",
@@ -24,6 +27,7 @@
     "@babel/core": "^7.23.0",
     "@babel/preset-env": "^7.23.0",
     "@babel/preset-typescript": "^7.23.0",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.10.0",
     "autoprefixer": "^10.4.16",
     "babel-loader": "^9.1.0",
@@ -32,6 +36,8 @@
     "daisyui": "^4.4.0",
     "electron": "^27.3.11",
     "electron-builder": "^26.0.12",
+    "eslint": "^10.0.3",
+    "eslint-plugin-solid": "^0.14.5",
     "html-webpack-plugin": "^5.5.0",
     "path-browserify": "^1.0.1",
     "postcss": "^8.4.32",
@@ -40,6 +46,7 @@
     "style-loader": "^3.3.0",
     "tailwindcss": "^3.3.6",
     "typescript": "^5.3.0",
+    "typescript-eslint": "^8.57.1",
     "webpack": "^5.89.0",
     "webpack-cli": "^5.1.0"
   },
@@ -59,12 +66,16 @@
       {
         "from": "bundle-mac/extra-resources/python",
         "to": "python",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "bundle-mac/extra-resources/scripts",
         "to": "scripts",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
