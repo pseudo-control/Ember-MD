@@ -21,9 +21,9 @@ Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Two modes: 
 ```
 CUDA → Metal (native MSL) → OpenCL (cl2Metal) → CPU
 ```
-- **Metal**: Native MSL backend (`pseudo-control/Ember-Metal`), registers as "Metal" platform. 46/47 tests pass (1 expected: `TestMetalCustomIntegrator` bitwise force equality). Command buffer batching, blit clears, register hoisting, float atomics. ~193 ns/day on M4 for 22K atom system.
+- **Metal**: Native MSL backend (`pseudo-control/Ember-Metal`), registers as "Metal" platform. 46/47 tests pass (1 expected: `TestMetalCustomIntegrator` bitwise force equality). Command buffer batching, blit clears, register hoisting, float atomics, simdgroup barriers. ~206 ns/day on M4 for 22K atom system.
 - **OpenCL**: Apple's cl2Metal translates OpenCL to Metal GPU instructions. ~210 ns/day on M4 (slightly faster due to cl2Metal IR-level optimizations). Works across all macOS versions (Ventura through Tahoe).
-- **Performance gap**: Metal is ~8% slower than OpenCL on 22K atoms. Float atomics optimization (v0.1.11) closed the gap from 16% to 8% by switching nonbonded force writes from 64-bit emulated atomics (2x 32-bit ops + carry) to native 32-bit float atomics.
+- **Performance gap**: Metal is ~2% slower than OpenCL on 22K atoms. Float atomics (v0.1.11) + simdgroup barrier fix (v0.1.12) closed the gap from 16% to 2%.
 - **SIMD note**: macOS 26 blocks `__asm("air....")` inline assembly in cl2Metal. No subgroup extensions available. SIMD intrinsics only accessible via native Metal Shading Language (not implemented).
 
 ## Project Structure
@@ -189,9 +189,9 @@ From `run_md_simulation.py`:
 
 **Validation**: All 47 native Metal tests must pass (27 short + 12 long + 6 very-long). Force deviation vs CPU Reference < 0.01 kJ/mol/nm per atom.
 
-**Current status (2026-03-17)**: 46/47 tests pass (1 expected fail: `TestMetalCustomIntegrator` bitwise force equality). **~193 ns/day** on M4 (22K atoms, ff19SB/OPC) — 92% of 210 ns/day OpenCL baseline. Float atomics optimization (v0.1.11) closed the gap from 16% to 8% by switching nonbonded force writes from 64-bit emulated atomics to native 32-bit float atomics. Code lives at `pseudo-control/Ember-Metal` (branch `codex/nonbonded-buffer-bindings`).
+**Current status (2026-03-17)**: 46/47 tests pass (1 expected fail: `TestMetalCustomIntegrator` bitwise force equality). **~206 ns/day** on M4 (22K atoms) — 98% of 210 ns/day OpenCL baseline. v0.1.11 float atomics (176→193) + v0.1.12 simdgroup barrier fix (193→206). Code lives at `pseudo-control/Ember-Metal` (branch `codex/nonbonded-buffer-bindings`).
 
-**Safe revert point**: `git checkout f313c99 -- .` restores 47/47 tests + 176 ns/day (pre-float-atomics). Current: `git checkout 2709c6a -- .` for 46/47 tests + 193 ns/day.
+**Safe revert point**: `git checkout f313c99 -- .` restores 47/47 tests + 176 ns/day (pre-float-atomics). `git checkout 2709c6a -- .` for 46/47 tests + 193 ns/day (v0.1.11).
 
 **Resolved blockers**:
 - `TestMetalDispersionPME` — fixed by switching from Abramowitz-Stegun 5-term erfc polynomial (max error 1.5e-7, systematic bias accumulated across PME grid) to Numerical Recipes 9-term Chebyshev rational approximation (max error ~1.2e-7, better bias distribution). Energy now within 5e-5 tolerance.
@@ -239,9 +239,9 @@ Metal wins on small systems (dispatch/encoding is faster thanks to command buffe
 
 Root cause: 64-bit fixed-point atomic force writes via `_mm_atomic_add(device unsigned long*, ...)` in `common.metal`. Each force component does TWO 32-bit `atomic_fetch_add` (low word + carry). 12 atomic writes per atom per off-diagonal tile.
 
-**Completed**: Blit integration, ThreadBlockSize 64→128, deferred interaction count, debug cleanup, register hoisting of box vectors in hot kernels (+5-8%), **float atomics** (v0.1.11, +9.6% — 176→193 ns/day).
+**Completed**: Blit integration, ThreadBlockSize 64→128, deferred interaction count, debug cleanup, register hoisting of box vectors in hot kernels (+5-8%), **float atomics** (v0.1.11, +9.6% — 176→193 ns/day), **simdgroup barrier fix** (v0.1.12, +6.7% — 193→206 ns/day).
 
-**Next optimization**: Remaining 8% gap to OpenCL (193 vs 210 ns/day). Profile with GPU counters to identify new bottleneck after float atomics reduced Texture Write Limiter pressure.
+**Next optimization**: Remaining 2% gap to OpenCL (206 vs 210 ns/day). MSL compiler instruction scheduling quality vs cl2Metal IR path — may require kernel restructuring or erfc polynomial replacement with native MSL erfc().
 
 **Dead ends** (investigated, no gain):
 - VkFFT flush overhead — VkFFT DISABLED, native FFT uses batched dispatch
