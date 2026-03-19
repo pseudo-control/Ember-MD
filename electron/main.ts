@@ -1585,19 +1585,20 @@ ipcMain.handle(
       });
     }
 
-    // Create output directory
+    // Create output directory and inputs/ subdir
     fs.mkdirSync(outputDir, { recursive: true });
+    const inputsDir = path.join(outputDir, 'inputs');
+    fs.mkdirSync(inputsDir, { recursive: true });
 
-    // Copy receptor and reference ligand to output directory for downstream use (MD)
-    // Derive project name from output path: .../docking/{runFolder} → project is grandparent
+    // Copy receptor and reference ligand to inputs/ (no project prefix)
     const projectName = path.basename(path.resolve(outputDir, '../..'));
-    const receptorOutputPath = path.join(outputDir, `${projectName}_receptor_prepared.pdb`);
-    const referenceOutputPath = path.join(outputDir, `${projectName}_reference_ligand.sdf`);
+    const receptorOutputPath = path.join(inputsDir, 'receptor.pdb');
+    const referenceOutputPath = path.join(inputsDir, 'reference_ligand.sdf');
     fs.copyFileSync(receptorPdb, receptorOutputPath);
     fs.copyFileSync(referenceLigand, referenceOutputPath);
 
-    // Write ligands list to JSON file (for reference)
-    const ligandsJsonPath = path.join(outputDir, `${projectName}_ligands.json`);
+    // Write ligands list to inputs/ligands.json
+    const ligandsJsonPath = path.join(inputsDir, 'ligands.json');
     fs.writeFileSync(ligandsJsonPath, JSON.stringify(ligandSdfPaths, null, 2));
 
     // Vina is CPU-only — concurrency = CPU count (each process uses 1 CPU)
@@ -1689,15 +1690,16 @@ ipcMain.handle(
       return Err({ type: 'DOCKING_FAILED', message: 'All docking jobs failed' });
     }
 
-    // Post-processing: move docked files into poses/ and create pooled SDF
+    // Post-processing: move docked files into results/poses/ and create pooled SDF
     try {
-      const posesDir = path.join(outputDir, 'poses');
+      const resultsDir = path.join(outputDir, 'results');
+      const posesDir = path.join(resultsDir, 'poses');
       fs.mkdirSync(posesDir, { recursive: true });
 
       const allFiles = fs.readdirSync(outputDir);
       const dockedGzFiles = allFiles.filter((f) => f.endsWith('_docked.sdf.gz'));
 
-      // Move *_docked.sdf.gz into poses/
+      // Move *_docked.sdf.gz into results/poses/
       for (const f of dockedGzFiles) {
         fs.renameSync(path.join(outputDir, f), path.join(posesDir, f));
       }
@@ -1719,7 +1721,7 @@ ipcMain.handle(
       }
 
       if (pooledParts.length > 0) {
-        const pooledPath = path.join(outputDir, `${projectName}_all_docked.sdf`);
+        const pooledPath = path.join(resultsDir, 'all_docked.sdf');
         fs.writeFileSync(pooledPath, pooledParts.join('\n') + '\n');
         console.log(`Pooled ${pooledParts.length} best poses into ${pooledPath}`);
       }
@@ -1755,9 +1757,10 @@ ipcMain.handle(
         return Err({ type: 'DIRECTORY_ERROR', path: outputDir, message: 'Output directory not found' });
       }
 
-      // Look in poses/ first (new layout), then top-level (legacy)
-      const posesDir = path.join(outputDir, 'poses');
-      const searchDir = fs.existsSync(posesDir) ? posesDir : outputDir;
+      // Check new layout first (results/poses/), then legacy (poses/), then top-level
+      const newPosesDir = path.join(outputDir, 'results', 'poses');
+      const legacyPosesDir = path.join(outputDir, 'poses');
+      const searchDir = fs.existsSync(newPosesDir) ? newPosesDir : fs.existsSync(legacyPosesDir) ? legacyPosesDir : outputDir;
       const files = fs.readdirSync(searchDir);
       const dockedFiles = files.filter((f) => f.endsWith('_docked.sdf.gz'));
 
@@ -1785,8 +1788,9 @@ ipcMain.handle(
       });
       const results: Array<any> = await Promise.all(parsePromises);
 
-      // Load CORDIAL scores if available
-      const cordialJsonPath = path.join(outputDir, 'cordial_scores.json');
+      // Load CORDIAL scores if available (check results/ first, then top-level)
+      const newCordialPath = path.join(outputDir, 'results', 'cordial_scores.json');
+      const cordialJsonPath = fs.existsSync(newCordialPath) ? newCordialPath : path.join(outputDir, 'cordial_scores.json');
       if (fs.existsSync(cordialJsonPath)) {
         try {
           const cordialData = JSON.parse(fs.readFileSync(cordialJsonPath, 'utf-8'));
@@ -2064,17 +2068,19 @@ ipcMain.handle(
   IpcChannels.EXPORT_DOCK_CSV,
   async (_event, outputDir: string, csvOutput: string, bestOnly: boolean): Promise<Result<string, AppError>> => {
     try {
-      // Re-parse results (check poses/ subfolder first)
-      const csvPosesDir = path.join(outputDir, 'poses');
-      const csvSearchDir = fs.existsSync(csvPosesDir) ? csvPosesDir : outputDir;
+      // Re-parse results (check results/poses/ first, then poses/, then top-level)
+      const csvNewPosesDir = path.join(outputDir, 'results', 'poses');
+      const csvLegacyPosesDir = path.join(outputDir, 'poses');
+      const csvSearchDir = fs.existsSync(csvNewPosesDir) ? csvNewPosesDir : fs.existsSync(csvLegacyPosesDir) ? csvLegacyPosesDir : outputDir;
       const files = fs.readdirSync(csvSearchDir);
       const dockedFiles = files.filter((f) => f.endsWith('_docked.sdf.gz'));
 
       const rows: string[] = [];
       const header = ['ligand', 'vina_affinity', 'qed', 'smiles', 'sdf_path'];
 
-      // Check for CORDIAL scores
-      const cordialJsonPath = path.join(outputDir, 'cordial_scores.json');
+      // Check for CORDIAL scores (results/ first, then top-level)
+      const csvNewCordialPath = path.join(outputDir, 'results', 'cordial_scores.json');
+      const cordialJsonPath = fs.existsSync(csvNewCordialPath) ? csvNewCordialPath : path.join(outputDir, 'cordial_scores.json');
       const hasCordial = fs.existsSync(cordialJsonPath);
       if (hasCordial) {
         header.push('cordial_pkd', 'cordial_p_high_affinity');
@@ -2765,6 +2771,7 @@ interface MDConfig {
   saltConcentrationM?: number;
   paddingNm?: number;
   restrainLigandNs?: number;
+  seed?: number;
 }
 
 interface MDBenchmarkResult {
@@ -2907,15 +2914,16 @@ ipcMain.handle(
         });
       }
 
-      // Look for *_receptor_prepared.pdb (new layout) or receptor_prepared.pdb (legacy)
-      // Search in docking output dir, then parent dirs
+      // Look for receptor: inputs/receptor.pdb (new), *_receptor_prepared.pdb (legacy)
       const files0 = fs.readdirSync(dirPath);
       const prefixedReceptor = files0.find((f) => f.endsWith('_receptor_prepared.pdb'));
 
       const receptorCandidates = [
-        // New layout: {projectName}_receptor_prepared.pdb in docking dir
+        // New layout: inputs/receptor.pdb
+        path.join(dirPath, 'inputs', 'receptor.pdb'),
+        // Legacy: {projectName}_receptor_prepared.pdb in docking dir
         ...(prefixedReceptor ? [path.join(dirPath, prefixedReceptor)] : []),
-        // Legacy: receptor_prepared.pdb in docking dir or parent dirs
+        // Very old legacy: receptor_prepared.pdb in docking dir or parent dirs
         path.join(dirPath, 'receptor_prepared.pdb'),
         path.join(path.dirname(dirPath), 'receptor_prepared.pdb'),
         path.join(path.dirname(path.dirname(dirPath)), 'receptor_prepared.pdb'),
@@ -2937,9 +2945,10 @@ ipcMain.handle(
         });
       }
 
-      // Find all *_docked.sdf.gz or *.sdf files (check poses/ subfolder first)
-      const posesSubDir = path.join(dirPath, 'poses');
-      const sdfSearchDir = fs.existsSync(posesSubDir) ? posesSubDir : dirPath;
+      // Find all *_docked.sdf.gz or *.sdf files (check results/poses/ first, then poses/, then top-level)
+      const newPosesSubDir = path.join(dirPath, 'results', 'poses');
+      const legacyPosesSubDir = path.join(dirPath, 'poses');
+      const sdfSearchDir = fs.existsSync(newPosesSubDir) ? newPosesSubDir : fs.existsSync(legacyPosesSubDir) ? legacyPosesSubDir : dirPath;
       const files = fs.readdirSync(sdfSearchDir);
       const dockedFiles = files.filter((f) => f.endsWith('_docked.sdf.gz'));
       // Also check top-level for regular SDF files (legacy or manual)
@@ -3013,8 +3022,9 @@ ipcMain.handle(
       const parsedLigands = await Promise.all(parsePromises);
       ligands.push(...parsedLigands);
 
-      // Load CORDIAL scores if available
-      const cordialJsonPath = path.join(dirPath, 'cordial_scores.json');
+      // Load CORDIAL scores if available (check results/ first, then top-level)
+      const newCordialJsonPath = path.join(dirPath, 'results', 'cordial_scores.json');
+      const cordialJsonPath = fs.existsSync(newCordialJsonPath) ? newCordialJsonPath : path.join(dirPath, 'cordial_scores.json');
       if (fs.existsSync(cordialJsonPath)) {
         try {
           const cordialData = JSON.parse(fs.readFileSync(cordialJsonPath, 'utf-8'));
@@ -3211,9 +3221,6 @@ ipcMain.handle(
 
       fs.mkdirSync(outputDir, { recursive: true });
 
-      // Derive project name from output path: .../simulations/{runFolder}
-      const mdProjectName = path.basename(path.resolve(outputDir, '../..'));
-
       const args = [
         scriptPath,
         '--ligand', ligandSdf,
@@ -3223,11 +3230,14 @@ ipcMain.handle(
         '--temperature', String(config.temperatureK || 300),
         '--salt_concentration', String(config.saltConcentrationM || 0.15),
         '--padding', String(config.paddingNm || 1.2),
-        '--project_name', mdProjectName,
       ];
 
       if (config.restrainLigandNs && config.restrainLigandNs > 0) {
         args.push('--restrain_ligand_ns', String(config.restrainLigandNs));
+      }
+
+      if (config.seed && config.seed > 0) {
+        args.push('--seed', String(config.seed));
       }
 
       if (ligandOnly) {
@@ -3361,15 +3371,15 @@ ipcMain.handle(
   }
 );
 
-// Import a PDB/CIF into a project's raw/ directory, return the raw path
+// Import a PDB/CIF into a project's structures/ directory (was raw/)
 ipcMain.handle(
   IpcChannels.IMPORT_STRUCTURE,
   async (_event, sourcePath: string, projectDir: string): Promise<Result<string, AppError>> => {
     try {
-      const rawDir = path.join(projectDir, 'raw');
-      fs.mkdirSync(rawDir, { recursive: true });
+      const structuresDir = path.join(projectDir, 'structures');
+      fs.mkdirSync(structuresDir, { recursive: true });
       const filename = path.basename(sourcePath);
-      const destPath = path.join(rawDir, filename);
+      const destPath = path.join(structuresDir, filename);
       // Don't re-copy if already in the project
       if (path.resolve(sourcePath) !== path.resolve(destPath)) {
         fs.copyFileSync(sourcePath, destPath);
@@ -3457,17 +3467,31 @@ ipcMain.handle(IpcChannels.SCAN_PROJECTS, async (): Promise<any[]> => {
     const scanRunDir = (runPath: string, folderName: string): any | null => {
       try {
         const runFiles = fs.readdirSync(runPath);
-        const hasSimOutput = runFiles.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log');
-        const hasDockOutput = runFiles.some((f: string) => f.endsWith('_docked.sdf.gz') || f.endsWith('_docked.sdf'));
-        if (!hasSimOutput && !hasDockOutput) return null;
+        // Check results/ subdir for new layout
+        const resultsPath = path.join(runPath, 'results');
+        const resultsFiles = fs.existsSync(resultsPath) ? fs.readdirSync(resultsPath) : [];
+        // New layout: unprefixed files in results/ or top-level; Legacy: prefixed files
+        const hasSimOutput = runFiles.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log' || f === 'system.pdb' || f === 'trajectory.dcd')
+          || resultsFiles.some((f: string) => f === 'system.pdb' || f === 'trajectory.dcd');
+        // New layout: docked files in results/poses/; Legacy: in poses/ or top-level
+        const newPosesPath = path.join(runPath, 'results', 'poses');
+        const legacyPosesPath = path.join(runPath, 'poses');
+        const hasDockOutput = runFiles.some((f: string) => f.endsWith('_docked.sdf.gz') || f.endsWith('_docked.sdf'))
+          || (fs.existsSync(newPosesPath) && fs.readdirSync(newPosesPath).some((f: string) => f.endsWith('_docked.sdf.gz')))
+          || (fs.existsSync(legacyPosesPath) && fs.readdirSync(legacyPosesPath).some((f: string) => f.endsWith('_docked.sdf.gz')));
+        // New layout: inputs/ dir with receptor.pdb indicates a docking run even without results yet
+        const hasInputs = fs.existsSync(path.join(runPath, 'inputs', 'receptor.pdb'));
+        if (!hasSimOutput && !hasDockOutput && !hasInputs) return null;
         const stat = fs.statSync(runPath);
         return {
           folderName,
           path: runPath,
           lastModified: stat.mtimeMs,
           type: hasSimOutput ? 'simulation' : 'docking',
-          hasTrajectory: runFiles.some((f: string) => f.endsWith('_trajectory.dcd')),
-          hasFinalPdb: runFiles.some((f: string) => f.endsWith('_final.pdb')),
+          hasTrajectory: runFiles.some((f: string) => f.endsWith('_trajectory.dcd') || f === 'trajectory.dcd')
+            || resultsFiles.some((f: string) => f === 'trajectory.dcd'),
+          hasFinalPdb: runFiles.some((f: string) => f.endsWith('_final.pdb') || f === 'final.pdb')
+            || resultsFiles.some((f: string) => f === 'final.pdb'),
         };
       } catch { return null; }
     };
@@ -3537,7 +3561,7 @@ ipcMain.handle(IpcChannels.SCAN_PROJECTS, async (): Promise<any[]> => {
         if (match) {
           const projectName = match[1];
           const files = fs.readdirSync(entryPath);
-          const hasSimOutput = files.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log');
+          const hasSimOutput = files.some((f: string) => f.endsWith('_system.pdb') || f.endsWith('_trajectory.dcd') || f === 'simulation.log' || f === 'system.pdb' || f === 'trajectory.dcd');
           if (hasSimOutput) {
             if (!legacyGroups[projectName]) legacyGroups[projectName] = [];
             const stat = fs.statSync(entryPath);
@@ -3546,8 +3570,8 @@ ipcMain.handle(IpcChannels.SCAN_PROJECTS, async (): Promise<any[]> => {
               path: entryPath,
               lastModified: stat.mtimeMs,
               type: 'simulation',
-              hasTrajectory: files.some((f: string) => f.endsWith('_trajectory.dcd')),
-              hasFinalPdb: files.some((f: string) => f.endsWith('_final.pdb')),
+              hasTrajectory: files.some((f: string) => f.endsWith('_trajectory.dcd') || f === 'trajectory.dcd'),
+              hasFinalPdb: files.some((f: string) => f.endsWith('_final.pdb') || f === 'final.pdb'),
             });
           }
         }
@@ -3583,12 +3607,27 @@ ipcMain.handle(IpcChannels.SCAN_RUN_FILES, async (_event: any, runDir: string): 
   try {
     if (!fs.existsSync(runDir)) return result;
     const files = fs.readdirSync(runDir);
+
+    // Check results/ subdir first (new layout)
+    const resultsDir = path.join(runDir, 'results');
+    const resultsFiles = fs.existsSync(resultsDir) ? fs.readdirSync(resultsDir) : [];
+
+    // New layout: unprefixed files in results/
+    for (const f of resultsFiles) {
+      if (f === 'system.pdb' && !result.systemPdb) result.systemPdb = path.join(resultsDir, f);
+      else if (f === 'trajectory.dcd' && !result.trajectory) result.trajectory = path.join(resultsDir, f);
+      else if (f === 'final.pdb' && !result.finalPdb) result.finalPdb = path.join(resultsDir, f);
+      else if (f === 'equilibrated.pdb' && !result.equilibratedPdb) result.equilibratedPdb = path.join(resultsDir, f);
+      else if (f === 'energy.csv' && !result.energyCsv) result.energyCsv = path.join(resultsDir, f);
+    }
+
+    // Legacy: prefixed files at top level; also check unprefixed at top level
     for (const f of files) {
-      if (f.endsWith('_system.pdb')) result.systemPdb = path.join(runDir, f);
-      else if (f.endsWith('_trajectory.dcd')) result.trajectory = path.join(runDir, f);
-      else if (f.endsWith('_final.pdb')) result.finalPdb = path.join(runDir, f);
-      else if (f.endsWith('_equilibrated.pdb')) result.equilibratedPdb = path.join(runDir, f);
-      else if (f.endsWith('_energy.csv')) result.energyCsv = path.join(runDir, f);
+      if ((f.endsWith('_system.pdb') || f === 'system.pdb') && !result.systemPdb) result.systemPdb = path.join(runDir, f);
+      else if ((f.endsWith('_trajectory.dcd') || f === 'trajectory.dcd') && !result.trajectory) result.trajectory = path.join(runDir, f);
+      else if ((f.endsWith('_final.pdb') || f === 'final.pdb') && !result.finalPdb) result.finalPdb = path.join(runDir, f);
+      else if ((f.endsWith('_equilibrated.pdb') || f === 'equilibrated.pdb') && !result.equilibratedPdb) result.equilibratedPdb = path.join(runDir, f);
+      else if ((f.endsWith('_energy.csv') || f === 'energy.csv') && !result.energyCsv) result.energyCsv = path.join(runDir, f);
     }
   } catch (err) {
     console.error('Error scanning run files:', err);
@@ -3689,7 +3728,18 @@ ipcMain.handle(IpcChannels.DELETE_PROJECT, async (_event: any, projectName: stri
   }
 });
 
-// Scan project artifacts: prepared PDBs, docking runs, simulation outputs, clusters, trajectories
+// Shared helper: extract Vina affinity from first model of an .sdf.gz file
+const extractVinaAffinity = (sdfGzPath: string): number | undefined => {
+  try {
+    const gzData = fs.readFileSync(sdfGzPath);
+    const text = zlib.gunzipSync(gzData).toString('utf-8');
+    const match = text.match(/>  <minimizedAffinity>\s*\n([\-\d.]+)/);
+    if (match) return parseFloat(match[1]);
+  } catch { /* ignore */ }
+  return undefined;
+};
+
+// Scan project artifacts as ProjectJob[] — docking runs and simulation runs with their outputs
 ipcMain.handle(
   IpcChannels.SCAN_PROJECT_ARTIFACTS,
   async (_event: any, projectName: string): Promise<any[]> => {
@@ -3697,19 +3747,7 @@ ipcMain.handle(
     const projectDir = path.join(emberDir, projectName);
     if (!fs.existsSync(projectDir)) return [];
 
-    const artifacts: any[] = [];
-
-    // Helper: extract Vina affinity from first model of an .sdf.gz file
-    const extractAffinity = (sdfGzPath: string): number | undefined => {
-      try {
-        const gzData = fs.readFileSync(sdfGzPath);
-        const text = zlib.gunzipSync(gzData).toString('utf-8');
-        // Look for > <minimizedAffinity> property
-        const match = text.match(/>  <minimizedAffinity>\s*\n([\-\d.]+)/);
-        if (match) return parseFloat(match[1]);
-      } catch { /* ignore */ }
-      return undefined;
-    };
+    const jobs: any[] = [];
 
     // Strip project name prefix from filenames for cleaner labels
     const stripPrefix = (name: string) => {
@@ -3717,13 +3755,13 @@ ipcMain.handle(
       return name;
     };
 
-    // 1. Scan prepared/ for receptor PDBs
+    // 1. Scan prepared/ for receptor PDBs (still returned as type: 'prepared')
     const preparedDir = path.join(projectDir, 'prepared');
     if (fs.existsSync(preparedDir)) {
       try {
         const prepFiles = fs.readdirSync(preparedDir).filter((f) => f.endsWith('.pdb'));
         for (const f of prepFiles) {
-          artifacts.push({
+          jobs.push({
             type: 'prepared',
             label: stripPrefix(f.replace('.pdb', '')),
             path: path.join(preparedDir, f),
@@ -3740,15 +3778,22 @@ ipcMain.handle(
         for (const run of dockRuns) {
           if (!run.isDirectory() || run.name.startsWith('.')) continue;
           const runPath = path.join(dockingDir, run.name);
-
-          // Find receptor PDB
           const runFiles = fs.readdirSync(runPath);
-          const receptorFile = runFiles.find((f) => f.includes('_receptor_prepared') && f.endsWith('.pdb'));
-          const receptorPdb = receptorFile ? path.join(runPath, receptorFile) : undefined;
 
-          // Find docked files: poses/ subfolder first, then top-level
-          const posesSubDir = path.join(runPath, 'poses');
-          const posesSearchDir = fs.existsSync(posesSubDir) ? posesSubDir : runPath;
+          // Find receptor PDB: inputs/receptor.pdb (new) first, then *_receptor_prepared.pdb (legacy)
+          let receptorPdb: string | undefined;
+          const newReceptor = path.join(runPath, 'inputs', 'receptor.pdb');
+          if (fs.existsSync(newReceptor)) {
+            receptorPdb = newReceptor;
+          } else {
+            const legacyReceptorFile = runFiles.find((f) => f.includes('_receptor_prepared') && f.endsWith('.pdb'));
+            if (legacyReceptorFile) receptorPdb = path.join(runPath, legacyReceptorFile);
+          }
+
+          // Find docked files: results/poses/ (new) first, then poses/ (legacy), then top-level
+          const newPosesDir = path.join(runPath, 'results', 'poses');
+          const legacyPosesDir = path.join(runPath, 'poses');
+          const posesSearchDir = fs.existsSync(newPosesDir) ? newPosesDir : fs.existsSync(legacyPosesDir) ? legacyPosesDir : runPath;
           const poseFiles = fs.readdirSync(posesSearchDir).filter((f) => f.endsWith('_docked.sdf.gz'));
 
           if (poseFiles.length > 0) {
@@ -3758,15 +3803,17 @@ ipcMain.handle(
               return {
                 name: stripPrefix(name),
                 path: posePath,
-                affinity: extractAffinity(posePath),
+                affinity: extractVinaAffinity(posePath),
               };
             });
 
             // Sort by affinity (best = most negative first)
             poses.sort((a, b) => (a.affinity ?? 0) - (b.affinity ?? 0));
 
-            artifacts.push({
+            jobs.push({
+              id: `dock:${run.name}`,
               type: 'docking',
+              folder: run.name,
               label: `${run.name} (${poses.length} poses)`,
               path: runPath,
               receptorPdb,
@@ -3787,49 +3834,162 @@ ipcMain.handle(
           const runPath = path.join(simsDir, run.name);
           const runFiles = fs.readdirSync(runPath);
 
-          // Final PDB
-          const finalPdb = runFiles.find((f) => f.endsWith('_final.pdb'));
-          if (finalPdb) {
-            artifacts.push({
-              type: 'simulation',
-              label: `${run.name} (final)`,
-              path: path.join(runPath, finalPdb),
-            });
+          // Check results/ subdir first (new layout), then top-level (legacy)
+          const resultsDir = path.join(runPath, 'results');
+          const resultsFiles = fs.existsSync(resultsDir) ? fs.readdirSync(resultsDir) : [];
+
+          // Find final PDB: results/final.pdb (new), then *_final.pdb (legacy)
+          let finalPdbPath: string | undefined;
+          if (resultsFiles.includes('final.pdb')) {
+            finalPdbPath = path.join(resultsDir, 'final.pdb');
+          } else {
+            const legacyFinal = runFiles.find((f) => f.endsWith('_final.pdb'));
+            if (legacyFinal) finalPdbPath = path.join(runPath, legacyFinal);
           }
 
-          // Trajectory: system.pdb + trajectory.dcd
-          const systemPdb = runFiles.find((f) => f.endsWith('_system.pdb'));
-          const trajectoryDcd = runFiles.find((f) => f.endsWith('_trajectory.dcd'));
-          if (systemPdb && trajectoryDcd) {
-            artifacts.push({
-              type: 'trajectory',
-              label: `${run.name} (trajectory)`,
-              path: path.join(runPath, trajectoryDcd),
-              systemPdb: path.join(runPath, systemPdb),
-            });
+          // Find system PDB + trajectory DCD
+          let systemPdbPath: string | undefined;
+          let trajectoryDcdPath: string | undefined;
+
+          // New layout: results/
+          if (resultsFiles.includes('system.pdb')) systemPdbPath = path.join(resultsDir, 'system.pdb');
+          if (resultsFiles.includes('trajectory.dcd')) trajectoryDcdPath = path.join(resultsDir, 'trajectory.dcd');
+
+          // Legacy: *_system.pdb, *_trajectory.dcd at top level
+          if (!systemPdbPath) {
+            const legacySys = runFiles.find((f) => f.endsWith('_system.pdb'));
+            if (legacySys) systemPdbPath = path.join(runPath, legacySys);
+          }
+          if (!trajectoryDcdPath) {
+            const legacyTraj = runFiles.find((f) => f.endsWith('_trajectory.dcd'));
+            if (legacyTraj) trajectoryDcdPath = path.join(runPath, legacyTraj);
           }
 
-          // Clusters: look in clustering/ subfolder
-          const clusterDir = path.join(runPath, 'clustering');
-          if (fs.existsSync(clusterDir)) {
-            const clusterFiles = fs.readdirSync(clusterDir).filter((f) => f.match(/cluster_\d+_centroid\.pdb/));
-            // Also check for pooled clusters file
-            const pooledFile = fs.readdirSync(clusterDir).find((f) => f.endsWith('_all_clusters.pdb'));
-
-            if (clusterFiles.length > 0) {
-              artifacts.push({
-                type: 'cluster',
-                label: `${run.name} (${clusterFiles.length} clusters)`,
-                path: pooledFile ? path.join(clusterDir, pooledFile) : path.join(clusterDir, clusterFiles[0]),
-                clusterCount: clusterFiles.length,
-              });
+          // Consolidate all outputs into one job per simulation folder
+          if (finalPdbPath || (systemPdbPath && trajectoryDcdPath)) {
+            // Count clusters
+            let clusterCount = 0;
+            let clusterDirPath: string | undefined;
+            const newClusterDir = path.join(runPath, 'analysis', 'clustering');
+            const legacyClusterDir = path.join(runPath, 'clustering');
+            const resolvedClusterDir = fs.existsSync(newClusterDir) ? newClusterDir : fs.existsSync(legacyClusterDir) ? legacyClusterDir : null;
+            if (resolvedClusterDir) {
+              const clusterFiles = fs.readdirSync(resolvedClusterDir).filter((f: string) => f.match(/cluster_\d+_centroid\.pdb/));
+              if (clusterFiles.length > 0) {
+                clusterCount = clusterFiles.length;
+                clusterDirPath = resolvedClusterDir;
+              }
             }
+
+            // Build descriptive label
+            const parts = [];
+            if (trajectoryDcdPath) parts.push('trajectory');
+            if (clusterCount > 0) parts.push(`${clusterCount} clusters`);
+            const suffix = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+
+            jobs.push({
+              id: `sim:${run.name}`,
+              type: 'simulation',
+              folder: run.name,
+              label: `${run.name}${suffix}`,
+              path: runPath,
+              systemPdb: systemPdbPath,
+              trajectoryDcd: trajectoryDcdPath,
+              finalPdb: finalPdbPath,
+              hasTrajectory: !!trajectoryDcdPath,
+              clusterCount,
+              clusterDir: clusterDirPath,
+            });
           }
         }
       } catch { /* skip */ }
     }
 
-    return artifacts;
+    return jobs;
+  }
+);
+
+// Select an Ember job folder via dialog, validate, and return as ProjectJob
+ipcMain.handle(
+  IpcChannels.SELECT_EMBER_JOB_FOLDER,
+  async (): Promise<any | null> => {
+    const emberDir = path.join(app.getPath('home'), 'Ember');
+    const result = await dialog.showOpenDialog({
+      title: 'Select Ember Job Folder',
+      defaultPath: emberDir,
+      properties: ['openDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const folderPath = result.filePaths[0];
+    const folderName = path.basename(folderPath);
+    const folderFiles = fs.readdirSync(folderPath);
+
+    // Check for docking job: inputs/receptor.pdb + results/poses/*_docked.sdf.gz
+    const newReceptor = path.join(folderPath, 'inputs', 'receptor.pdb');
+    const legacyReceptor = folderFiles.find((f) => f.includes('_receptor_prepared') && f.endsWith('.pdb'));
+    const receptorPdb = fs.existsSync(newReceptor) ? newReceptor : (legacyReceptor ? path.join(folderPath, legacyReceptor) : undefined);
+
+    const newPosesDir = path.join(folderPath, 'results', 'poses');
+    const legacyPosesDir = path.join(folderPath, 'poses');
+    const posesSearchDir = fs.existsSync(newPosesDir) ? newPosesDir : fs.existsSync(legacyPosesDir) ? legacyPosesDir : folderPath;
+
+    let poseFiles: string[] = [];
+    try {
+      poseFiles = fs.readdirSync(posesSearchDir).filter((f) => f.endsWith('_docked.sdf.gz'));
+    } catch { /* ignore */ }
+
+    if (receptorPdb && poseFiles.length > 0) {
+      const poses = poseFiles.map((f) => ({
+        name: f.replace('_docked.sdf.gz', ''),
+        path: path.join(posesSearchDir, f),
+        affinity: extractVinaAffinity(path.join(posesSearchDir, f)),
+      }));
+      poses.sort((a, b) => (a.affinity ?? 0) - (b.affinity ?? 0));
+      return {
+        id: `dock:${folderName}`,
+        type: 'docking',
+        folder: folderName,
+        label: `${folderName} (${poses.length} poses)`,
+        path: folderPath,
+        receptorPdb,
+        poses,
+      };
+    }
+
+    // Check for simulation job: system.pdb + trajectory.dcd (or results/ subdir)
+    const resultsDir = path.join(folderPath, 'results');
+    const resultsFiles = fs.existsSync(resultsDir) ? fs.readdirSync(resultsDir) : [];
+    const runFiles = folderFiles;
+
+    let systemPdb: string | undefined;
+    let trajectoryDcd: string | undefined;
+
+    if (resultsFiles.includes('system.pdb')) systemPdb = path.join(resultsDir, 'system.pdb');
+    if (resultsFiles.includes('trajectory.dcd')) trajectoryDcd = path.join(resultsDir, 'trajectory.dcd');
+    if (!systemPdb) {
+      const legacy = runFiles.find((f) => f.endsWith('_system.pdb') || f === 'system.pdb');
+      if (legacy) systemPdb = path.join(folderPath, legacy);
+    }
+    if (!trajectoryDcd) {
+      const legacy = runFiles.find((f) => f.endsWith('_trajectory.dcd') || f === 'trajectory.dcd');
+      if (legacy) trajectoryDcd = path.join(folderPath, legacy);
+    }
+
+    if (systemPdb) {
+      return {
+        id: `sim:${folderName}`,
+        type: 'simulation',
+        folder: folderName,
+        label: folderName,
+        path: folderPath,
+        systemPdb,
+        trajectoryDcd,
+        hasTrajectory: !!trajectoryDcd,
+      };
+    }
+
+    return null;
   }
 );
 
@@ -3984,7 +4144,10 @@ ipcMain.handle(
       });
     }
 
-    const outputCsv = path.join(dockOutputDir, 'cordial_scores.csv');
+    // Write results to results/ subdir (new layout), creating it if needed
+    const cordialResultsDir = path.join(dockOutputDir, 'results');
+    fs.mkdirSync(cordialResultsDir, { recursive: true });
+    const outputCsv = path.join(cordialResultsDir, 'cordial_scores.csv');
 
     return new Promise((resolve) => {
       event.sender.send(IpcChannels.DOCK_OUTPUT, {
@@ -4369,6 +4532,131 @@ except Exception as e:
           resolve(Err({
             type: 'TRAJECTORY_READ_FAILED',
             message: stderr || 'Failed to read trajectory frame',
+          }));
+        }
+      });
+    });
+  }
+);
+
+// Get trajectory frame coordinates only (no PDB parsing — for atomStore updates)
+ipcMain.handle(
+  IpcChannels.GET_TRAJECTORY_COORDS,
+  async (
+    _event,
+    topologyPath: string,
+    trajectoryPath: string,
+    frameIndex: number
+  ): Promise<Result<{ coordsBase64: string; atomCount: number }, AppError>> => {
+    if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
+      return Err({
+        type: 'PYTHON_NOT_FOUND',
+        message: 'Python not found.',
+      });
+    }
+
+    const pythonCode = `
+import sys
+import json
+import warnings
+import base64
+import numpy as np
+warnings.filterwarnings('ignore')
+
+try:
+    import MDAnalysis as mda
+
+    topology_path = '${topologyPath.replace(/'/g, "\\'")}'
+    trajectory_path = '${trajectoryPath.replace(/'/g, "\\'")}'
+    frame_index = ${frameIndex}
+
+    u = mda.Universe(topology_path, trajectory_path)
+
+    # Apply PBC transformations (same as GET_TRAJECTORY_FRAME)
+    try:
+        from MDAnalysis import transformations as trans
+
+        protein = u.select_atoms('protein')
+        lig_sele = 'not protein and not resname WAT HOH TIP3 TIP4 NA CL SOL K MG and not element H'
+        ligand = u.select_atoms(lig_sele)
+        if len(ligand) == 0:
+            ligand = u.select_atoms('(resname LIG UNL UNK MOL) and not element H')
+
+        if len(protein) > 0:
+            if len(ligand) > 0:
+                complex_group = protein + ligand
+            else:
+                complex_group = protein
+
+            workflow = [
+                trans.unwrap(complex_group),
+                trans.center_in_box(protein, center='mass'),
+                trans.wrap(complex_group, compound='fragments'),
+            ]
+            u.trajectory.add_transformations(*workflow)
+        elif len(ligand) > 0:
+            workflow = [
+                trans.unwrap(ligand),
+                trans.center_in_box(ligand, center='mass'),
+                trans.wrap(ligand, compound='fragments'),
+            ]
+            u.trajectory.add_transformations(*workflow)
+    except Exception:
+        pass
+
+    u.trajectory[frame_index]
+
+    # Flatten positions to [x0, y0, z0, x1, y1, z1, ...] as float32
+    coords = u.atoms.positions.astype(np.float32).flatten()
+    encoded = base64.b64encode(coords.tobytes()).decode()
+    print(json.dumps({"coordsBase64": encoded, "atomCount": len(u.atoms)}))
+except Exception as e:
+    import traceback
+    print(json.dumps({"error": str(e) + "\\n" + traceback.format_exc()}))
+    sys.exit(1)
+`;
+
+    return new Promise((resolve) => {
+      const python = spawn(condaPythonPath!, ['-c', pythonCode]);
+      childProcesses.add(python);
+
+      let stdout = '';
+      let stderr = '';
+
+      python.stdout?.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      python.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+
+      python.on('close', (code: number | null) => {
+        childProcesses.delete(python);
+        if (code === 0 && stdout.trim()) {
+          try {
+            const result = JSON.parse(stdout.trim());
+            if (result.error) {
+              resolve(Err({
+                type: 'TRAJECTORY_READ_FAILED',
+                message: result.error,
+              }));
+            } else {
+              resolve(Ok({
+                coordsBase64: result.coordsBase64,
+                atomCount: result.atomCount,
+              }));
+            }
+          } catch (e) {
+            resolve(Err({
+              type: 'PARSE_FAILED',
+              message: `Failed to parse coords data: ${stdout.substring(0, 200)}`,
+            }));
+          }
+        } else {
+          resolve(Err({
+            type: 'TRAJECTORY_READ_FAILED',
+            message: stderr || 'Failed to read trajectory coordinates',
           }));
         }
       });
@@ -5239,6 +5527,176 @@ ipcMain.handle(
         resolve(Err({
           type: 'SURFACE_PROPS_FAILED',
           message: err.message,
+        }));
+      });
+    });
+  }
+);
+
+// === Pocket Map (unified 3-method dispatch) ===
+
+ipcMain.handle(
+  IpcChannels.COMPUTE_POCKET_MAP,
+  async (
+    event,
+    options: {
+      method: 'static' | 'solvation' | 'probe';
+      pdbPath: string;
+      ligandResname: string;
+      ligandResnum: number;
+      outputDir: string;
+      trajectoryPath?: string;
+      boxPadding?: number;
+      gridSpacing?: number;
+    }
+  ): Promise<Result<{
+    hydrophobicDx: string;
+    hbondDonorDx: string;
+    hbondAcceptorDx: string;
+    hotspots: Array<{ type: string; position: number[]; direction: number[]; score: number }>;
+    gridDimensions: number[];
+    ligandCom: number[];
+    method?: string;
+  }, AppError>> => {
+    if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
+      return Err({
+        type: 'PYTHON_NOT_FOUND',
+        message: 'Python not found. Please install miniconda and create the openmm-metal environment.',
+      });
+    }
+
+    // Determine script and args based on method
+    let scriptName: string;
+    let scriptArgs: string[];
+    const projectName = path.basename(path.resolve(options.outputDir, '../..'));
+
+    switch (options.method) {
+      case 'static': {
+        scriptName = 'map_binding_site.py';
+        scriptArgs = [
+          '--pdb_path', options.pdbPath,
+          '--ligand_resname', options.ligandResname,
+          '--ligand_resnum', String(options.ligandResnum),
+          '--output_dir', options.outputDir,
+          '--project_name', projectName,
+          '--scoring', 'energy',
+        ];
+        if (options.boxPadding !== undefined) {
+          scriptArgs.push('--box_padding', String(options.boxPadding));
+        }
+        if (options.gridSpacing !== undefined) {
+          scriptArgs.push('--grid_spacing', String(options.gridSpacing));
+        }
+        break;
+      }
+      case 'solvation': {
+        if (!options.trajectoryPath || !fs.existsSync(options.trajectoryPath)) {
+          return Err({
+            type: 'POCKET_MAP_FAILED',
+            message: 'Solvation method requires an MD trajectory. Run a simulation first.',
+          });
+        }
+        scriptName = 'analyze_gist.py';
+        scriptArgs = [
+          '--pdb_path', options.pdbPath,
+          '--trajectory_path', options.trajectoryPath,
+          '--ligand_resname', options.ligandResname,
+          '--ligand_resnum', String(options.ligandResnum),
+          '--output_dir', options.outputDir,
+          '--project_name', projectName,
+        ];
+        if (options.boxPadding !== undefined) {
+          scriptArgs.push('--box_padding', String(options.boxPadding));
+        }
+        if (options.gridSpacing !== undefined) {
+          scriptArgs.push('--grid_spacing', String(options.gridSpacing));
+        }
+        break;
+      }
+      case 'probe': {
+        scriptName = 'run_probe_md.py';
+        scriptArgs = [
+          '--pdb_path', options.pdbPath,
+          '--ligand_resname', options.ligandResname,
+          '--ligand_resnum', String(options.ligandResnum),
+          '--output_dir', options.outputDir,
+          '--project_name', projectName,
+        ];
+        break;
+      }
+      default:
+        return Err({
+          type: 'POCKET_MAP_FAILED',
+          message: `Unknown pocket map method: ${options.method}`,
+        });
+    }
+
+    const scriptPath = path.join(fraggenRoot, scriptName);
+    if (!fs.existsSync(scriptPath)) {
+      return Err({
+        type: 'SCRIPT_NOT_FOUND',
+        path: scriptPath,
+        message: `Pocket map script not found: ${scriptPath}`,
+      });
+    }
+
+    if (!fs.existsSync(options.outputDir)) {
+      fs.mkdirSync(options.outputDir, { recursive: true });
+    }
+
+    return new Promise((resolve) => {
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: `=== Pocket Map: ${options.method} ===\n`,
+      });
+
+      const proc = spawn(condaPythonPath!, [scriptPath, ...scriptArgs]);
+      childProcesses.add(proc);
+
+      proc.stdout?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: text });
+      });
+
+      proc.on('close', (code: number | null) => {
+        childProcesses.delete(proc);
+
+        // Find results JSON (try prefixed first, fall back to unprefixed)
+        const prefixedResultFile = path.join(options.outputDir, `${projectName}_binding_site_results.json`);
+        const legacyResultFile = path.join(options.outputDir, 'binding_site_results.json');
+        const resultFile = fs.existsSync(prefixedResultFile) ? prefixedResultFile : legacyResultFile;
+
+        if (code === 0 && fs.existsSync(resultFile)) {
+          try {
+            const content = fs.readFileSync(resultFile, 'utf-8');
+            const result = JSON.parse(content);
+            // Tag with the method so the frontend knows which produced this
+            result.method = options.method;
+            resolve(Ok(result));
+          } catch (err) {
+            resolve(Err({
+              type: 'POCKET_MAP_FAILED',
+              message: `Error reading pocket map results: ${err}`,
+            }));
+          }
+        } else {
+          resolve(Err({
+            type: 'POCKET_MAP_FAILED',
+            message: `Pocket map (${options.method}) failed with exit code ${code}`,
+          }));
+        }
+      });
+
+      proc.on('error', (err: Error) => {
+        childProcesses.delete(proc);
+        resolve(Err({
+          type: 'POCKET_MAP_FAILED',
+          message: `Failed to start pocket map: ${err.message}`,
         }));
       });
     });

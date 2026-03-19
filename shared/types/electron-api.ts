@@ -42,10 +42,11 @@ import type {
   RunFilesResult,
   BindingSiteMapOptions,
   BindingSiteMapResult,
+  PocketMapOptions,
   SurfacePropsResult,
   FepScoringOptions,
   FepScoringResult,
-  ProjectArtifact,
+  ProjectJob,
 } from './ipc';
 
 export interface ElectronAPI {
@@ -188,6 +189,11 @@ export interface ElectronAPI {
     trajectoryPath: string,
     frameIndex: number
   ) => Promise<Result<{ pdbString: string }, AppError>>;
+  getTrajectoryCoords: (
+    topologyPath: string,
+    trajectoryPath: string,
+    frameIndex: number
+  ) => Promise<Result<{ coordsBase64: string; atomCount: number }, AppError>>;
   clusterTrajectory: (options: ClusteringOptions) => Promise<Result<ClusteringResult, AppError>>;
   scanClusterDirectory: (directoryPath: string) => Promise<Result<ScanClusterDirectoryResult, AppError>>;
   loadAlignedClusters: (directoryPath: string, clusterIds: number[]) => Promise<Result<{ clusters: LoadedClusterPdb[] }, AppError>>;
@@ -195,6 +201,7 @@ export interface ElectronAPI {
   analyzeTrajectory: (options: AnalysisOptions) => Promise<Result<AnalysisResult, AppError>>;
   generateMdReport: (options: MdReportOptions) => Promise<Result<MdReportResult, AppError>>;
   mapBindingSite: (options: BindingSiteMapOptions) => Promise<Result<BindingSiteMapResult, AppError>>;
+  computePocketMap: (options: PocketMapOptions) => Promise<Result<BindingSiteMapResult, AppError>>;
   computeSurfaceProps: (pdbPath: string, outputDir: string) => Promise<Result<SurfacePropsResult, AppError>>;
 
   // FEP scoring
@@ -222,7 +229,8 @@ export interface ElectronAPI {
   deleteProject: (projectName: string) => Promise<Result<void, AppError>>;
   getProjectFileCount: (projectName: string) => Promise<{ fileCount: number; totalSizeMb: number }>;
   prepareForViewing: (rawPdbPath: string, preparedPath: string) => Promise<Result<string, AppError>>;
-  scanProjectArtifacts: (projectName: string) => Promise<ProjectArtifact[]>;
+  scanProjectArtifacts: (projectName: string) => Promise<ProjectJob[]>;
+  selectEmberJobFolder: () => Promise<ProjectJob | null>;
 }
 
 declare global {

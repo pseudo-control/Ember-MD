@@ -62,6 +62,7 @@ const IpcChannels = {
   LIST_PDB_IN_DIRECTORY: 'list-pdb-in-directory',
   GET_TRAJECTORY_INFO: 'get-trajectory-info',
   GET_TRAJECTORY_FRAME: 'get-trajectory-frame',
+  GET_TRAJECTORY_COORDS: 'get-trajectory-coords',
   CLUSTER_TRAJECTORY: 'cluster-trajectory',
   SCAN_CLUSTER_DIRECTORY: 'scan-cluster-directory',
   LOAD_ALIGNED_CLUSTERS: 'load-aligned-clusters',
@@ -69,6 +70,7 @@ const IpcChannels = {
   ANALYZE_TRAJECTORY: 'analyze-trajectory',
   GENERATE_MD_REPORT: 'generate-md-report',
   MAP_BINDING_SITE: 'map-binding-site',
+  COMPUTE_POCKET_MAP: 'compute-pocket-map',
   COMPUTE_SURFACE_PROPS: 'compute-surface-props',
   // FEP scoring channels
   RUN_FEP_SCORING: 'fep:run',
@@ -82,6 +84,7 @@ const IpcChannels = {
   DELETE_PROJECT: 'delete-project',
   GET_PROJECT_FILE_COUNT: 'get-project-file-count',
   SCAN_PROJECT_ARTIFACTS: 'scan-project-artifacts',
+  SELECT_EMBER_JOB_FOLDER: 'select-ember-job-folder',
   // Image reading channel
   READ_IMAGE_AS_DATA_URL: 'read-image-as-data-url',
   // Send channels
@@ -409,6 +412,9 @@ const electronAPI = {
   getTrajectoryFrame: (topologyPath: string, trajectoryPath: string, frameIndex: number) =>
     ipcRenderer.invoke(IpcChannels.GET_TRAJECTORY_FRAME, topologyPath, trajectoryPath, frameIndex),
 
+  getTrajectoryCoords: (topologyPath: string, trajectoryPath: string, frameIndex: number) =>
+    ipcRenderer.invoke(IpcChannels.GET_TRAJECTORY_COORDS, topologyPath, trajectoryPath, frameIndex),
+
   clusterTrajectory: (options: ClusteringOptions) =>
     ipcRenderer.invoke(IpcChannels.CLUSTER_TRAJECTORY, options),
 
@@ -429,6 +435,18 @@ const electronAPI = {
 
   mapBindingSite: (options: BindingSiteMapOptions) =>
     ipcRenderer.invoke(IpcChannels.MAP_BINDING_SITE, options),
+
+  // SYNC WITH shared/types/ipc.ts PocketMapOptions
+  computePocketMap: (options: {
+    method: 'static' | 'solvation' | 'probe';
+    pdbPath: string;
+    ligandResname: string;
+    ligandResnum: number;
+    outputDir: string;
+    trajectoryPath?: string;
+    boxPadding?: number;
+    gridSpacing?: number;
+  }) => ipcRenderer.invoke(IpcChannels.COMPUTE_POCKET_MAP, options),
 
   computeSurfaceProps: (pdbPath: string, outputDir: string) =>
     ipcRenderer.invoke(IpcChannels.COMPUTE_SURFACE_PROPS, pdbPath, outputDir),
@@ -483,6 +501,8 @@ const electronAPI = {
     ipcRenderer.invoke(IpcChannels.GET_PROJECT_FILE_COUNT, projectName),
   scanProjectArtifacts: (projectName: string) =>
     ipcRenderer.invoke(IpcChannels.SCAN_PROJECT_ARTIFACTS, projectName),
+  selectEmberJobFolder: () =>
+    ipcRenderer.invoke(IpcChannels.SELECT_EMBER_JOB_FOLDER),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

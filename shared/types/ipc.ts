@@ -192,6 +192,7 @@ export const IpcChannels = {
   LIST_PDB_IN_DIRECTORY: 'list-pdb-in-directory',
   GET_TRAJECTORY_INFO: 'get-trajectory-info',
   GET_TRAJECTORY_FRAME: 'get-trajectory-frame',
+  GET_TRAJECTORY_COORDS: 'get-trajectory-coords',
   CLUSTER_TRAJECTORY: 'cluster-trajectory',
   SCAN_CLUSTER_DIRECTORY: 'scan-cluster-directory',
   LOAD_ALIGNED_CLUSTERS: 'load-aligned-clusters',
@@ -200,6 +201,9 @@ export const IpcChannels = {
   GENERATE_MD_REPORT: 'generate-md-report',
   MAP_BINDING_SITE: 'map-binding-site',
   COMPUTE_SURFACE_PROPS: 'compute-surface-props',
+
+  // Pocket map channels
+  COMPUTE_POCKET_MAP: 'compute-pocket-map',
 
   // FEP scoring channels
   RUN_FEP_SCORING: 'fep:run',
@@ -214,6 +218,7 @@ export const IpcChannels = {
   DELETE_PROJECT: 'delete-project',
   GET_PROJECT_FILE_COUNT: 'get-project-file-count',
   SCAN_PROJECT_ARTIFACTS: 'scan-project-artifacts',
+  SELECT_EMBER_JOB_FOLDER: 'select-ember-job-folder',
 
   // Send channels (main -> renderer)
   PREP_OUTPUT: 'prep-output',
@@ -377,23 +382,37 @@ export interface RunFilesResult {
   energyCsv: string | null;
 }
 
-// === Project artifact types ===
+// === Project job types (for job selector dropdown) ===
 
-export interface ProjectArtifactPose {
+export interface ProjectJobPose {
   name: string;
   path: string;
   affinity?: number;
 }
 
-export interface ProjectArtifact {
-  type: 'prepared' | 'docking' | 'simulation' | 'cluster' | 'trajectory';
-  label: string;
-  path: string;
+export interface ProjectJob {
+  id: string;               // Unique key: "dock:Vina_HWF" or "sim:ff19sb-OPC_MD-300K-1ns"
+  type: 'docking' | 'simulation';
+  folder: string;           // Run folder name (e.g., "Vina_HWF")
+  label: string;            // Display name
+  path: string;             // Root path of the job directory
+
+  // Docking-specific
   receptorPdb?: string;
-  poses?: ProjectArtifactPose[];
-  clusterCount?: number;
+  poses?: ProjectJobPose[];
+
+  // Simulation-specific
   systemPdb?: string;
+  trajectoryDcd?: string;
+  finalPdb?: string;
+  hasTrajectory?: boolean;
+  clusterCount?: number;
+  clusterDir?: string;
 }
+
+// Keep legacy alias for backward compat during transition
+export type ProjectArtifact = ProjectJob;
+export type ProjectArtifactPose = ProjectJobPose;
 
 // === Binding site interaction map types ===
 
@@ -420,6 +439,21 @@ export interface BindingSiteMapResult {
   hotspots: BindingSiteHotspot[];
   gridDimensions: [number, number, number];
   ligandCom: [number, number, number];
+}
+
+// === Pocket map types ===
+
+export type PocketMapMethod = 'static' | 'solvation' | 'probe';
+
+export interface PocketMapOptions {
+  method: PocketMapMethod;
+  pdbPath: string;
+  ligandResname: string;
+  ligandResnum: number;
+  outputDir: string;
+  trajectoryPath?: string;  // For solvation with existing trajectory
+  boxPadding?: number;
+  gridSpacing?: number;
 }
 
 // === Computed surface property types ===
