@@ -10,6 +10,7 @@ import DockStepProgress from './components/steps/DockStepProgress';
 import DockStepResults from './components/steps/DockStepResults';
 import ViewerMode from './components/viewer/ViewerMode';
 import FepScoringPanel from './components/viewer/FepScoringPanel';
+import MapMode from './components/map/MapMode';
 import { workflowStore } from './stores/workflow';
 
 const App: Component = () => {
@@ -58,6 +59,11 @@ const App: Component = () => {
         {/* Score mode (FEP scoring, single view) */}
         <Match when={state().mode === 'score'}>
           <FepScoringPanel />
+        </Match>
+
+        {/* Map mode (pocket mapping) */}
+        <Match when={state().mode === 'map'}>
+          <MapMode />
         </Match>
       </Switch>
     </WizardLayout>

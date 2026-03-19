@@ -22,6 +22,7 @@ module.exports = {
           fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         },
       },
+      "business",
     ],
   },
 };
