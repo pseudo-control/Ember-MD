@@ -1,7 +1,8 @@
 import { Component, Show, createMemo, createSignal, For } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { DockMolecule, LigandSource } from '../../../shared/types/dock';
-import { projectPaths } from '../../utils/projectPaths';
+import { projectPaths, DockingPaths } from '../../utils/projectPaths';
+import { buildDockFolderName } from '../../utils/jobName';
 import path from 'path';
 
 const DockStepLoad: Component = () => {
@@ -37,6 +38,12 @@ const DockStepLoad: Component = () => {
   const detectedLigands = () => dock().detectedLigands;
   const ligandSource = () => dock().ligandSource;
   const ligandMolecules = () => dock().ligandMolecules;
+
+  // Helper: compute docking paths from the current reference ligand
+  const getDockPaths = (paths: ReturnType<typeof projectPaths>): DockingPaths => {
+    const dockFolder = buildDockFolderName({ referenceLigandId: referenceLigandId() });
+    return paths.docking(dockFolder);
+  };
 
   // ========== Receptor (Left Column) ==========
 
@@ -82,8 +89,10 @@ const DockStepLoad: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockFolder = buildDockFolderName({ referenceLigandId: ligandId });
+    const dockPaths = paths.docking(dockFolder);
 
-    const extractResult = await api.extractXrayLigand(currentPdb, ligandId, paths.ligands.sdf);
+    const extractResult = await api.extractXrayLigand(currentPdb, ligandId, dockPaths.prep);
 
     if (extractResult.ok) {
       const data = extractResult.value;
@@ -91,7 +100,7 @@ const DockStepLoad: Component = () => {
       setReceptorThumbnail(data.thumbnail);
 
       setStatusText('Preparing receptor (adding hydrogens)...');
-      const receptorPath = path.join(paths.prepared, `${state().jobName}_receptor_${ligandId}.pdb`);
+      const receptorPath = path.join(dockPaths.inputs, 'receptor.pdb');
       const receptorResult = await api.prepareReceptor(currentPdb, ligandId, receptorPath);
 
       setIsLoading(false);
@@ -145,8 +154,9 @@ const DockStepLoad: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockPaths = getDockPaths(paths);
 
-    const result = await api.scanSdfDirectory(folderPath, paths.ligands.sdf);
+    const result = await api.scanSdfDirectory(folderPath, dockPaths.inputsLigands);
     setIsLoadingLigands(false);
 
     if (result.ok) {
@@ -170,8 +180,9 @@ const DockStepLoad: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockPaths = getDockPaths(paths);
 
-    const result = await api.parseSmilesCsv(filePath, paths.ligands.sdf);
+    const result = await api.parseSmilesCsv(filePath, dockPaths.inputsLigands);
     setIsLoadingLigands(false);
 
     if (result.ok) {
@@ -194,8 +205,9 @@ const DockStepLoad: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockPaths = getDockPaths(paths);
 
-    const result = await api.convertSingleMolecule(smiles, paths.ligands.sdf, 'smiles');
+    const result = await api.convertSingleMolecule(smiles, dockPaths.inputsLigands, 'smiles');
     setIsLoadingLigands(false);
 
     if (result.ok) {
@@ -225,8 +237,9 @@ const DockStepLoad: Component = () => {
     const defaultDir = await api.getDefaultOutputDir();
     const baseOutputDir = state().customOutputDir || defaultDir;
     const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockPaths = getDockPaths(paths);
 
-    const result = await api.convertSingleMolecule(filePath, paths.ligands.sdf, 'mol_file');
+    const result = await api.convertSingleMolecule(filePath, dockPaths.inputsLigands, 'mol_file');
     setIsLoadingLigands(false);
 
     if (result.ok) {
@@ -330,7 +343,7 @@ const DockStepLoad: Component = () => {
                     <img
                       src={`data:image/png;base64,${receptorThumbnail()}`}
                       alt="Reference ligand"
-                      class="rounded bg-white p-1 mb-3"
+                      class="rounded bg-base-100 p-1 mb-3"
                       style={{ "max-width": "100%", "max-height": "200px", "object-fit": "contain" }}
                     />
                   </Show>

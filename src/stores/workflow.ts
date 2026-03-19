@@ -25,9 +25,13 @@ import {
   DetectedLigand as DockDetectedLigand,
 } from '../../shared/types/dock';
 
-export type WorkflowMode = 'dock' | 'md' | 'score' | 'viewer';
+export type WorkflowMode = 'dock' | 'md' | 'score' | 'viewer' | 'map';
 export type DockStep = 'dock-load' | 'dock-configure' | 'dock-progress' | 'dock-results';
 export type MDStep = 'md-home' | 'md-load' | 'md-configure' | 'md-progress' | 'md-results';
+
+// Map mode types — mirrors PocketMapMethod in shared/types/ipc.ts
+import type { PocketMapMethod } from '../../shared/types/ipc';
+export type MapMethod = PocketMapMethod;
 
 // Viewer state types
 export type ProteinRepresentation = 'cartoon' | 'ribbon' | 'spacefill';
@@ -85,6 +89,27 @@ export interface ViewerQueueItem {
   label: string;
 }
 
+export type ViewerLayerType = 'protein' | 'ligand' | 'trajectory';
+
+export interface ViewerLayer {
+  id: string;
+  type: ViewerLayerType;
+  label: string;
+  filePath: string;
+  visible: boolean;
+  groupId?: string;
+  poseIndex?: number;
+  affinity?: number;
+}
+
+export interface ViewerLayerGroup {
+  id: string;
+  type: 'docking' | 'simulation';
+  label: string;
+  expanded: boolean;
+  visible: boolean;
+}
+
 export interface BindingSiteMapChannel {
   visible: boolean;
   isolevel: number;
@@ -99,6 +124,7 @@ export interface BindingSiteMapState {
   hbondDonorDx: string;
   hbondAcceptorDx: string;
   hotspots: Array<{ type: string; position: number[]; direction: number[]; score: number }>;
+  method?: 'static' | 'solvation' | 'probe';
 }
 
 export interface ViewerState {
@@ -138,6 +164,19 @@ export interface ViewerState {
   isLoadingClusters: boolean;
   bindingSiteMap: BindingSiteMapState | null;
   isComputingBindingSiteMap: boolean;
+  layers: ViewerLayer[];
+  layerGroups: ViewerLayerGroup[];
+  selectedLayerId: string | null;
+}
+
+export interface MapState {
+  method: MapMethod;
+  isComputing: boolean;
+  progress: string;
+  progressPct: number;
+  error: string | null;
+  showMdConfirm: boolean;
+  estimatedTimeMin: number | null;
 }
 
 export interface PdbFile {
@@ -206,6 +245,7 @@ export interface WorkflowState {
   dock: DockState;
   md: MDState;
   viewer: ViewerState;
+  map: MapState;
 }
 
 const defaultDockState: DockState = {
@@ -249,6 +289,16 @@ const defaultMDState: MDState = {
   systemInfo: null,
   benchmarkResult: null,
   isBenchmarking: false,
+};
+
+const defaultMapState: MapState = {
+  method: 'static',
+  isComputing: false,
+  progress: '',
+  progressPct: 0,
+  error: null,
+  showMdConfirm: false,
+  estimatedTimeMin: null,
 };
 
 const defaultClusteringConfig: ClusteringConfig = {
@@ -296,6 +346,9 @@ const defaultViewerState: ViewerState = {
   isLoadingClusters: false,
   bindingSiteMap: null,
   isComputingBindingSiteMap: false,
+  layers: [],
+  layerGroups: [],
+  selectedLayerId: null,
 };
 
 function createWorkflowStore() {
@@ -317,6 +370,7 @@ function createWorkflowStore() {
     dock: { ...defaultDockState },
     md: { ...defaultMDState },
     viewer: { ...defaultViewerState },
+    map: { ...defaultMapState },
   });
 
   // Mode selection
@@ -642,6 +696,124 @@ function createWorkflowStore() {
       };
     });
 
+  // Layer state setters
+  let layerIdSeq = 0;
+  const nextLayerId = (): string => `layer-${layerIdSeq++}`;
+
+  const addViewerLayer = (layer: ViewerLayer) =>
+    setState((s) => ({
+      ...s,
+      viewer: { ...s.viewer, layers: [...s.viewer.layers, layer] },
+    }));
+
+  const removeViewerLayer = (id: string) =>
+    setState((s) => ({
+      ...s,
+      viewer: {
+        ...s.viewer,
+        layers: s.viewer.layers.filter((l) => l.id !== id),
+        selectedLayerId: s.viewer.selectedLayerId === id ? null : s.viewer.selectedLayerId,
+      },
+    }));
+
+  const updateViewerLayer = (id: string, updates: Partial<ViewerLayer>) =>
+    setState((s) => ({
+      ...s,
+      viewer: {
+        ...s.viewer,
+        layers: s.viewer.layers.map((l) => (l.id === id ? { ...l, ...updates } : l)),
+      },
+    }));
+
+  const setViewerLayerSelected = (id: string | null) =>
+    setState((s) => ({ ...s, viewer: { ...s.viewer, selectedLayerId: id } }));
+
+  const addViewerLayerGroup = (group: ViewerLayerGroup) =>
+    setState((s) => ({
+      ...s,
+      viewer: { ...s.viewer, layerGroups: [...s.viewer.layerGroups, group] },
+    }));
+
+  const removeViewerLayerGroup = (id: string) =>
+    setState((s) => ({
+      ...s,
+      viewer: {
+        ...s.viewer,
+        layerGroups: s.viewer.layerGroups.filter((g) => g.id !== id),
+        layers: s.viewer.layers.filter((l) => l.groupId !== id),
+      },
+    }));
+
+  const toggleViewerLayerGroupExpanded = (id: string) =>
+    setState((s) => ({
+      ...s,
+      viewer: {
+        ...s.viewer,
+        layerGroups: s.viewer.layerGroups.map((g) =>
+          g.id === id ? { ...g, expanded: !g.expanded } : g
+        ),
+      },
+    }));
+
+  const toggleViewerLayerGroupVisible = (id: string) =>
+    setState((s) => {
+      const group = s.viewer.layerGroups.find((g) => g.id === id);
+      if (!group) return s;
+      const newVisible = !group.visible;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          layerGroups: s.viewer.layerGroups.map((g) =>
+            g.id === id ? { ...g, visible: newVisible } : g
+          ),
+          layers: s.viewer.layers.map((l) =>
+            l.groupId === id ? { ...l, visible: newVisible } : l
+          ),
+        },
+      };
+    });
+
+  const clearViewerLayers = () =>
+    setState((s) => ({
+      ...s,
+      viewer: {
+        ...s.viewer,
+        layers: [],
+        layerGroups: [],
+        selectedLayerId: null,
+      },
+    }));
+
+  // Map state setters
+  const setMapMethod = (method: MapMethod) =>
+    setState((s) => ({ ...s, map: { ...s.map, method } }));
+
+  const setMapIsComputing = (isComputing: boolean) =>
+    setState((s) => ({ ...s, map: { ...s.map, isComputing } }));
+
+  const setMapProgress = (progress: string, progressPct?: number) =>
+    setState((s) => ({
+      ...s,
+      map: { ...s.map, progress, ...(progressPct !== undefined ? { progressPct } : {}) },
+    }));
+
+  const setMapError = (error: string | null) =>
+    setState((s) => ({ ...s, map: { ...s.map, error } }));
+
+  const setMapShowMdConfirm = (showMdConfirm: boolean, estimatedTimeMin?: number | null) =>
+    setState((s) => ({
+      ...s,
+      map: {
+        ...s.map,
+        showMdConfirm,
+        ...(estimatedTimeMin !== undefined ? { estimatedTimeMin } : {}),
+      },
+    }));
+
+  const resetMap = () =>
+    setState((s) => ({ ...s, map: { ...defaultMapState } }));
+
   const resetViewer = () => {
     console.log('[Store] resetViewer');
     setState((s) => ({
@@ -678,6 +850,7 @@ function createWorkflowStore() {
       dock: { ...defaultDockState },
       md: { ...defaultMDState },
       viewer: { ...defaultViewerState },
+      map: { ...defaultMapState },
     }));
 
   return {
@@ -774,6 +947,24 @@ function createWorkflowStore() {
     setViewerBindingSiteMap,
     setViewerIsComputingBindingSiteMap,
     setViewerBindingSiteChannel,
+    // Layer state
+    nextLayerId,
+    addViewerLayer,
+    removeViewerLayer,
+    updateViewerLayer,
+    setViewerLayerSelected,
+    addViewerLayerGroup,
+    removeViewerLayerGroup,
+    toggleViewerLayerGroupExpanded,
+    toggleViewerLayerGroupVisible,
+    clearViewerLayers,
+    // Map state
+    setMapMethod,
+    setMapIsComputing,
+    setMapProgress,
+    setMapError,
+    setMapShowMdConfirm,
+    resetMap,
     // Utilities
     getBaseOutputDir: async () => {
       const custom = state().customOutputDir;

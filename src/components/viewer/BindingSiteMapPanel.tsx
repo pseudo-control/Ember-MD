@@ -1,33 +1,32 @@
-import { Component, Show, For } from 'solid-js';
+import { Component, Show } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
-import type { BindingSiteMapChannel } from '../../stores/workflow';
 
 interface BindingSiteMapPanelProps {
   onCompute: () => void;
   onClear: () => void;
 }
 
-const CHANNELS = [
-  { key: 'hydrophobic' as const, label: 'Hydrophobic', color: '#22c55e' },
-  { key: 'hbondDonor' as const, label: 'H-Donor', color: '#3b82f6' },
-  { key: 'hbondAcceptor' as const, label: 'H-Acceptor', color: '#ef4444' },
-];
+const METHOD_LABELS: Record<string, string> = {
+  static: 'Pocket Properties',
+  solvation: 'Water Thermodynamics',
+  probe: 'Fragment Mapping',
+};
 
 const BindingSiteMapPanel: Component<BindingSiteMapPanelProps> = (props) => {
-  const { state, setViewerBindingSiteChannel } = workflowStore;
+  const { state } = workflowStore;
 
   const bsMap = () => state().viewer.bindingSiteMap;
   const isComputing = () => state().viewer.isComputingBindingSiteMap;
 
-  const getChannel = (key: 'hydrophobic' | 'hbondDonor' | 'hbondAcceptor'): BindingSiteMapChannel | null => {
-    const map = bsMap();
-    if (!map) return null;
-    return map[key];
-  };
-
   const hotspotCount = () => {
     const map = bsMap();
     return map ? map.hotspots.length : 0;
+  };
+
+  const methodLabel = () => {
+    const map = bsMap();
+    if (!map?.method) return 'Pocket Map';
+    return METHOD_LABELS[map.method] || 'Pocket Map';
   };
 
   return (
@@ -58,7 +57,12 @@ const BindingSiteMapPanel: Component<BindingSiteMapPanelProps> = (props) => {
       <Show when={bsMap()}>
         <div class="card bg-base-300/50 p-1.5">
           <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-semibold">Growth Map</span>
+            <div class="flex items-center gap-1.5">
+              <span class="text-xs font-semibold">Pocket Map</span>
+              <Show when={bsMap()?.method}>
+                <span class="badge badge-xs badge-primary">{methodLabel()}</span>
+              </Show>
+            </div>
             <div class="flex items-center gap-1">
               <Show when={hotspotCount() > 0}>
                 <span class="badge badge-xs badge-accent">{hotspotCount()} hotspots</span>
@@ -66,7 +70,7 @@ const BindingSiteMapPanel: Component<BindingSiteMapPanelProps> = (props) => {
               <button
                 class="btn btn-xs btn-ghost btn-square"
                 onClick={() => props.onClear()}
-                title="Clear growth map"
+                title="Clear pocket map"
               >
                 <svg class="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
                   <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -75,32 +79,21 @@ const BindingSiteMapPanel: Component<BindingSiteMapPanelProps> = (props) => {
             </div>
           </div>
 
-          <For each={CHANNELS}>
-            {(ch) => {
-              const channel = () => getChannel(ch.key);
-              return (
-                <Show when={channel()}>
-                  <div class="flex items-center gap-1.5 py-0.5">
-                    <label class="flex items-center gap-1 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        class="checkbox checkbox-xs"
-                        checked={channel()!.visible}
-                        onChange={(e) =>
-                          setViewerBindingSiteChannel(ch.key, { visible: e.currentTarget.checked })
-                        }
-                      />
-                      <span
-                        class="w-2 h-2 rounded-full inline-block"
-                        style={{ background: ch.color }}
-                      />
-                      <span class="text-xs">{ch.label}</span>
-                    </label>
-                  </div>
-                </Show>
-              );
-            }}
-          </For>
+          {/* Channel legend — always visible, no toggles */}
+          <div class="flex items-center gap-3 py-0.5">
+            <div class="flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full inline-block" style={{ background: '#22c55e' }} />
+              <span class="text-[10px] text-base-content/60">Hydrophobic</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full inline-block" style={{ background: '#3b82f6' }} />
+              <span class="text-[10px] text-base-content/60">H-Donor</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full inline-block" style={{ background: '#ef4444' }} />
+              <span class="text-[10px] text-base-content/60">H-Acceptor</span>
+            </div>
+          </div>
         </div>
       </Show>
     </div>

@@ -28,6 +28,13 @@ export interface ColormakerSchemeContext {
 export type SelectionSchemeEntry = [string, string, ColormakerParameters | undefined];
 
 /**
+ * A PDB/CIF path that has been passed through prepareStructure().
+ * Only stageLoadProtein() accepts this type — raw strings cause a compile
+ * error, preventing accidental bypass of hydrogen addition.
+ */
+export type PreparedPath = string & { readonly __prepared: unique symbol };
+
+/**
  * NGL load file options. Combines StageLoadFileParams with ParserParams.
  * Used for stage.loadFile() calls.
  */
@@ -47,6 +54,17 @@ export interface NglLoadOptions {
 }
 
 /**
+ * Augment NGL's Structure with updatePosition (exists at runtime but missing from declarations).
+ * Takes a flat coordinate array [x0,y0,z0,x1,y1,z1,...] and updates atom positions in place.
+ */
+declare module 'ngl' {
+  interface Structure {
+    updatePosition(position: Float32Array | number[], refresh?: boolean): void;
+    refreshPosition(): void;
+  }
+}
+
+/**
  * Binding site results JSON shape (read from disk).
  * Matches the output of map_binding_site.py.
  */
@@ -56,4 +74,5 @@ export interface BindingSiteResultsJson {
   hbondAcceptorDx: string;
   hotspots: Array<{ type: string; position: number[]; direction: number[]; score: number }>;
   gridDimensions?: [number, number, number];
+  method?: 'static' | 'solvation' | 'probe';
 }

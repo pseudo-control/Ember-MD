@@ -101,17 +101,18 @@ const MDStepProgress: Component = () => {
     const successMatch = data.data.match(/SUCCESS:(.+)/);
     if (successMatch) {
       const trajectoryPath = successMatch[1].trim();
-      // The output dir is the parent of the trajectory file
       const outputDir = path.dirname(trajectoryPath);
-      // File prefix: derive from trajectory filename (e.g. projectName_trajectory.dcd → projectName)
       const trajBasename = path.basename(trajectoryPath);
-      const jobPrefix = trajBasename.replace(/_trajectory\.dcd$/, '') || path.basename(outputDir);
+      // New layout: unprefixed (trajectory.dcd). Legacy: {prefix}_trajectory.dcd
+      const isUnprefixed = trajBasename === 'trajectory.dcd';
+      const jobPrefix = isUnprefixed ? '' : (trajBasename.replace(/_trajectory\.dcd$/, '') || '');
+      const pf = (name: string) => jobPrefix ? `${jobPrefix}_${name}` : name;
       setMdResult({
-        systemPdbPath: path.join(outputDir, `${jobPrefix}_system.pdb`),
+        systemPdbPath: path.join(outputDir, pf('system.pdb')),
         trajectoryPath: trajectoryPath,
-        equilibratedPdbPath: path.join(outputDir, `${jobPrefix}_equilibrated.pdb`),
-        finalPdbPath: path.join(outputDir, `${jobPrefix}_final.pdb`),
-        energyCsvPath: path.join(outputDir, `${jobPrefix}_energy.csv`),
+        equilibratedPdbPath: path.join(outputDir, pf('equilibrated.pdb')),
+        finalPdbPath: path.join(outputDir, pf('final.pdb')),
+        energyCsvPath: path.join(outputDir, pf('energy.csv')),
       });
       setCurrentPhase('complete');
       setIsRunning(false);
@@ -146,11 +147,11 @@ const MDStepProgress: Component = () => {
     // Deduplicate: append _run2, _run3, etc. if folder exists
     let finalRunFolder = runFolder;
     let n = 1;
-    while (await api.fileExists(paths.simulations(finalRunFolder))) {
+    while (await api.fileExists(paths.simulations(finalRunFolder).root)) {
       n++;
       finalRunFolder = `${runFolder}_run${n}`;
     }
-    const outputDir = paths.simulations(finalRunFolder);
+    const outputDir = paths.simulations(finalRunFolder).root;
 
     try {
       console.log(`[MD] Starting simulation: ${state().md.config.forceFieldPreset}, ${state().md.config.productionNs}ns → ${outputDir}`);
@@ -338,7 +339,7 @@ const MDStepProgress: Component = () => {
                     )}
                   </div>
                   <span
-                    class={`text-[9px] mt-1 text-center ${
+                    class={`text-[10px] mt-1 text-center ${
                       status() === 'active' ? 'text-primary font-semibold' : 'text-base-content/80'
                     }`}
                   >
@@ -363,7 +364,7 @@ const MDStepProgress: Component = () => {
           value={overallProgress()}
           max="100"
          />
-        <div class="flex justify-between text-[10px] text-base-content/80 mt-1">
+        <div class="flex justify-between text-xs text-base-content/80 mt-1">
           <Show
             when={state().md.currentStage === 'production' && productionNs()}
             fallback={

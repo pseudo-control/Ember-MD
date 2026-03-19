@@ -61,7 +61,8 @@ const DockStepProgress: Component = () => {
       referenceLigandId: dock.referenceLigandId,
       numLigands: dock.ligandSdfPaths.length,
     });
-    const outputDir = paths.docking(dockFolder);
+    const dockPaths = paths.docking(dockFolder);
+    const outputDir = dockPaths.root;
     setDockOutputDir(outputDir);
 
     try {
@@ -70,7 +71,7 @@ const DockStepProgress: Component = () => {
       // Preprocessing: protonation enumeration
       if (dock.protonationConfig.enabled && ligandPaths.length > 0) {
         appendLog('--- Enumerating protonation states... ---\n');
-        const protonDir = path.join(paths.ligands.sdf, 'protonated');
+        const protonDir = path.join(dockPaths.prep, 'protonated');
         const protonResult = await api.enumerateProtonation(
           ligandPaths, protonDir,
           dock.protonationConfig.phMin, dock.protonationConfig.phMax
@@ -86,7 +87,7 @@ const DockStepProgress: Component = () => {
       // Preprocessing: conformer generation
       if (dock.conformerConfig.method !== 'none' && ligandPaths.length > 0) {
         appendLog('--- Generating conformers... ---\n');
-        const confDir = path.join(paths.ligands.sdf, 'conformers');
+        const confDir = path.join(dockPaths.prep, 'conformers');
         const confResult = await api.generateConformers(
           ligandPaths, confDir,
           dock.conformerConfig.maxConformers,

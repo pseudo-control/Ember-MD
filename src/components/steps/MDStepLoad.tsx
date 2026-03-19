@@ -351,7 +351,7 @@ const MDStepLoad: Component = () => {
                   <img
                     src={thumbnailDataUrl()!}
                     alt="Molecule structure"
-                    class="rounded bg-white p-2"
+                    class="rounded bg-base-100 p-2"
                     style={{ "max-width": "100%", "max-height": "280px", "object-fit": "contain" }}
                   />
                 </Show>
@@ -482,7 +482,7 @@ const MDStepLoad: Component = () => {
                   <img
                     src={thumbnailDataUrl()!}
                     alt="Ligand structure"
-                    class="rounded bg-white p-1"
+                    class="rounded bg-base-100 p-1"
                     style={{ "max-width": "100%", "max-height": "280px", "object-fit": "contain" }}
                   />
                 </Show>
