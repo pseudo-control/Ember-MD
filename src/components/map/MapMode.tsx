@@ -54,9 +54,7 @@ const MapMode: Component = () => {
     setMapProgress,
     setMapError,
     setMapShowMdConfirm,
-    setViewerBindingSiteMap,
-    setViewerPdbPath,
-    setMode,
+    openViewerSession,
   } = workflowStore;
 
   const [hoveredMethod, setHoveredMethod] = createSignal<MapMethod | null>(null);
@@ -287,7 +285,9 @@ const MapMode: Component = () => {
   };
 
   const loadMapResult = (result: any, method: MapMethod) => {
-    setViewerBindingSiteMap({
+    openViewerSession({
+      pdbPath: localPdbPath(),
+      bindingSiteMap: {
       hydrophobic: { visible: true, isolevel: 0.3, opacity: 0.7 },
       hbondDonor: { visible: true, isolevel: 0.3, opacity: 0.7 },
       hbondAcceptor: { visible: true, isolevel: 0.3, opacity: 0.7 },
@@ -296,11 +296,9 @@ const MapMode: Component = () => {
       hbondAcceptorDx: result.hbondAcceptorDx,
       hotspots: result.hotspots || [],
       method,
+      },
     });
-    // Load the structure into the viewer and switch to it
-    if (localPdbPath()) setViewerPdbPath(localPdbPath());
     setMapProgress('Done', 100);
-    setMode('viewer');
   };
 
   return (

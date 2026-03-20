@@ -3,7 +3,7 @@
  *
  * ~/Ember/{projectName}/
  *   .ember-project        — Project ID file
- *   structures/            — Imported PDB/CIF files + CIF→PDB conversions
+ *   structures/            — Imported structure files (.pdb/.cif/.sdf/.mol/.mol2) + prepared copies
  *   surfaces/              — Computed surface caches
  *   surfaces/binding_site_map/ — Interaction grids (OpenDX)
  *   docking/{run}/         — Self-contained docking jobs

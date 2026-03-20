@@ -1,8 +1,9 @@
 import { Component, onMount, onCleanup, createSignal, Show } from 'solid-js';
 import path from 'path';
 import { workflowStore } from '../../stores/workflow';
-import { buildDockFolderName } from '../../utils/jobName';
+import { buildDockFolderName, buildDockConformRunFolderName } from '../../utils/jobName';
 import { projectPaths } from '../../utils/projectPaths';
+import { DEFAULT_RECEPTOR_WATER_DISTANCE } from '../../../shared/types/dock';
 import TerminalOutput from '../shared/TerminalOutput';
 
 const DockStepProgress: Component = () => {
@@ -43,6 +44,8 @@ const DockStepProgress: Component = () => {
   const runDocking = async () => {
     const dock = state().dock;
     if (!dock.receptorPrepared) return;
+    if (!dock.receptorPdbPath) return;
+    if (!dock.referenceLigandId) return;
     if (!dock.referenceLigandPath) return;
     if (dock.ligandSdfPaths.length === 0) return;
 
@@ -67,6 +70,53 @@ const DockStepProgress: Component = () => {
 
     try {
       let ligandPaths = [...dock.ligandSdfPaths];
+      let dockingReceptorPath = dock.receptorPrepared;
+      let dockingReferenceLigandPath = dock.referenceLigandPath;
+      const receptorPh = (dock.protonationConfig.phMin + dock.protonationConfig.phMax) / 2;
+
+      appendLog('--- Preparing canonical receptor... ---\n');
+      const canonicalReceptorPath = path.join(dockPaths.prep, 'canonical_receptor.pdb');
+      const canonicalReceptorResult = await api.prepareReceptor(
+        dock.receptorPdbPath,
+        dock.referenceLigandId,
+        canonicalReceptorPath,
+        DEFAULT_RECEPTOR_WATER_DISTANCE,
+        receptorPh
+      );
+      if (!canonicalReceptorResult.ok) {
+        if (state().currentPhase !== 'idle') {
+          setError(canonicalReceptorResult.error.message);
+          setCurrentPhase('error');
+        }
+        setIsRunning(false);
+        return;
+      }
+      dockingReceptorPath = canonicalReceptorResult.value;
+      appendLog(`  Canonical receptor: ${path.basename(dockingReceptorPath)} (uniform pH ${receptorPh.toFixed(1)})\n\n`);
+
+      appendLog('--- Preparing canonical docking complex... ---\n');
+      const complexDir = path.join(dockPaths.prep, 'complex');
+      const preparedComplexResult = await api.prepareDockingComplex(
+        dockingReceptorPath,
+        dock.referenceLigandPath,
+        complexDir,
+        dock.refinementConfig.chargeMethod,
+        dock.protonationConfig.phMin,
+        dock.protonationConfig.phMax,
+        dock.protonationConfig.enabled
+      );
+      if (!preparedComplexResult.ok) {
+        if (state().currentPhase !== 'idle') {
+          setError(preparedComplexResult.error.message);
+          setCurrentPhase('error');
+        }
+        setIsRunning(false);
+        return;
+      }
+      dockingReceptorPath = preparedComplexResult.value.preparedReceptorPdb;
+      dockingReferenceLigandPath = preparedComplexResult.value.preparedReferenceLigandSdf;
+      appendLog(`  Canonical receptor: ${path.basename(dockingReceptorPath)}\n`);
+      appendLog(`  Canonical X-ray ligand: ${path.basename(dockingReferenceLigandPath)}\n\n`);
 
       // Preprocessing: protonation enumeration
       if (dock.protonationConfig.enabled && ligandPaths.length > 0) {
@@ -115,7 +165,13 @@ const DockStepProgress: Component = () => {
       if (dock.conformerConfig.method !== 'none' && ligandPaths.length > 0) {
         const methodLabel = dock.conformerConfig.method.toUpperCase();
         appendLog(`--- Generating conformers (${methodLabel})... ---\n`);
-        const confDir = path.join(dockPaths.prep, dock.conformerConfig.method === 'mcmm' ? 'mcmm' : 'etkdg');
+        const conformerRunFolder = buildDockConformRunFolderName({
+          referenceLigandId: dock.referenceLigandId,
+          numLigands: dock.ligandMolecules.length,
+          method: dock.conformerConfig.method,
+          maxConformers: dock.conformerConfig.maxConformers,
+        });
+        const confDir = paths.conformers(conformerRunFolder);
         const mcmmOpts = dock.conformerConfig.method === 'mcmm' ? {
           steps: dock.conformerConfig.mcmmSteps,
           temperature: dock.conformerConfig.mcmmTemperature,
@@ -131,7 +187,8 @@ const DockStepProgress: Component = () => {
         );
         if (confResult.ok && confResult.value.conformerPaths.length > 0) {
           ligandPaths = confResult.value.conformerPaths;
-          appendLog(`  ${ligandPaths.length} conformers generated\n\n`);
+          appendLog(`  ${ligandPaths.length} conformers generated\n`);
+          appendLog(`  Saved reusable conformer job: ${path.join(jobName, 'conformers', conformerRunFolder)}\n\n`);
         } else {
           appendLog('  Conformer generation skipped\n\n');
         }
@@ -142,8 +199,8 @@ const DockStepProgress: Component = () => {
 
       console.log(`[Dock] Starting Vina docking: ${ligandPaths.length} ligands → ${outputDir}`);
       const result = await api.runVinaDocking(
-        dock.receptorPrepared,
-        dock.referenceLigandPath,
+        dockingReceptorPath,
+        dockingReferenceLigandPath,
         ligandPaths,
         outputDir,
         dock.config
@@ -168,10 +225,11 @@ const DockStepProgress: Component = () => {
         try {
           const posesDir = path.join(outputDir, 'results', 'poses');
           const refineResult = await api.refinePoses(
-            dock.receptorPrepared!,
+            dockingReceptorPath!,
             posesDir,
             posesDir,
-            dock.refinementConfig.maxIterations
+            dock.refinementConfig.maxIterations,
+            dock.refinementConfig.chargeMethod
           );
           if (refineResult.ok && refineResult.value.refinedCount > 0) {
             appendLog(`\nRefinement complete: ${refineResult.value.refinedCount} poses refined\n`);

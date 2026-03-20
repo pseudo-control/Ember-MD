@@ -1,15 +1,22 @@
 import { Component, For, Show } from 'solid-js';
 import type { ViewerLayer, ViewerLayerGroup } from '../../stores/workflow';
+import type { ProjectJob } from '../../../shared/types/ipc';
 
 interface LayerPanelProps {
   layers: ViewerLayer[];
   layerGroups: ViewerLayerGroup[];
   selectedLayerId: string | null;
   proteinCount: number;
-  onImportStructure: () => void;
-  onImportJob: () => void;
+  canClear: boolean;
+  recentJobs: ProjectJob[];
+  selectedRecentJobId: string | null;
+  isLoadingRecentJobs: boolean;
+  isLoadingSelectedJob: boolean;
+  onImportFiles: () => void;
   onAlignAll: () => void;
   onClearAll: () => void;
+  onSelectRecentJob: (jobId: string) => void;
+  onLoadRecentJob: () => void;
   onToggleVisibility: (layerId: string) => void;
   onRemoveLayer: (layerId: string) => void;
   onSelectLayer: (layerId: string) => void;
@@ -103,91 +110,161 @@ const LayerPanel: Component<LayerPanelProps> = (props) => {
     return { byGroup, standalone };
   };
 
+  const jobTypeLabel = (job: ProjectJob) => {
+    if (job.type === 'docking') return 'Dock';
+    if (job.type === 'simulation') return 'MD';
+    if (job.type === 'conformer') return 'MCMM';
+    return 'Job';
+  };
+
   return (
     <div class="card bg-base-200 p-2">
-      <div class="flex flex-col gap-1">
-        <div class="flex items-center gap-1">
-          <Show when={props.proteinCount >= 2}>
-            <button class="btn btn-xs btn-accent flex-1" onClick={props.onAlignAll}>
-              Align
+      <div class="grid grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] gap-3">
+        <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-3 min-w-0">
+          <div>
+            <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55 mb-1">
+              Import Files
+            </div>
+            <p class="text-xs text-base-content/75 leading-relaxed">
+              Open structures or one trajectory from a single file picker.
+            </p>
+            <div class="text-[11px] text-base-content/55 leading-relaxed mt-1">
+              <p>Structures: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`</p>
+              <p>Trajectory: `.dcd`</p>
+            </div>
+          </div>
+          <button class="btn btn-sm btn-primary w-full" onClick={props.onImportFiles}>
+            Import Files
+          </button>
+          <div class="flex gap-2">
+            <Show when={props.proteinCount >= 2}>
+              <button class="btn btn-xs btn-accent flex-1" onClick={props.onAlignAll}>
+                Align Loaded Structures
+              </button>
+            </Show>
+            <Show when={props.canClear}>
+              <button class="btn btn-xs btn-ghost flex-1" onClick={props.onClearAll}>
+                Close Viewer
+              </button>
+            </Show>
+          </div>
+        </div>
+        <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-2 min-w-0">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55">
+              Recent Jobs
+            </span>
+            <button
+              class="btn btn-xs btn-primary"
+              onClick={props.onLoadRecentJob}
+              disabled={!props.selectedRecentJobId || props.isLoadingSelectedJob}
+            >
+              <Show when={props.isLoadingSelectedJob} fallback={'Load'}>
+                <span class="loading loading-spinner loading-xs" />
+              </Show>
             </button>
-          </Show>
-          <Show when={props.layers.length > 0}>
-            <button class="btn btn-xs btn-ghost flex-1" onClick={props.onClearAll}>
-              Clear All
-            </button>
+          </div>
+          <Show when={!props.isLoadingRecentJobs} fallback={
+            <div class="h-40 flex items-center justify-center">
+              <span class="loading loading-spinner loading-sm text-primary" />
+            </div>
+          }>
+            <Show when={props.recentJobs.length > 0} fallback={
+              <div class="h-40 flex items-center justify-center text-xs text-base-content/55 text-center">
+                No recent jobs in this project.
+              </div>
+            }>
+              <div class="h-40 overflow-y-auto rounded border border-base-300 divide-y divide-base-300">
+                <For each={props.recentJobs}>
+                  {(job) => (
+                    <button
+                      class={`w-full px-2 py-2 text-left hover:bg-base-200 ${
+                        props.selectedRecentJobId === job.id ? 'bg-primary/15' : ''
+                      }`}
+                      onClick={() => props.onSelectRecentJob(job.id)}
+                    >
+                      <div class="flex items-center gap-2">
+                        <span class="badge badge-ghost badge-xs">{jobTypeLabel(job)}</span>
+                        <span class="text-xs font-medium truncate flex-1">{job.label}</span>
+                      </div>
+                      <div class="text-[10px] text-base-content/55 mt-1 truncate">{job.path}</div>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
           </Show>
         </div>
-
-        {/* Layer list */}
-        <Show when={props.layers.length > 0 || props.layerGroups.length > 0}>
-          <div class="border border-base-300 rounded divide-y divide-base-300 max-h-48 overflow-y-auto">
-            {/* Groups */}
-            <For each={props.layerGroups}>
-              {(group) => {
-                const children = () => grouped().byGroup.get(group.id) || [];
-                return (
-                  <>
-                    <div class="h-7 px-2 flex items-center gap-2 hover:bg-base-200 cursor-pointer">
-                      <button class="flex items-center" onClick={() => props.onToggleGroupExpanded(group.id)}>
-                        {group.expanded ? <ChevronDown /> : <ChevronRight />}
-                      </button>
-                      <span
-                        class="flex-1 min-w-0 text-xs font-medium truncate"
-                        onClick={() => props.onToggleGroupExpanded(group.id)}
-                      >
-                        {group.label}
-                      </span>
-                      <button
-                        class="opacity-70 hover:opacity-100"
-                        onClick={() => props.onToggleGroupVisible(group.id)}
-                        title={group.visible ? 'Hide group' : 'Show group'}
-                      >
-                        {group.visible ? <EyeIcon /> : <EyeOffIcon />}
-                      </button>
-                      <button
-                        class="opacity-70 hover:opacity-100"
-                        onClick={() => props.onRemoveGroup(group.id)}
-                        title="Remove group"
-                      >
-                        <XIcon />
-                      </button>
-                    </div>
-                    <Show when={group.expanded}>
-                      <For each={children()}>
-                        {(layer) => (
-                          <LayerRow
-                            layer={layer}
-                            isSelected={layer.id === props.selectedLayerId}
-                            indent={true}
-                            onSelect={() => props.onSelectLayer(layer.id)}
-                            onToggleVisibility={() => props.onToggleVisibility(layer.id)}
-                            onRemove={() => props.onRemoveLayer(layer.id)}
-                          />
-                        )}
-                      </For>
-                    </Show>
-                  </>
-                );
-              }}
-            </For>
-
-            {/* Standalone layers */}
-            <For each={grouped().standalone}>
-              {(layer) => (
-                <LayerRow
-                  layer={layer}
-                  isSelected={layer.id === props.selectedLayerId}
-                  indent={false}
-                  onSelect={() => props.onSelectLayer(layer.id)}
-                  onToggleVisibility={() => props.onToggleVisibility(layer.id)}
-                  onRemove={() => props.onRemoveLayer(layer.id)}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
       </div>
+
+      {/* Layer list */}
+      <Show when={props.layers.length > 0 || props.layerGroups.length > 0}>
+        <div class="mt-2 border border-base-300 rounded divide-y divide-base-300 max-h-48 overflow-y-auto">
+          {/* Groups */}
+          <For each={props.layerGroups}>
+            {(group) => {
+              const children = () => grouped().byGroup.get(group.id) || [];
+              return (
+                <>
+                  <div class="h-7 px-2 flex items-center gap-2 hover:bg-base-200 cursor-pointer">
+                    <button class="flex items-center" onClick={() => props.onToggleGroupExpanded(group.id)}>
+                      {group.expanded ? <ChevronDown /> : <ChevronRight />}
+                    </button>
+                    <span
+                      class="flex-1 min-w-0 text-xs font-medium truncate"
+                      onClick={() => props.onToggleGroupExpanded(group.id)}
+                    >
+                      {group.label}
+                    </span>
+                    <button
+                      class="opacity-70 hover:opacity-100"
+                      onClick={() => props.onToggleGroupVisible(group.id)}
+                      title={group.visible ? 'Hide group' : 'Show group'}
+                    >
+                      {group.visible ? <EyeIcon /> : <EyeOffIcon />}
+                    </button>
+                    <button
+                      class="opacity-70 hover:opacity-100"
+                      onClick={() => props.onRemoveGroup(group.id)}
+                      title="Remove group"
+                    >
+                      <XIcon />
+                    </button>
+                  </div>
+                  <Show when={group.expanded}>
+                    <For each={children()}>
+                      {(layer) => (
+                        <LayerRow
+                          layer={layer}
+                          isSelected={layer.id === props.selectedLayerId}
+                          indent={true}
+                          onSelect={() => props.onSelectLayer(layer.id)}
+                          onToggleVisibility={() => props.onToggleVisibility(layer.id)}
+                          onRemove={() => props.onRemoveLayer(layer.id)}
+                        />
+                      )}
+                    </For>
+                  </Show>
+                </>
+              );
+            }}
+          </For>
+
+          {/* Standalone layers */}
+          <For each={grouped().standalone}>
+            {(layer) => (
+              <LayerRow
+                layer={layer}
+                isSelected={layer.id === props.selectedLayerId}
+                indent={false}
+                onSelect={() => props.onSelectLayer(layer.id)}
+                onToggleVisibility={() => props.onToggleVisibility(layer.id)}
+                onRemove={() => props.onRemoveLayer(layer.id)}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 };

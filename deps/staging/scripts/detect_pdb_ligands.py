@@ -15,7 +15,10 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
-
+from receptor_protonation import (
+    identify_pocket_residue_keys_from_pdb,
+    prepare_receptor_with_propka,
+)
 from utils import convert_cif_to_pdb
 
 # Common non-ligand HETATM residues to exclude
@@ -281,7 +284,14 @@ RETAIN_COFACTORS = {
 }
 
 
-def prepare_receptor(pdb_path: str, ligand_id: str, output_path: str, water_distance: float = 0.0, add_hydrogens: bool = True) -> bool:
+def prepare_receptor(
+    pdb_path: str,
+    ligand_id: str,
+    output_path: str,
+    water_distance: float = 0.0,
+    add_hydrogens: bool = True,
+    protonation_ph: float = 7.4,
+) -> bool:
     """Prepare receptor by removing the specified ligand and adding hydrogens.
 
     Args:
@@ -290,8 +300,8 @@ def prepare_receptor(pdb_path: str, ligand_id: str, output_path: str, water_dist
         output_path: Output PDB file for prepared receptor
         water_distance: Keep crystallographic waters within this distance (Å)
                        of the ligand. 0 = remove all waters (default).
-        add_hydrogens: Add missing hydrogens via PDBFixer at pH 7.4 (default: True).
-                       Improves GNINA CNN scoring accuracy.
+        add_hydrogens: Add missing hydrogens via PDBFixer (default: True).
+        protonation_ph: Uniform pH used for receptor hydrogen addition.
     """
     ligands = parse_pdb_ligands(pdb_path)
 
@@ -304,6 +314,7 @@ def prepare_receptor(pdb_path: str, ligand_id: str, output_path: str, water_dist
     chain = ligand['chain']
     resnum = ligand['resnum']
     ligand_coords = [(a['x'], a['y'], a['z']) for a in ligand['atoms']]
+    pocket_residue_keys = identify_pocket_residue_keys_from_pdb(pdb_path, ligand_coords)
 
     # First pass: collect HETATM coordinates for distance-based retention
     water_molecules = defaultdict(list)   # (chain, resnum) -> [(x, y, z)]
@@ -386,113 +397,43 @@ def prepare_receptor(pdb_path: str, ligand_id: str, output_path: str, water_dist
 
     # Protein preparation pipeline:
     # 1. Reduce: optimize Asn/Gln/His orientations (flip ambiguous residues)
-    # 2. PROPKA: predict per-residue pKa values
-    # 3. PDBFixer: add hydrogens with PROPKA-informed protonation
+    # 2. PROPKA: detect shifted pocket-adjacent titratable residues
+    # 3. PDBFixer: add missing atoms
+    # 4. Modeller.addHydrogens(..., variants=...) for explicit residue states
     if add_hydrogens:
-        current_file = tmp_path
-
-        # Step 1: Run reduce for Asn/Gln/His flip optimization
         try:
-            import subprocess as _sp
-            import shutil
-            reduce_bin = shutil.which('reduce')
-            if reduce_bin:
-                print("  Optimizing Asn/Gln/His orientations (reduce)...", file=sys.stderr)
-                reduced_path = tmp_path.replace('.tmp', '.reduced.pdb')
-                result = _sp.run(
-                    [reduce_bin, '-FLIP', '-Quiet', current_file],
-                    capture_output=True, text=True, timeout=60
+            print(f"  Pocket residues considered for PROPKA overrides: {len(pocket_residue_keys)}", file=sys.stderr)
+            metadata = prepare_receptor_with_propka(
+                tmp_path,
+                output_path,
+                protonation_ph,
+                pocket_residue_keys=pocket_residue_keys,
+            )
+            print(f"  Receptor protonation pH: {protonation_ph:.1f}", file=sys.stderr)
+            print(f"  PROPKA available: {'yes' if metadata.get('propka_available') else 'no'}", file=sys.stderr)
+            for entry in metadata.get('applied_overrides', []):
+                pka_text = f", pKa={entry['pka']:.1f}" if 'pka' in entry else ''
+                print(
+                    f"    Override {entry['residue_name']} {entry['chain_id']}{entry['residue_number']}: "
+                    f"{entry['default_variant']} -> {entry['selected_variant']}{pka_text}",
+                    file=sys.stderr,
                 )
-                if result.returncode == 0 and result.stdout:
-                    with open(reduced_path, 'w') as f:
-                        f.write(result.stdout)
-                    current_file = reduced_path
-                    print("  Asn/Gln/His flips optimized", file=sys.stderr)
-                else:
-                    print("  WARNING: reduce returned no output, skipping flips",
-                          file=sys.stderr)
-            else:
-                print("  NOTE: reduce not found, skipping Asn/Gln/His optimization",
-                      file=sys.stderr)
+            for entry in metadata.get('ignored_shifted_residues', []):
+                print(
+                    f"    Ignored {entry['residue_name']} {entry['chain_id']}{entry['residue_number']}: "
+                    f"reason={entry['reason']}, pKa={entry['pka']:.1f}",
+                    file=sys.stderr,
+                )
+            print(f"  Receptor preparation complete ({len(metadata.get('applied_overrides', []))} override(s))", file=sys.stderr)
         except Exception as e:
-            print(f"  WARNING: reduce failed: {e}, continuing without flips",
+            print(f"  WARNING: PROPKA-guided receptor preparation failed: {e}, using unprotonated receptor",
                   file=sys.stderr)
-
-        # Step 2: Run PROPKA for per-residue pKa prediction
-        propka_ph = 7.4  # Default
-        try:
-            from propka.run import single as propka_single
-            print("  Predicting per-residue pKa (PROPKA)...", file=sys.stderr)
-            mol = propka_single(current_file)
-
-            standard_pka = {'ASP': 3.8, 'GLU': 4.5, 'HIS': 6.5, 'LYS': 10.5,
-                           'CYS': 8.3, 'TYR': 10.1}
-            shifted_count = 0
-            for conformation in mol.conformations:
-                conf = mol.conformations[conformation]
-                for group in conf.get_titratable_groups():
-                    if group.residue_type in standard_pka and group.pka_value is not None:
-                        std = standard_pka[group.residue_type]
-                        std_prot = std > 7.4
-                        act_prot = group.pka_value > 7.4
-                        if std_prot != act_prot:
-                            shifted_count += 1
-                            print(f"    {group.residue_type} {group.chain_id}{group.res_num}: "
-                                  f"pKa={group.pka_value:.1f} (std={std:.1f})",
-                                  file=sys.stderr)
-                break  # Only need first conformation
-
-            if shifted_count > 0:
-                print(f"  PROPKA found {shifted_count} residue(s) with shifted protonation",
-                      file=sys.stderr)
-            else:
-                print("  PROPKA: all residues have standard protonation at pH 7.4",
-                      file=sys.stderr)
-        except ImportError:
-            print("  NOTE: PROPKA not installed, using standard pH 7.4 protonation",
-                  file=sys.stderr)
-        except Exception as e:
-            print(f"  WARNING: PROPKA failed: {e}, using standard pH 7.4",
-                  file=sys.stderr)
-
-        # Step 3: PDBFixer — add hydrogens
-        try:
-            from pdbfixer import PDBFixer
-            from openmm.app import PDBFile
-
-            print(f"  Adding hydrogens (pH {propka_ph}) via PDBFixer...", file=sys.stderr)
-            fixer = PDBFixer(filename=current_file)
-            fixer.addMissingHydrogens(propka_ph)
-
-            with open(output_path, 'w') as f:
-                PDBFile.writeFile(fixer.topology, fixer.positions, f)
-
-            # Clean up temp files
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            reduced_path = tmp_path.replace('.tmp', '.reduced.pdb')
-            if os.path.exists(reduced_path):
-                os.remove(reduced_path)
-
-            print("  Receptor preparation complete", file=sys.stderr)
-        except ImportError:
-            print("  WARNING: PDBFixer not available, skipping hydrogen addition",
-                  file=sys.stderr)
-            if current_file != output_path:
-                import shutil
-                shutil.copy2(current_file, output_path)
-        except Exception as e:
-            print(f"  WARNING: Hydrogen addition failed: {e}, using unprotonated receptor",
-                  file=sys.stderr)
-            if current_file != output_path:
-                import shutil
-                shutil.copy2(current_file, output_path)
-
-        # Clean up any remaining temp files
-        for tmp_f in [tmp_path, tmp_path.replace('.tmp', '.reduced.pdb')]:
-            if os.path.exists(tmp_f) and tmp_f != output_path:
+            import shutil
+            shutil.copy2(tmp_path, output_path)
+        finally:
+            if os.path.exists(tmp_path) and tmp_path != output_path:
                 try:
-                    os.remove(tmp_f)
+                    os.remove(tmp_path)
                 except OSError:
                     pass
 
@@ -508,6 +449,8 @@ def main() -> None:
     parser.add_argument('--output', help='Output file path')
     parser.add_argument('--water_distance', type=float, default=0.0,
                        help='Keep waters within this distance (A) of ligand (0=remove all)')
+    parser.add_argument('--ph', type=float, default=7.4,
+                       help='Uniform pH for receptor hydrogen addition')
     parser.add_argument('--no_hydrogens', action='store_true',
                        help='Skip hydrogen addition via PDBFixer')
     args = parser.parse_args()
@@ -560,7 +503,8 @@ def main() -> None:
             sys.exit(1)
         if prepare_receptor(args.pdb, args.ligand_id, args.output,
                            water_distance=args.water_distance,
-                           add_hydrogens=not args.no_hydrogens):
+                           add_hydrogens=not args.no_hydrogens,
+                           protonation_ph=args.ph):
             print(json.dumps({'success': True, 'output': args.output}))
         else:
             sys.exit(1)
@@ -570,21 +514,14 @@ def main() -> None:
             print("ERROR: --output required for add_hydrogens mode", file=sys.stderr)
             sys.exit(1)
         try:
-            from pdbfixer import PDBFixer
-            from openmm.app import PDBFile
-
-            print(f"  Adding hydrogens (pH 7.4) via PDBFixer...", file=sys.stderr)
-            fixer = PDBFixer(filename=args.pdb)
-            fixer.findMissingResidues()
-            fixer.findMissingAtoms()
-            fixer.addMissingAtoms()
-            fixer.addMissingHydrogens(7.4)
-
+            print(f"  Adding hydrogens with Modeller variants at pH {args.ph:.1f}...", file=sys.stderr)
             os.makedirs(os.path.dirname(args.output), exist_ok=True)
-            with open(args.output, 'w') as f:
-                PDBFile.writeFile(fixer.topology, fixer.positions, f)
-
-            print(f"  Prepared structure saved to {args.output}", file=sys.stderr)
+            metadata = prepare_receptor_with_propka(args.pdb, args.output, args.ph, pocket_residue_keys=None)
+            print(
+                f"  Prepared structure saved to {args.output} "
+                f"({len(metadata.get('applied_overrides', []))} override(s))",
+                file=sys.stderr,
+            )
             print(json.dumps({'success': True, 'output': args.output}))
         except ImportError:
             print("WARNING: PDBFixer not available, copying original file", file=sys.stderr)

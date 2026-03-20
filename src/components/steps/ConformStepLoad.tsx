@@ -1,5 +1,6 @@
 import { Component, Show, createSignal } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
+import { sanitizeConformOutputName } from '../../utils/jobName';
 
 const ConformStepLoad: Component = () => {
   const {
@@ -7,6 +8,7 @@ const ConformStepLoad: Component = () => {
     setConformStep,
     setConformLigandSdf,
     setConformLigandName,
+    setConformOutputName,
     setError,
   } = workflowStore;
   const api = window.electronAPI;
@@ -18,9 +20,10 @@ const ConformStepLoad: Component = () => {
   const handleSelectSdf = async () => {
     const sdfPath = await api.selectSdfFile();
     if (!sdfPath) return;
-    const name = sdfPath.split('/').pop()?.replace(/\.sdf(\.gz)?$/, '') || 'ligand';
+    const name = sdfPath.split('/').pop()?.replace(/(\.sdf(\.gz)?|\.mol2?|\.mol)$/i, '') || 'ligand';
     setConformLigandSdf(sdfPath);
     setConformLigandName(name);
+    setConformOutputName(sanitizeConformOutputName(name));
   };
 
   const handleSmiles = async () => {
@@ -36,6 +39,7 @@ const ConformStepLoad: Component = () => {
       if (result.ok) {
         setConformLigandSdf(result.value.sdfPath);
         setConformLigandName(result.value.name || 'smiles_mol');
+        setConformOutputName(sanitizeConformOutputName(result.value.name || 'smiles_mol'));
       } else {
         setError(result.error?.message || 'SMILES conversion failed');
       }
@@ -50,15 +54,15 @@ const ConformStepLoad: Component = () => {
   return (
     <div class="h-full flex flex-col">
       <div class="text-center mb-3">
-        <h2 class="text-xl font-bold">Load Molecule</h2>
-        <p class="text-sm text-base-content/90">Select a molecule for conformer search</p>
+        <h2 class="text-xl font-bold">Load Molecule for MCMM</h2>
+        <p class="text-sm text-base-content/90">Select one ligand structure or paste a SMILES string</p>
       </div>
 
       <div class="flex-1 min-h-0 overflow-auto flex flex-col items-center gap-4">
         {/* Input tabs */}
         <div class="tabs tabs-boxed tabs-sm">
           <button class={`tab ${inputTab() === 'sdf' ? 'tab-active' : ''}`} onClick={() => setInputTab('sdf')}>
-            SDF File
+            Structure File
           </button>
           <button class={`tab ${inputTab() === 'smiles' ? 'tab-active' : ''}`} onClick={() => setInputTab('smiles')}>
             SMILES
@@ -68,9 +72,14 @@ const ConformStepLoad: Component = () => {
         <div class="card bg-base-200 shadow-lg w-full max-w-md">
           <div class="card-body p-4">
             <Show when={inputTab() === 'sdf'}>
-              <button class="btn btn-primary btn-sm w-full" onClick={handleSelectSdf} disabled={isLoading()}>
-                Select SDF File
-              </button>
+              <div class="space-y-2">
+                <button class="btn btn-primary btn-sm w-full" onClick={handleSelectSdf} disabled={isLoading()}>
+                  Select Structure File
+                </button>
+                <p class="text-[10px] text-base-content/70">
+                  Accepted formats: `.sdf`, `.sdf.gz`, `.mol`, `.mol2`
+                </p>
+              </div>
             </Show>
 
             <Show when={inputTab() === 'smiles'}>

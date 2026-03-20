@@ -255,14 +255,15 @@ def main():
     for seq_idx, (orig_idx, pred) in enumerate(zip(all_indices, all_predictions)):
         index_to_prediction[orig_idx] = pred
 
-    # Compute summary scores from 8-class ordinal probabilities
-    # Expected pKd: weighted sum of thresholds
+    # Compute summary scores from 8-class ordinal cumulative probabilities.
+    # CORDIAL outputs P(pKd >= k) for k=1..8 (binary cross-entropy, ordinal "lte").
+    # For ordinal cumulative probs, E[Y] = sum(P(Y >= k)), NOT sum(k * P(Y >= k)).
     # High affinity probability: P(pKd >= 6)
     def compute_scores(probs):
-        """Compute summary scores from 8-class ordinal probabilities."""
+        """Compute summary scores from 8-class ordinal cumulative probabilities."""
         probs = np.array(probs)
-        # Expected pKd (weighted sum, thresholds 1-8)
-        expected_pkd = sum((i + 1) * probs[i] for i in range(8))
+        # Expected pKd: survival function identity E[Y] = sum(P(Y >= k))
+        expected_pkd = float(np.sum(probs))
         # Probability of high affinity (pKd >= 6, which is index 5)
         p_high_affinity = probs[5] if len(probs) > 5 else 0.0
         # Probability of very high affinity (pKd >= 7)

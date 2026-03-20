@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 const IpcChannels = {
   SELECT_PDB_FILE: 'select-pdb-file',
   SELECT_PDB_FILES_MULTI: 'select-pdb-files-multi',
+  SELECT_STRUCTURE_FILES_MULTI: 'select-structure-files-multi',
   SELECT_OUTPUT_FOLDER: 'select-output-folder',
   PREP_PDB: 'prep-pdb',
   GENERATE_SURFACE: 'generate-surface',
@@ -30,10 +31,13 @@ const IpcChannels = {
   DETECT_PDB_LIGANDS: 'detect-pdb-ligands',
   EXTRACT_LIGAND: 'extract-ligand',
   PREPARE_RECEPTOR: 'prepare-receptor',
+  PREPARE_DOCKING_COMPLEX: 'prepare-docking-complex',
   EXPORT_DOCK_CSV: 'dock:export-csv',
   EXPORT_COMPLEX_PDB: 'export-complex-pdb',
   GET_CPU_COUNT: 'get-cpu-count',
   // Multi-input ligand source channels
+  SELECT_MOLECULE_FILES_MULTI: 'select-molecule-files-multi',
+  IMPORT_MOLECULE_FILES: 'import-molecule-files',
   SELECT_FOLDER: 'select-folder',
   SCAN_SDF_DIRECTORY: 'scan-sdf-directory',
   PARSE_SMILES_CSV: 'parse-smiles-csv',
@@ -200,6 +204,7 @@ const electronAPI = {
   // File operations
   selectPdbFile: (defaultPath?: string) => ipcRenderer.invoke(IpcChannels.SELECT_PDB_FILE, defaultPath),
   selectPdbFilesMulti: () => ipcRenderer.invoke(IpcChannels.SELECT_PDB_FILES_MULTI),
+  selectStructureFilesMulti: () => ipcRenderer.invoke(IpcChannels.SELECT_STRUCTURE_FILES_MULTI),
   selectOutputFolder: () => ipcRenderer.invoke(IpcChannels.SELECT_OUTPUT_FOLDER),
   fileExists: (path: string) => ipcRenderer.invoke(IpcChannels.FILE_EXISTS, path),
   getFileInfo: (path: string) => ipcRenderer.invoke(IpcChannels.GET_FILE_INFO, path),
@@ -298,8 +303,39 @@ const electronAPI = {
   extractLigand: (pdbPath: string, ligandId: string, outputPath: string) =>
     ipcRenderer.invoke(IpcChannels.EXTRACT_LIGAND, pdbPath, ligandId, outputPath),
 
-  prepareReceptor: (pdbPath: string, ligandId: string, outputPath: string, waterDistance: number = 0) =>
-    ipcRenderer.invoke(IpcChannels.PREPARE_RECEPTOR, pdbPath, ligandId, outputPath, waterDistance),
+  prepareReceptor: (
+    pdbPath: string,
+    ligandId: string,
+    outputPath: string,
+    waterDistance: number = 0,
+    protonationPh: number = 7.4
+  ) => ipcRenderer.invoke(
+    IpcChannels.PREPARE_RECEPTOR,
+    pdbPath,
+    ligandId,
+    outputPath,
+    waterDistance,
+    protonationPh
+  ),
+
+  prepareDockingComplex: (
+    receptorPdb: string,
+    xrayLigandSdf: string,
+    outputDir: string,
+    chargeMethod: 'gasteiger' | 'am1bcc' = 'am1bcc',
+    phMin: number = 6.4,
+    phMax: number = 8.4,
+    protonateReference: boolean = true
+  ) => ipcRenderer.invoke(
+    IpcChannels.PREPARE_DOCKING_COMPLEX,
+    receptorPdb,
+    xrayLigandSdf,
+    outputDir,
+    chargeMethod,
+    phMin,
+    phMax,
+    protonateReference
+  ),
 
   exportDockCsv: (outputDir: string, csvOutput: string, bestOnly: boolean) =>
     ipcRenderer.invoke(IpcChannels.EXPORT_DOCK_CSV, outputDir, csvOutput, bestOnly),
@@ -308,6 +344,9 @@ const electronAPI = {
     ipcRenderer.invoke(IpcChannels.EXPORT_COMPLEX_PDB, receptorPdb, ligandSdf, poseIndex, outputPath),
 
   // Multi-input ligand source operations
+  selectMoleculeFilesMulti: () => ipcRenderer.invoke(IpcChannels.SELECT_MOLECULE_FILES_MULTI),
+  importMoleculeFiles: (filePaths: string[], outputDir: string) =>
+    ipcRenderer.invoke(IpcChannels.IMPORT_MOLECULE_FILES, filePaths, outputDir),
   selectFolder: () => ipcRenderer.invoke(IpcChannels.SELECT_FOLDER),
 
   scanSdfDirectory: (dirPath: string, outputDir: string) =>
@@ -396,13 +435,15 @@ const electronAPI = {
     receptorPdb: string,
     posesDir: string,
     outputDir: string,
-    maxIterations: number
+    maxIterations: number,
+    chargeMethod?: string
   ) => ipcRenderer.invoke(
     IpcChannels.REFINE_POSES,
     receptorPdb,
     posesDir,
     outputDir,
-    maxIterations
+    maxIterations,
+    chargeMethod
   ),
 
   // CORDIAL rescoring

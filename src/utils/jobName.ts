@@ -2,6 +2,7 @@
  * Utilities for generating and formatting job names
  */
 
+import type { ConformerMethod } from '../../shared/types/dock';
 import { MDForceFieldPreset, MD_PRESET_PARAMS } from '../../shared/types/md';
 
 // Word lists for random job name generation (chemistry/science themed)
@@ -115,6 +116,10 @@ export function sanitizeCompoundId(name: string): string {
   return sanitizeForFilesystem(name, 40);
 }
 
+export function sanitizeConformOutputName(name: string): string {
+  return sanitizeForFilesystem(name, 40);
+}
+
 /**
  * Estimate AM1-BCC charge computation time from ligand atom count
  */
@@ -145,4 +150,38 @@ export function buildMdRunFolderName(params: {
     return `${ff}_${compound}_MD-${temp}K-${ns}ns`;
   }
   return `${ff}_MD-${temp}K-${ns}ns`;
+}
+
+export function buildConformRunFolderName(params: {
+  method: Exclude<ConformerMethod, 'none'>;
+  maxConformers: number;
+  outputName?: string | null;
+  ligandName?: string | null;
+}): string {
+  const descriptor = sanitizeConformOutputName(
+    params.outputName?.trim() || params.ligandName?.trim() || 'molecule'
+  ) || 'molecule';
+  return `${descriptor}_${params.method.toUpperCase()}-${params.maxConformers}conf`;
+}
+
+export function buildDockConformRunFolderName(params: {
+  referenceLigandId?: string | null;
+  numLigands?: number;
+  method: Exclude<ConformerMethod, 'none'>;
+  maxConformers: number;
+}): string {
+  const dockRunName = buildDockFolderName({
+    referenceLigandId: params.referenceLigandId,
+    numLigands: params.numLigands,
+  }).replace(/_/g, '-');
+
+  return buildConformRunFolderName({
+    method: params.method,
+    maxConformers: params.maxConformers,
+    outputName: dockRunName,
+  });
+}
+
+export function formatJobCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`;
 }

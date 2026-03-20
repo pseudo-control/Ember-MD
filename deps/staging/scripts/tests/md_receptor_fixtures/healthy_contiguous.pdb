@@ -1,0 +1,23 @@
+REMARK   1 HEALTHY CONTIGUOUS THREE-RESIDUE PEPTIDE
+ATOM      1  N   ALA A   1       0.000   0.000   0.100  1.00  0.00           N
+ATOM      2  CA  ALA A   1       1.450   0.000   0.320  1.00  0.00           C
+ATOM      3  C   ALA A   1       2.950   0.000  -0.180  1.00  0.00           C
+ATOM      4  O   ALA A   1       3.550   0.900  -0.620  1.00  0.00           O
+ATOM      5  CB  ALA A   1       1.450   1.500   1.080  1.00  0.00           C
+ATOM      6  N   GLU A   2       4.250   0.000   0.250  1.00  0.00           N
+ATOM      7  CA  GLU A   2       5.700   0.000   0.480  1.00  0.00           C
+ATOM      8  C   GLU A   2       7.200   0.000  -0.120  1.00  0.00           C
+ATOM      9  O   GLU A   2       7.800   0.900  -0.570  1.00  0.00           O
+ATOM     10  CB  GLU A   2       5.700   1.500   1.150  1.00  0.00           C
+ATOM     11  CG  GLU A   2       6.800   2.200   1.920  1.00  0.00           C
+ATOM     12  CD  GLU A   2       7.900   1.500   1.380  1.00  0.00           C
+ATOM     13  OE1 GLU A   2       9.000   2.100   2.030  1.00  0.00           O
+ATOM     14  OE2 GLU A   2       7.700   0.200   0.610  1.00  0.00           O
+ATOM     15  N   SER A   3       8.500   0.000   0.220  1.00  0.00           N
+ATOM     16  CA  SER A   3       9.950   0.000   0.410  1.00  0.00           C
+ATOM     17  C   SER A   3      11.450   0.000  -0.160  1.00  0.00           C
+ATOM     18  O   SER A   3      12.050   0.900  -0.600  1.00  0.00           O
+ATOM     19  CB  SER A   3       9.950   1.500   1.050  1.00  0.00           C
+ATOM     20  OG  SER A   3      10.950   2.100   1.670  1.00  0.00           O
+TER      21      SER A   3
+END

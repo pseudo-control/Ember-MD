@@ -20,6 +20,7 @@ import type {
   DetectedLigand,
   DockMolecule,
   SingleMoleculeResult,
+  PreparedComplexManifest,
 } from './dock';
 import type {
   MDConfig,
@@ -53,6 +54,7 @@ export interface ElectronAPI {
   // File operations
   selectPdbFile: (defaultPath?: string) => Promise<string | null>;
   selectPdbFilesMulti: () => Promise<string[]>;
+  selectStructureFilesMulti: () => Promise<string[]>;
   selectOutputFolder: () => Promise<string | null>;
   fileExists: (path: string) => Promise<boolean>;
   getFileInfo: (path: string) => Promise<FileInfo>;
@@ -120,11 +122,33 @@ export interface ElectronAPI {
   listSdfInDirectory: (dirPath: string) => Promise<string[]>;
   detectPdbLigands: (pdbPath: string) => Promise<Result<DetectedLigand[], AppError>>;
   extractLigand: (pdbPath: string, ligandId: string, outputPath: string) => Promise<Result<string, AppError>>;
-  prepareReceptor: (pdbPath: string, ligandId: string, outputPath: string, waterDistance?: number) => Promise<Result<string, AppError>>;
+  prepareReceptor: (
+    pdbPath: string,
+    ligandId: string,
+    outputPath: string,
+    waterDistance?: number,
+    protonationPh?: number
+  ) => Promise<Result<string, AppError>>;
+  prepareDockingComplex: (
+    receptorPdb: string,
+    xrayLigandSdf: string,
+    outputDir: string,
+    chargeMethod?: 'gasteiger' | 'am1bcc',
+    phMin?: number,
+    phMax?: number,
+    protonateReference?: boolean
+  ) => Promise<Result<{
+    manifestPath: string;
+    preparedReceptorPdb: string;
+    preparedReferenceLigandSdf: string;
+    manifest: PreparedComplexManifest;
+  }, AppError>>;
   exportDockCsv: (outputDir: string, csvOutput: string, bestOnly: boolean) => Promise<Result<string, AppError>>;
   exportComplexPdb: (receptorPdb: string, ligandSdf: string, poseIndex: number, outputPath: string) => Promise<Result<string, AppError>>;
 
   // Multi-input ligand source operations
+  selectMoleculeFilesMulti: () => Promise<string[]>;
+  importMoleculeFiles: (filePaths: string[], outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
   selectFolder: () => Promise<string | null>;
   scanSdfDirectory: (dirPath: string, outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
   parseSmilesCsv: (csvPath: string, outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
@@ -168,7 +192,8 @@ export interface ElectronAPI {
     receptorPdb: string,
     posesDir: string,
     outputDir: string,
-    maxIterations: number
+    maxIterations: number,
+    chargeMethod?: string
   ) => Promise<Result<{ refinedCount: number; outputDir: string }, AppError>>;
 
   // CORDIAL rescoring

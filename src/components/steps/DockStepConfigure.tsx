@@ -1,7 +1,7 @@
 import { Component, Show, onMount, createSignal, createMemo } from 'solid-js';
 import path from 'path';
 import { workflowStore } from '../../stores/workflow';
-import { buildDockFolderName } from '../../utils/jobName';
+import { buildDockFolderName, buildDockConformRunFolderName } from '../../utils/jobName';
 import { projectPaths } from '../../utils/projectPaths';
 
 const DockStepConfigure: Component = () => {
@@ -44,15 +44,32 @@ const DockStepConfigure: Component = () => {
       });
       const paths = projectPaths(baseOutputDir, jobName);
       const dockPaths = paths.docking(dockFolder);
-      for (const subdir of ['mcmm', 'etkdg']) {
-        const dir = path.join(dockPaths.prep, subdir);
+
+      for (const method of ['mcmm', 'etkdg'] as const) {
+        const conformerRunFolder = buildDockConformRunFolderName({
+          referenceLigandId: state().dock.referenceLigandId,
+          numLigands: state().dock.ligandMolecules.length,
+          method,
+          maxConformers: state().dock.conformerConfig.maxConformers,
+        });
+        const canonicalDir = paths.conformers(conformerRunFolder);
+        const legacyDir = path.join(dockPaths.prep, method);
+
         try {
-          const sdfs = await api.listSdfInDirectory(dir);
-          if (sdfs.length > 0) {
-            setCachedConformers(sdfs);
-            break;
+          const canonicalSdfs = await api.listSdfInDirectory(canonicalDir);
+          if (canonicalSdfs.length > 0) {
+            setCachedConformers(canonicalSdfs);
+            return;
           }
-        } catch { /* dir doesn't exist */ }
+        } catch { /* canonical dir doesn't exist */ }
+
+        try {
+          const legacySdfs = await api.listSdfInDirectory(legacyDir);
+          if (legacySdfs.length > 0) {
+            setCachedConformers(legacySdfs);
+            return;
+          }
+        } catch { /* legacy dir doesn't exist */ }
       }
     } catch { /* scan failed, no cached conformers */ }
   });
@@ -248,7 +265,7 @@ const DockStepConfigure: Component = () => {
                     setDockConformerConfig(updates);
                   }}
                 >
-                  <option value="none">None</option>
+                  <option value="none">Simple</option>
                   <option value="etkdg">ETKDG</option>
                   <option value="mcmm">MCMM</option>
                 </select>
@@ -330,7 +347,27 @@ const DockStepConfigure: Component = () => {
                   onChange={(e) => setDockRefinementConfig({ enabled: e.currentTarget.checked })}
                 />
               </label>
-              <p class="text-[10px] text-base-content/50 ml-1">Sage 2.3.0 + OBC2 implicit solvent</p>
+              <Show when={state().dock.refinementConfig.enabled}>
+                <div class="flex items-center justify-between py-0.5 ml-6">
+                  <span class="label-text text-[10px]">
+                    Charges
+                    <span class="text-base-content/50">
+                      {state().dock.refinementConfig.chargeMethod === 'am1bcc'
+                        ? ' (NAGL AM1-BCC — MD quality)'
+                        : ' (Gasteiger — fast)'}
+                    </span>
+                  </span>
+                  <select
+                    class="select select-bordered select-xs w-24"
+                    value={state().dock.refinementConfig.chargeMethod}
+                    onChange={(e) => setDockRefinementConfig({ chargeMethod: e.currentTarget.value as 'gasteiger' | 'am1bcc' })}
+                  >
+                    <option value="am1bcc">AM1-BCC</option>
+                    <option value="gasteiger">Gasteiger</option>
+                  </select>
+                </div>
+                <p class="text-[10px] text-base-content/50 ml-1">Sage 2.3.0 + OBC2 implicit solvent</p>
+              </Show>
 
               <div class="border-t border-base-300 my-2" />
 

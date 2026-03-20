@@ -9,6 +9,7 @@ import type {
   LigandRepresentation,
   SurfaceColorScheme,
   BindingSiteMapState,
+  ViewerLayer,
 } from '../../stores/workflow';
 import TrajectoryControls from './TrajectoryControls';
 import ClusteringModal from './ClusteringModal';
@@ -16,8 +17,10 @@ import AnalysisPanel from './AnalysisPanel';
 import BindingSiteMapPanel from './BindingSiteMapPanel';
 import LayerPanel from './LayerPanel';
 import { projectPaths } from '../../utils/projectPaths';
+import { loadProjectJob } from '../../utils/projectJobLoader';
 import { theme } from '../../utils/theme';
 import type { AtomProxy, ResidueProxy, SelectionSchemeEntry, NglLoadOptions, BindingSiteResultsJson, PreparedPath } from '../../types/ngl';
+import type { ProjectJob } from '../../../shared/types/ipc';
 
 // NGL representation name mapping (shared across all style update functions)
 const LIGAND_REP_MAP: Record<string, string> = {
@@ -272,11 +275,14 @@ const detectInteractions = (
       }
 
       // 2. Salt bridge (charged residue atom...complementary element ≤ 4.0Å)
+      let isSaltBridge = false;
       if (!type && dist <= 4.0) {
         if (SALT_BRIDGE_POS[pa.resname]?.includes(pa.atomname) && la.element === 'O') {
           type = 'ionicInteraction';
+          isSaltBridge = true;
         } else if (SALT_BRIDGE_NEG[pa.resname]?.includes(pa.atomname) && la.element === 'N') {
           type = 'ionicInteraction';
+          isSaltBridge = true;
         }
       }
 
@@ -288,14 +294,25 @@ const detectInteractions = (
       }
 
       // 4. H-bond / Backbone H-bond (N/O/F...N/O/F ≤ 3.5Å + D-H...A > 120°)
-      if (!type && dist <= 3.5) {
+      //    Also emit alongside salt bridges — charged groups often form both
+      if ((!type || isSaltBridge) && dist <= 3.5) {
         const isHBE = (el: string) => el === 'N' || el === 'O' || el === 'F';
         if (isHBE(pa.element) && isHBE(la.element)) {
           const paHasH = pa.bonded.some(b => b.element === 'H');
           const laHasH = la.bonded.some(b => b.element === 'H');
           // Distance-only fallback only when neither atom has H; otherwise require angle check
           if ((!paHasH && !laHasH) || hbondAngleOk(pa, la) || hbondAngleOk(la, pa)) {
-            type = pa.isBackbone ? 'backboneHydrogenBond' : 'hydrogenBond';
+            const hbType = pa.isBackbone ? 'backboneHydrogenBond' : 'hydrogenBond';
+            if (isSaltBridge) {
+              // Emit H-bond as a separate interaction alongside the salt bridge
+              const hbKey = `${p}-${l}-hb`;
+              if (!paired.has(hbKey)) {
+                paired.add(hbKey);
+                results.push({ from: [la.x, la.y, la.z], to: [pa.x, pa.y, pa.z], type: hbType });
+              }
+            } else {
+              type = hbType;
+            }
           }
         }
       }
@@ -368,6 +385,7 @@ const detectInteractions = (
 const ViewerMode: Component = () => {
   const {
     state,
+    clearViewerSession,
     setViewerPdbPath,
     setViewerLigandPath,
     setViewerDetectedLigands,
@@ -404,8 +422,6 @@ const ViewerMode: Component = () => {
     removeViewerLayerGroup,
     toggleViewerLayerGroupExpanded,
     toggleViewerLayerGroupVisible,
-    clearViewerLayers,
-    resetViewer,
     setMode,
     setMdStep,
     setMdReceptorPdb,
@@ -425,6 +441,12 @@ const ViewerMode: Component = () => {
   let isFrameLoading = false;
   let pendingFrameIndex: number | null = null;
   let playbackGeneration = 0;
+  let loadPdbInFlight: string | null = null;
+  let autoLoadPath: string | null = null;
+  let autoLoadTrajectoryPath: string | null = null;
+  let lastQueueIndex = -1;
+  let lastQueueLength = 0;
+  let isFirstFrameLoad = true;
   const alignedComponents: Map<number, NGL.Component> = new Map();  // For multi-PDB alignment
   const volumeComponents: Map<string, NGL.Component> = new Map();  // For binding site isosurfaces
   const layerComponents: Map<string, NGL.Component> = new Map();   // Layer ID → NGL component
@@ -436,10 +458,109 @@ const ViewerMode: Component = () => {
     hydrophobic: number[];
     electrostatic: number[];
   } | null>(null);
+  const [recentJobs, setRecentJobs] = createSignal<ProjectJob[]>([]);
+  const [selectedRecentJobId, setSelectedRecentJobId] = createSignal<string | null>(null);
+  const [isLoadingRecentJobs, setIsLoadingRecentJobs] = createSignal(false);
+  const [isLoadingSelectedJob, setIsLoadingSelectedJob] = createSignal(false);
   // Track which PDB the cached surface props are for
   let surfacePropsPdbPath: string | null = null;
+  let lastViewerSessionKey = state().viewer.sessionKey;
+  let recentJobsRequestId = 0;
 
   const api = window.electronAPI;
+
+  const sortedRecentJobs = (jobs: ProjectJob[]) => {
+    const typeOrder: Record<string, number> = { docking: 0, simulation: 1, conformer: 2 };
+    return [...jobs].sort((a, b) => {
+      const typeCmp = (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+      return typeCmp !== 0 ? typeCmp : a.label.localeCompare(b.label);
+    });
+  };
+
+  const selectedRecentJob = () =>
+    recentJobs().find((job) => job.id === selectedRecentJobId()) || null;
+
+  createEffect(() => {
+    const ready = state().projectReady;
+    const projectName = state().jobName;
+
+    if (!ready || !projectName) {
+      setRecentJobs([]);
+      setSelectedRecentJobId(null);
+      return;
+    }
+
+    const requestId = ++recentJobsRequestId;
+    setIsLoadingRecentJobs(true);
+
+    void (async () => {
+      try {
+        const jobs = await api.scanProjectArtifacts(projectName);
+        if (requestId !== recentJobsRequestId) return;
+        const loadableJobs = sortedRecentJobs(jobs.filter((job) => job.type !== 'docking-pose'));
+        setRecentJobs(loadableJobs);
+        setSelectedRecentJobId((current) =>
+          loadableJobs.some((job) => job.id === current) ? current : loadableJobs[0]?.id || null,
+        );
+      } catch (err) {
+        if (requestId !== recentJobsRequestId) return;
+        console.error('[Viewer] Failed to scan project artifacts:', err);
+        setRecentJobs([]);
+        setSelectedRecentJobId(null);
+      } finally {
+        if (requestId === recentJobsRequestId) {
+          setIsLoadingRecentJobs(false);
+        }
+      }
+    })();
+  });
+
+  const clearViewerStage = () => {
+    playbackGeneration++;
+    isFrameLoading = false;
+    pendingFrameIndex = null;
+    if (playbackTimer) {
+      clearTimeout(playbackTimer);
+      playbackTimer = null;
+    }
+
+    loadPdbInFlight = null;
+    autoLoadPath = null;
+    autoLoadTrajectoryPath = null;
+    lastQueueIndex = -1;
+    lastQueueLength = 0;
+    isFirstFrameLoad = true;
+
+    if (stage) {
+      stage.removeAllComponents();
+    }
+
+    volumeComponents.clear();
+    proteinComponent = null;
+    ligandComponent = null;
+    interactionShapeComponent = null;
+    alignedComponents.clear();
+    layerComponents.clear();
+    setIsAligned(false);
+    setSurfacePropsData(null);
+    surfacePropsPdbPath = null;
+    setError(null);
+  };
+
+  const hasViewerSession = () =>
+    !!state().viewer.pdbPath ||
+    !!state().viewer.ligandPath ||
+    !!state().viewer.trajectoryPath ||
+    state().viewer.pdbQueue.length > 0 ||
+    state().viewer.layers.length > 0 ||
+    state().viewer.layerGroups.length > 0;
+
+  createEffect(() => {
+    const sessionKey = state().viewer.sessionKey;
+    if (sessionKey === lastViewerSessionKey) return;
+    lastViewerSessionKey = sessionKey;
+    clearViewerStage();
+  });
 
   // Helper to get ligand selection string for detected ligand
   // Uses resname + resnum (not chain ID) because MDAnalysis may rewrite chain IDs
@@ -1033,10 +1154,11 @@ const ViewerMode: Component = () => {
   };
 
   // Update external ligand (SDF) style
-  const updateExternalLigandStyle = () => {
-    if (!ligandComponent) return;
+  const updateExternalLigandStyle = (component?: NGL.Component | null) => {
+    const target = component || ligandComponent;
+    if (!target) return;
 
-    ligandComponent.removeAllRepresentations();
+    target.removeAllRepresentations();
 
     const ligandRep = state().viewer.ligandRep;
     const ligandPolarH = state().viewer.ligandPolarHOnly;
@@ -1048,7 +1170,7 @@ const ViewerMode: Component = () => {
     let sele = '*';  // All atoms by default
     if (ligandPolarH) {
       // Show only polar hydrogens - compute using Structure API
-      const structure = (ligandComponent as NGL.StructureComponent).structure;
+      const structure = (target as NGL.StructureComponent).structure;
       if (structure) {
         const polarHIndices = getPolarHydrogenIndices(structure, '*');
         if (polarHIndices.length > 0) {
@@ -1063,14 +1185,14 @@ const ViewerMode: Component = () => {
 
     // Single representation (preserves bonds)
     // Custom schemes use "color:", built-in schemes use "colorScheme:"
-    ligandComponent.addRepresentation(LIGAND_REP_MAP[ligandRep], {
+    target.addRepresentation(LIGAND_REP_MAP[ligandRep], {
       sele: sele,
       color: ligandColorSchemeId,
       multipleBond: 'symmetric',
     });
 
     if (state().viewer.ligandSurface) {
-      ligandComponent.addRepresentation('surface', {
+      target.addRepresentation('surface', {
         opacity: state().viewer.ligandSurfaceOpacity,
         color: ligandColorSchemeId,
       });
@@ -1079,10 +1201,10 @@ const ViewerMode: Component = () => {
 
   // Load PDB file into viewer (used by both browse and auto-load)
   // preserveExternalLigand: if true, don't clear ligand state (for auto-load with external SDF)
-  let loadPdbInFlight: string | null = null;
   const handleLoadPdb = async (rawPdbPath: string, preserveExternalLigand: boolean = false) => {
     // Guard against re-entrant calls from reactive effects
     if (loadPdbInFlight === rawPdbPath) return;
+    const viewerSessionKey = state().viewer.sessionKey;
     loadPdbInFlight = rawPdbPath;
     setIsLoading(true);
     setError(null);
@@ -1090,6 +1212,7 @@ const ViewerMode: Component = () => {
     try {
       // Auto-prepare raw structures (adds hydrogens for polar-H display)
       const pdbPath = await prepareStructure(rawPdbPath);
+      if (state().viewer.sessionKey !== viewerSessionKey) return;
       console.log(`[Viewer] Loading PDB: ${pdbPath} (preserveLigand=${preserveExternalLigand})`);
 
       // Clear binding site volumes from previous PDB
@@ -1119,6 +1242,13 @@ const ViewerMode: Component = () => {
         }
 
         proteinComponent = await stageLoadProtein(pdbPath, { defaultRepresentation: false });
+        if (state().viewer.sessionKey !== viewerSessionKey) {
+          if (proteinComponent && stage) {
+            stage.removeComponent(proteinComponent);
+          }
+          proteinComponent = null;
+          return;
+        }
 
         // Clear cached surface props if PDB changed
         if (surfacePropsPdbPath !== pdbPath) {
@@ -1131,6 +1261,7 @@ const ViewerMode: Component = () => {
         // Detect ligands in the PDB in the background (don't block the viewer)
         if (!preserveExternalLigand) {
           api.detectPdbLigands(pdbPath).then((result) => {
+            if (state().viewer.sessionKey !== viewerSessionKey) return;
             // Only apply if this PDB is still the current one (user may have navigated away)
             if (state().viewer.pdbPath === pdbPath && result.ok && result.value.length > 0) {
               setViewerDetectedLigands(result.value);
@@ -1158,12 +1289,16 @@ const ViewerMode: Component = () => {
         }
       }
 
-      setViewerPdbPath(pdbPath);
+      if (state().viewer.sessionKey === viewerSessionKey) {
+        setViewerPdbPath(pdbPath);
+      }
     } catch (err) {
       console.error('[Viewer] Failed to load PDB:', err);
       setError(`Failed to load PDB: ${(err as Error).message}`);
       // Clear the pdb path to prevent auto-load from retrying infinitely
-      setViewerPdbPath(null);
+      if (state().viewer.sessionKey === viewerSessionKey) {
+        setViewerPdbPath(null);
+      }
     } finally {
       loadPdbInFlight = null;
       setIsLoading(false);
@@ -1185,6 +1320,7 @@ const ViewerMode: Component = () => {
   // Load external ligand from path (supports .sdf and .sdf.gz)
   const handleLoadExternalLigand = async (filePath: string) => {
     console.log('[Viewer] Loading external ligand:', filePath);
+    const viewerSessionKey = state().viewer.sessionKey;
     setIsLoading(true);
     setError(null);
 
@@ -1204,9 +1340,17 @@ const ViewerMode: Component = () => {
 
         console.log('[Viewer] Loading ligand file:', filePath, 'options:', loadOptions);
         ligandComponent = await stage.loadFile(filePath, loadOptions) as NGL.Component || null;
+        if (state().viewer.sessionKey !== viewerSessionKey) {
+          if (ligandComponent && stage) {
+            stage.removeComponent(ligandComponent);
+          }
+          ligandComponent = null;
+          return;
+        }
 
         // Wait for structure to be parsed (NGL parses asynchronously)
         await new Promise(resolve => setTimeout(resolve, 100));
+        if (state().viewer.sessionKey !== viewerSessionKey) return;
 
         updateExternalLigandStyle();
 
@@ -1224,7 +1368,9 @@ const ViewerMode: Component = () => {
         }
       }
 
-      setViewerLigandPath(filePath);
+      if (state().viewer.sessionKey === viewerSessionKey) {
+        setViewerLigandPath(filePath);
+      }
     } catch (err) {
       console.error('[Viewer] Failed to load ligand:', err);
       setError(`Failed to load ligand: ${(err as Error).message}`);
@@ -1234,13 +1380,11 @@ const ViewerMode: Component = () => {
   };
 
   // React to PDB queue navigation (page-turn arrows + initial load from View 3D)
-  let lastQueueIndex = -1;
-  let lastQueueLength = 0;
   // eslint-disable-next-line solid/reactivity -- async load is intentional
   createEffect(async () => {
     const queue = state().viewer.pdbQueue;
     const idx = state().viewer.pdbQueueIndex;
-    // Fire on: index change (nav arrows) OR queue just populated (View 3D / Import Job)
+    // Fire on: index change (nav arrows) OR queue just populated (View 3D / structure import)
     const queueJustPopulated = queue.length > 1 && lastQueueLength <= 1;
     const indexChanged = idx !== lastQueueIndex && lastQueueIndex >= 0;
     lastQueueLength = queue.length;
@@ -1257,13 +1401,15 @@ const ViewerMode: Component = () => {
           proteinComponent = null;
           ligandComponent = null;
           try {
-            const comp = await stage.loadFile(item.pdbPath);
-            comp.addRepresentation('ball+stick', {
-              multipleBond: true,
-              colorScheme: 'element',
-            });
-            comp.autoView();
-            proteinComponent = comp;
+            const comp = await stage.loadFile(item.pdbPath) as NGL.Component | null;
+            if (comp) {
+              comp.addRepresentation('ball+stick', {
+                multipleBond: true,
+                colorScheme: 'element',
+              });
+              comp.autoView();
+              proteinComponent = comp;
+            }
           } catch (err) {
             console.error('[Viewer] Failed to load conformer:', err);
           }
@@ -1297,7 +1443,6 @@ const ViewerMode: Component = () => {
   // Guard against re-entrant calls: handleLoadPdb is async and mutates store
   // state (detectedLigands, selectedLigandId) which would re-trigger this effect
   // while proteinComponent is still null, causing an infinite load loop.
-  let autoLoadPath: string | null = null;
   // eslint-disable-next-line solid/reactivity -- async load is intentional
   createEffect(async () => {
     if (!stageReady()) return;
@@ -1326,6 +1471,22 @@ const ViewerMode: Component = () => {
 
     // Clear the guard so a new path can be loaded later
     autoLoadPath = null;
+  });
+
+  // Auto-load DCD after the topology is present. This is the same path used by the explicit DCD picker.
+  // eslint-disable-next-line solid/reactivity -- async load is intentional
+  createEffect(async () => {
+    if (!stageReady() || !proteinComponent) return;
+
+    const trajectoryPath = state().viewer.trajectoryPath;
+    const topologyPath = state().viewer.pdbPath;
+    const trajectoryInfo = state().viewer.trajectoryInfo;
+
+    if (!trajectoryPath || !topologyPath || trajectoryInfo || trajectoryPath === autoLoadTrajectoryPath) return;
+
+    autoLoadTrajectoryPath = trajectoryPath;
+    await handleLoadTrajectory(trajectoryPath);
+    autoLoadTrajectoryPath = null;
   });
 
   const handleResetView = () => {
@@ -1498,6 +1659,7 @@ const ViewerMode: Component = () => {
   // === Trajectory functions ===
 
   const handleLoadTrajectory = async (dcdPath: string) => {
+    const viewerSessionKey = state().viewer.sessionKey;
     setIsLoading(true);
     setError(null);
 
@@ -1508,8 +1670,13 @@ const ViewerMode: Component = () => {
         return;
       }
 
+      handleTrajectoryPause();
+      isFirstFrameLoad = true;
+      setViewerTrajectoryInfo(null);
+
       // Get trajectory info from backend
       const infoResult = await api.getTrajectoryInfo(pdbPath, dcdPath);
+      if (state().viewer.sessionKey !== viewerSessionKey) return;
       if (!infoResult.ok) {
         setError(infoResult.error.message);
         return;
@@ -1522,7 +1689,9 @@ const ViewerMode: Component = () => {
       console.log('[Viewer] Trajectory info loaded:', dcdPath, 'frames:', infoResult.value.frameCount);
 
       // Load the first frame
-      await loadTrajectoryFrame(0);
+      if (state().viewer.sessionKey === viewerSessionKey) {
+        await loadTrajectoryFrame(0);
+      }
     } catch (err) {
       console.error('[Viewer] Failed to load trajectory:', err);
       setError(`Failed to load trajectory: ${(err as Error).message}`);
@@ -1530,9 +1699,6 @@ const ViewerMode: Component = () => {
       setIsLoading(false);
     }
   };
-
-  // Track if this is the first frame load (for initial centering)
-  let isFirstFrameLoad = true;
 
   // Helper: get the center-of-mass of a selection within the current proteinComponent
   const getSelectionCenter = (sele: string): Vector3 | null => {
@@ -1939,22 +2105,22 @@ const ViewerMode: Component = () => {
     return stage.loadFile(path, options).then((c) => (c as NGL.Component) || null);
   };
 
-  const handleImportStructure = async () => {
-    const selected = await api.selectPdbFilesMulti();
-    if (!selected || selected.length === 0) return;
-
+  const loadImportedStructures = async (selected: string[]) => {
     setIsLoading(true);
     setError(null);
 
     try {
       const imported = await Promise.all(selected.map(importToProject));
 
-      // Prepare structures (add hydrogens) in parallel
-      const prepared = await Promise.all(imported.map(prepareStructure));
+      const proteinInputs = imported.filter((filePath) => /\.(pdb|cif)$/i.test(filePath));
+      const ligandInputs = imported.filter((filePath) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(filePath));
+      const preparedProteins = await Promise.all(proteinInputs.map(prepareStructure));
+      const labelFor = (filePath: string) =>
+        filePath.split('/').pop()?.replace('_prepared', '').replace(/(\.sdf\.gz|\.pdb|\.cif|\.sdf|\.mol2|\.mol)$/i, '') || filePath;
 
-      for (const filePath of prepared) {
+      for (const filePath of preparedProteins) {
         const id = nextLayerId();
-        const label = filePath.split('/').pop()?.replace('_prepared', '').replace('.pdb', '').replace('.cif', '') || filePath;
+        const label = labelFor(filePath);
 
         // Load into NGL (accumulate, no reset)
         if (stage) {
@@ -2003,10 +2169,37 @@ const ViewerMode: Component = () => {
         });
       }
 
-      // Set pdbPath to the last prepared file
-      if (prepared.length > 0) setViewerPdbPath(prepared[prepared.length - 1]);
+      for (const filePath of ligandInputs) {
+        const id = nextLayerId();
+        const label = labelFor(filePath);
 
-      // Build a queue from all protein layers for queue nav compatibility
+        if (stage) {
+          const comp = await stage.loadFile(filePath, { defaultRepresentation: false, firstModelOnly: true }) as NGL.Component || null;
+          if (comp) {
+            layerComponents.set(id, comp);
+            ligandComponent = comp;
+            updateExternalLigandStyle(comp);
+            setViewerLigandPath(filePath);
+            if (proteinComponent) {
+              updateProteinStyle();
+            }
+            comp.autoView();
+          }
+        }
+
+        addViewerLayer({
+          id,
+          type: 'ligand',
+          label,
+          filePath,
+          visible: true,
+        });
+      }
+
+      if (preparedProteins.length > 0) {
+        setViewerPdbPath(preparedProteins[preparedProteins.length - 1]);
+      }
+
       const allProteinLayers = state().viewer.layers.filter((l) => l.type === 'protein');
       if (allProteinLayers.length > 1) {
         setViewerPdbQueue(allProteinLayers.map((l) => ({
@@ -2014,150 +2207,59 @@ const ViewerMode: Component = () => {
           label: l.label,
         })));
       }
+      return {
+        lastPreparedProtein: preparedProteins[preparedProteins.length - 1] || null,
+      };
     } catch (err) {
       setError(`Failed to import structure: ${(err as Error).message}`);
+      return {
+        lastPreparedProtein: null,
+      };
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleImportJob = async () => {
-    const job = await api.selectEmberJobFolder();
-    if (!job) return;
+  const handleImportFiles = async () => {
+    const selected = await api.selectStructureFilesMulti();
+    if (!selected || selected.length === 0) return;
 
-    setIsLoading(true);
-    setError(null);
+    const trajectoryFiles = selected.filter((filePath) => /\.dcd$/i.test(filePath));
+    const structureFiles = selected.filter((filePath) => !/\.dcd$/i.test(filePath));
 
+    if (trajectoryFiles.length > 1) {
+      setError('Select one DCD trajectory at a time.');
+      return;
+    }
+
+    const importResult = structureFiles.length > 0
+      ? await loadImportedStructures(structureFiles)
+      : { lastPreparedProtein: null };
+
+    const dcdPath = trajectoryFiles[0];
+    if (!dcdPath) return;
+
+    const topologyPath = importResult.lastPreparedProtein || state().viewer.pdbPath;
+    if (!topologyPath) {
+      setError('Load a topology structure before opening a DCD trajectory.');
+      return;
+    }
+
+    if (importResult.lastPreparedProtein) {
+      setViewerPdbPath(importResult.lastPreparedProtein);
+    }
+    await handleLoadTrajectory(dcdPath);
+  };
+
+  const handleLoadRecentJob = async () => {
+    const job = selectedRecentJob();
+    if (!job || isLoadingSelectedJob()) return;
+
+    setIsLoadingSelectedJob(true);
     try {
-      const groupId = `group-${job.id}`;
-
-      if (job.type === 'docking' && job.receptorPdb && job.poses && job.poses.length > 0) {
-        addViewerLayerGroup({
-          id: groupId,
-          type: 'docking',
-          label: job.label,
-          expanded: true,
-          visible: true,
-        });
-
-        // Add receptor layer
-        const receptorLayerId = nextLayerId();
-        addViewerLayer({
-          id: receptorLayerId,
-          type: 'protein',
-          label: 'receptor.pdb',
-          filePath: job.receptorPdb,
-          visible: true,
-          groupId,
-        });
-
-        // Load receptor into NGL
-        if (stage) {
-          const preparedReceptor = await prepareStructure(job.receptorPdb);
-          const comp = await stageLoadProtein(preparedReceptor, { defaultRepresentation: false });
-          if (comp) {
-            layerComponents.set(receptorLayerId, comp);
-            if (!proteinComponent) {
-              proteinComponent = comp;
-              updateProteinStyle();
-            } else {
-              updateComponentStyle(comp);
-            }
-          }
-        }
-        setViewerPdbPath(job.receptorPdb);
-
-        // Build pose layers + queue in a single pass
-        const poseLayers = job.poses.map((pose, idx) => ({
-          id: nextLayerId(),
-          type: 'ligand' as const,
-          label: pose.name,
-          filePath: pose.path,
-          visible: idx === 0,
-          groupId,
-          poseIndex: idx,
-          affinity: pose.affinity,
-        }));
-        const queueItems = job.poses.map((pose) => ({
-          pdbPath: job.receptorPdb!,
-          ligandPath: pose.path,
-          label: `${pose.name}${pose.affinity !== undefined ? ` (${pose.affinity.toFixed(1)})` : ''}`,
-        }));
-
-        // Batch-add all pose layers
-        for (const pl of poseLayers) addViewerLayer(pl);
-
-        // Set up queue for docking pose navigation
-        setViewerPdbQueue(queueItems);
-
-        // Load first pose
-        if (queueItems[0]?.ligandPath) {
-          await handleLoadExternalLigand(queueItems[0].ligandPath);
-        }
-      } else if (job.type === 'simulation' && job.systemPdb) {
-        addViewerLayerGroup({
-          id: groupId,
-          type: 'simulation',
-          label: job.label,
-          expanded: true,
-          visible: true,
-        });
-
-        // Add system PDB layer
-        const sysLayerId = nextLayerId();
-        addViewerLayer({
-          id: sysLayerId,
-          type: 'protein',
-          label: 'system.pdb',
-          filePath: job.systemPdb,
-          visible: true,
-          groupId,
-        });
-
-        // Load system PDB
-        if (stage) {
-          const preparedSystem = await prepareStructure(job.systemPdb);
-          const comp = await stageLoadProtein(preparedSystem, { defaultRepresentation: false });
-          if (comp) {
-            layerComponents.set(sysLayerId, comp);
-            if (!proteinComponent) {
-              proteinComponent = comp;
-              updateProteinStyle();
-              proteinComponent.autoView();
-            } else {
-              updateComponentStyle(comp);
-            }
-          }
-        }
-        setViewerPdbPath(job.systemPdb);
-
-        // Detect ligands in simulation PDB
-        api.detectPdbLigands(job.systemPdb).then((result) => {
-          if (result.ok && result.value.length > 0) {
-            setViewerDetectedLigands(result.value);
-            setViewerSelectedLigandId(result.value[0].id);
-            updateAllStyles();
-          }
-        });
-
-        // Add trajectory layer if present
-        if (job.trajectoryDcd) {
-          const trajLayerId = nextLayerId();
-          addViewerLayer({
-            id: trajLayerId,
-            type: 'trajectory',
-            label: 'trajectory.dcd',
-            filePath: job.trajectoryDcd,
-            visible: true,
-            groupId,
-          });
-          await handleLoadTrajectory(job.trajectoryDcd);
-        }
-      }
-    } catch (err) {
-      setError(`Failed to import job: ${(err as Error).message}`);
+      await loadProjectJob(job, api);
     } finally {
-      setIsLoading(false);
+      setIsLoadingSelectedJob(false);
     }
   };
 
@@ -2178,35 +2280,76 @@ const ViewerMode: Component = () => {
     }
   };
 
+  const syncViewerFromRemainingLayers = (remainingLayers: ViewerLayer[]) => {
+    const remainingProteins = remainingLayers.filter((l) => l.type === 'protein');
+    const remainingLigands = remainingLayers.filter((l) => l.type === 'ligand');
+    const nextProtein = remainingProteins[0] || null;
+    const nextLigand = remainingLigands[0] || null;
+    const nextSelectedLayerId = nextProtein?.id || nextLigand?.id || null;
+
+    if (!nextProtein && !nextLigand) {
+      clearViewerSession();
+      return;
+    }
+
+    setViewerLayerSelected(nextSelectedLayerId);
+
+    if (remainingProteins.length > 1) {
+      setViewerPdbQueue(remainingProteins.map((layer) => ({
+        pdbPath: layer.filePath,
+        label: layer.label,
+      })));
+    } else {
+      setViewerPdbQueue([]);
+    }
+
+    if (nextProtein) {
+      const nextProteinComp = layerComponents.get(nextProtein.id) || null;
+      if (nextProteinComp) {
+        proteinComponent = nextProteinComp;
+      }
+      setViewerPdbPath(nextProtein.filePath);
+    } else {
+      proteinComponent = null;
+      setViewerPdbPath(null);
+      setViewerTrajectoryPath(null);
+      setViewerTrajectoryInfo(null);
+      setViewerCurrentFrame(0);
+      setViewerDetectedLigands([]);
+      setViewerSelectedLigandId(null);
+      clearBindingSiteVolumes();
+    }
+
+    if (nextLigand) {
+      const nextLigandComp = layerComponents.get(nextLigand.id) || null;
+      if (nextLigandComp) {
+        ligandComponent = nextLigandComp;
+      }
+      setViewerLigandPath(nextLigand.filePath);
+    } else {
+      ligandComponent = null;
+      setViewerLigandPath(null);
+    }
+  };
+
   const handleLayerRemove = (layerId: string) => {
+    const layer = state().viewer.layers.find((l) => l.id === layerId);
+    const remainingLayers = state().viewer.layers.filter((l) => l.id !== layerId);
     const comp = layerComponents.get(layerId);
     if (comp && stage) {
       stage.removeComponent(comp);
       layerComponents.delete(layerId);
 
-      // If removing the current proteinComponent, clear it
       if (comp === proteinComponent) {
         proteinComponent = null;
       }
-    }
-
-    const layer = state().viewer.layers.find((l) => l.id === layerId);
-    removeViewerLayer(layerId);
-
-    // If no layers left, clear viewer state
-    if (state().viewer.layers.length === 0) {
-      handleClearAll();
-    } else if (layer?.type === 'protein' && !proteinComponent) {
-      // Find another protein layer to use as proteinComponent
-      const nextProtein = state().viewer.layers.find((l) => l.type === 'protein');
-      if (nextProtein) {
-        const nextComp = layerComponents.get(nextProtein.id);
-        if (nextComp) {
-          proteinComponent = nextComp;
-          setViewerPdbPath(nextProtein.filePath);
-        }
+      if (comp === ligandComponent) {
+        ligandComponent = null;
       }
     }
+
+    removeViewerLayer(layerId);
+    syncViewerFromRemainingLayers(remainingLayers);
   };
 
   const handleLayerSelect = (layerId: string) => {
@@ -2234,6 +2377,7 @@ const ViewerMode: Component = () => {
   };
 
   const handleGroupRemove = (groupId: string) => {
+    const remainingLayers = state().viewer.layers.filter((l) => l.groupId !== groupId);
     // Remove all NGL components for layers in this group
     const groupLayerList = state().viewer.layers.filter((l) => l.groupId === groupId);
     for (const layer of groupLayerList) {
@@ -2242,43 +2386,15 @@ const ViewerMode: Component = () => {
         stage.removeComponent(comp);
         layerComponents.delete(layer.id);
         if (comp === proteinComponent) proteinComponent = null;
+        if (comp === ligandComponent) ligandComponent = null;
       }
     }
-    // Also remove any ligandComponent that might be from this group
-    if (ligandComponent && stage) {
-      stage.removeComponent(ligandComponent);
-      ligandComponent = null;
-    }
     removeViewerLayerGroup(groupId);
-
-    if (state().viewer.layers.length === 0) {
-      handleClearAll();
-    }
+    syncViewerFromRemainingLayers(remainingLayers);
   };
 
   const handleClearAll = () => {
-    // Stop playback
-    playbackGeneration++;
-    isFrameLoading = false;
-    pendingFrameIndex = null;
-    if (playbackTimer) {
-      clearTimeout(playbackTimer);
-      playbackTimer = null;
-    }
-
-    clearBindingSiteVolumes();
-
-    if (stage) {
-      stage.removeAllComponents();
-    }
-    proteinComponent = null;
-    ligandComponent = null;
-    interactionShapeComponent = null;
-    alignedComponents.clear();
-    layerComponents.clear();
-    setIsAligned(false);
-    resetViewer();
-    setError(null);
+    clearViewerSession();
   };
 
   const handleLayerAlignAll = async () => {
@@ -2317,51 +2433,6 @@ const ViewerMode: Component = () => {
   };
 
   const proteinLayerCount = () => state().viewer.layers.filter((l) => l.type === 'protein').length;
-
-  // SMILES input → ETKDG 3D conformer → load into NGL
-  const [smilesInput, setSmilesInput] = createSignal('');
-
-  const handleLoadSmiles = async () => {
-    const smiles = smilesInput().trim();
-    if (!smiles) return;
-
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const defaultDir = await api.getDefaultOutputDir();
-      const baseOutputDir = state().customOutputDir || defaultDir;
-      const outputDir = `${baseOutputDir}/${state().jobName}/structures`;
-
-      const result = await api.convertSingleMolecule(smiles, outputDir, 'smiles');
-      if (!result.ok) {
-        setError(result.error?.message || 'Failed to convert SMILES');
-        return;
-      }
-
-      const sdfPath = result.value.sdfPath;
-      const id = nextLayerId();
-      const label = smiles.length > 20 ? smiles.substring(0, 20) + '...' : smiles;
-
-      if (stage) {
-        const comp = await stage.loadFile(sdfPath, { defaultRepresentation: false });
-        if (comp) {
-          layerComponents.set(id, comp);
-          ligandComponent = comp;
-          updateExternalLigandStyle();
-          comp.autoView();
-        }
-      }
-
-      addViewerLayer({ id, type: 'ligand', label, filePath: sdfPath, visible: true });
-      setViewerLigandPath(sdfPath);
-      setSmilesInput('');
-    } catch (err) {
-      setError(`SMILES conversion failed: ${(err as Error).message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   // === Binding site interaction maps ===
 
@@ -2540,6 +2611,12 @@ const ViewerMode: Component = () => {
     }
   });
 
+  createEffect(() => {
+    const bsMap = state().viewer.bindingSiteMap;
+    if (!bsMap || !stageReady() || volumeComponents.size > 0) return;
+    void loadBindingSiteVolumes(bsMap);
+  });
+
   // Get display info for detected ligand
   const getDetectedLigandInfo = () => {
     const ligands = state().viewer.detectedLigands;
@@ -2567,7 +2644,7 @@ const ViewerMode: Component = () => {
     setMdLigandSdf(ligandPath);
     setMdLigandName(ligandName);
     setMdPdbPath(pdbPath);
-    setMdConfig({ restrainLigandNs: 2 });
+    setMdConfig({ restrainLigandNs: 0 });
     batch(() => {
       setMode('md');
       setMdStep('md-configure');
@@ -2582,10 +2659,16 @@ const ViewerMode: Component = () => {
         layerGroups={state().viewer.layerGroups}
         selectedLayerId={state().viewer.selectedLayerId}
         proteinCount={proteinLayerCount()}
-        onImportStructure={handleImportStructure}
-        onImportJob={handleImportJob}
+        canClear={hasViewerSession()}
+        recentJobs={recentJobs()}
+        selectedRecentJobId={selectedRecentJobId()}
+        isLoadingRecentJobs={isLoadingRecentJobs()}
+        isLoadingSelectedJob={isLoadingSelectedJob()}
+        onImportFiles={handleImportFiles}
         onAlignAll={handleLayerAlignAll}
         onClearAll={handleClearAll}
+        onSelectRecentJob={setSelectedRecentJobId}
+        onLoadRecentJob={handleLoadRecentJob}
         onToggleVisibility={handleLayerToggleVisibility}
         onRemoveLayer={handleLayerRemove}
         onSelectLayer={handleLayerSelect}
@@ -2760,31 +2843,10 @@ const ViewerMode: Component = () => {
               <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
               </svg>
-              <div class="flex gap-2">
-                <button class="btn btn-sm btn-primary" onClick={handleImportStructure}>
-                  Import Structure
-                </button>
-                <button class="btn btn-sm btn-secondary" onClick={handleImportJob}>
-                  Import Job
-                </button>
-              </div>
-              <div class="divider text-xs my-0 w-full">or</div>
-              <div class="flex gap-1 w-full">
-                <input
-                  type="text"
-                  class="input input-sm input-bordered flex-1 font-mono text-xs"
-                  placeholder="Paste SMILES..."
-                  value={smilesInput()}
-                  onInput={(e) => setSmilesInput(e.currentTarget.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleLoadSmiles(); }}
-                />
-                <button
-                  class="btn btn-sm btn-accent"
-                  onClick={handleLoadSmiles}
-                  disabled={!smilesInput().trim()}
-                >
-                  Go
-                </button>
+              <div class="text-xs text-center text-base-content/70 leading-relaxed">
+                <p>Use the import panel above or load a recent job.</p>
+                <p>Structures: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`</p>
+                <p>Trajectory: `.dcd` with a loaded topology</p>
               </div>
             </div>
           </div>

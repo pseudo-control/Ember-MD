@@ -68,6 +68,8 @@ def read_sdf_poses(sdf_path: str) -> List[Tuple[Any, dict]]:
 def create_complex_system(
     receptor_pdb_path: str,
     ligand_mol: Any,
+    charge_method: str = 'am1bcc',
+    restrain_ligand_heavy: bool = False,
 ) -> Optional[Tuple[Any, Any, int, int]]:
     """
     Create an OpenMM system for the receptor-ligand complex with OBC2.
@@ -81,30 +83,44 @@ def create_complex_system(
         print("Warning: OpenFF/OpenMM not available for refinement", file=sys.stderr)
         return None
 
-    # Load and fix receptor (add missing atoms + hydrogens, remove waters/ions)
-    from pdbfixer import PDBFixer
-    fixer = PDBFixer(filename=receptor_pdb_path)
-    fixer.removeHeterogens(keepWater=False)
-    fixer.findMissingResidues()
-    fixer.findNonstandardResidues()
-    fixer.replaceNonstandardResidues()
-    fixer.findMissingAtoms()
-    fixer.addMissingAtoms()
-    fixer.addMissingHydrogens(7.0)
+    from openmm.app import Modeller, PDBFile
 
     # Parameterize ligand with Sage 2.3.0
     off_mol = OFFMolecule.from_rdkit(ligand_mol, allow_undefined_stereo=True)
-    off_mol.assign_partial_charges('gasteiger')
+    if charge_method == 'am1bcc':
+        try:
+            from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
+            nagl = NAGLToolkitWrapper()
+            off_mol.assign_partial_charges(
+                'openff-gnn-am1bcc-0.1.0-rc.2.pt', toolkit_registry=nagl
+            )
+            print("  Charges: NAGL AM1-BCC (neural net, MD quality)", flush=True)
+        except Exception as e:
+            print(f"  Warning: NAGL AM1-BCC failed ({e}), falling back to Gasteiger",
+                  file=sys.stderr, flush=True)
+            off_mol.assign_partial_charges('gasteiger')
+    else:
+        off_mol.assign_partial_charges('gasteiger')
+        print("  Charges: Gasteiger (empirical)", flush=True)
 
     smirnoff = SMIRNOFFTemplateGenerator(molecules=[off_mol], forcefield='openff-2.3.0')
 
-    # Build force field with protein + ligand (no implicit solvent XML — we add OBC2 manually)
-    ff = omm_app.ForceField('amber/protein.ff19SB.xml')
+    # Reuse the prepared receptor exactly as written so docking/refinement see the same pocket.
+    receptor_pdb = PDBFile(receptor_pdb_path)
+
+    # Support retained crystallographic waters in the prepared receptor.
+    try:
+        ff = omm_app.ForceField(
+            'amber/protein.ff19SB.xml',
+            'amber/tip3p_standard.xml',
+            'amber/tip3p_HFE_multivalent.xml',
+        )
+    except Exception:
+        ff = omm_app.ForceField('amber/protein.ff19SB.xml', 'amber/tip3p_standard.xml')
     ff.registerTemplateGenerator(smirnoff.generator)
 
-    # Create modeller from fixed receptor
-    from openmm.app import Modeller
-    modeller = Modeller(fixer.topology, fixer.positions)
+    # Create modeller from the prepared receptor.
+    modeller = Modeller(receptor_pdb.topology, receptor_pdb.positions)
     n_receptor_atoms = modeller.topology.getNumAtoms()
 
     # Add ligand topology + positions
@@ -126,11 +142,13 @@ def create_complex_system(
     )
 
     # Add OBC2 implicit solvent manually (same proven pattern as MCMM GBSAMinimizer)
-    # Extract charges from NonbondedForce, assign Born radii by element
+    # Extract charges from NonbondedForce, assign Born radii by element.
     RADII_NM = {'H': 0.12, 'C': 0.17, 'N': 0.155, 'O': 0.15, 'F': 0.15,
-                'S': 0.18, 'P': 0.185, 'Cl': 0.17, 'Br': 0.185, 'I': 0.198}
+                'S': 0.18, 'P': 0.185, 'Cl': 0.17, 'Br': 0.185, 'I': 0.198,
+                'Na': 0.102, 'K': 0.138, 'Mg': 0.072, 'Ca': 0.10, 'Zn': 0.074, 'Fe': 0.064, 'Mn': 0.067}
     SCREEN = {'H': 0.85, 'C': 0.72, 'N': 0.79, 'O': 0.85, 'F': 0.88,
-              'S': 0.96, 'P': 0.86, 'Cl': 0.80, 'Br': 0.80, 'I': 0.80}
+              'S': 0.96, 'P': 0.86, 'Cl': 0.80, 'Br': 0.80, 'I': 0.80,
+              'Na': 0.80, 'K': 0.80, 'Mg': 0.80, 'Ca': 0.80, 'Zn': 0.80, 'Fe': 0.80, 'Mn': 0.80}
 
     nb_force = None
     for f in system.getForces():
@@ -162,7 +180,7 @@ def create_complex_system(
 
         system.addForce(gbsa)
 
-    # Restrain receptor heavy atoms (only minimize the ligand)
+    # Restrain heavy atoms — receptor always, ligand optionally.
     restraint = openmm.CustomExternalForce('k*((x-x0)^2+(y-y0)^2+(z-z0)^2)')
     restraint.addGlobalParameter('k', 500.0 * omm_unit.kilojoules_per_mole / omm_unit.nanometers ** 2)
     restraint.addPerParticleParameter('x0')
@@ -171,7 +189,10 @@ def create_complex_system(
 
     positions = modeller.getPositions()
     for i, atom in enumerate(modeller.topology.atoms()):
-        if i < n_receptor_atoms and atom.element is not None and atom.element.symbol != 'H':
+        is_heavy = atom.element is not None and atom.element.symbol != 'H'
+        is_receptor = i < n_receptor_atoms
+        is_ligand = i >= n_receptor_atoms
+        if is_heavy and (is_receptor or (is_ligand and restrain_ligand_heavy)):
             pos = positions[i]
             restraint.addParticle(i, [pos[0], pos[1], pos[2]])
 
@@ -230,7 +251,9 @@ def main() -> None:
     parser.add_argument('--receptor_pdb', required=True, help='Receptor PDB file')
     parser.add_argument('--poses_dir', required=True, help='Directory with docked SDF.gz files')
     parser.add_argument('--output_dir', required=True, help='Output directory for refined SDFs')
-    parser.add_argument('--max_iterations', type=int, default=200, help='Minimization iterations per pose')
+    parser.add_argument('--max_iterations', type=int, default=5000, help='Minimization iterations per pose')
+    parser.add_argument('--charge_method', choices=['gasteiger', 'am1bcc'], default='am1bcc',
+                        help='Charge method: am1bcc (NAGL neural net) or gasteiger (empirical)')
     args = parser.parse_args()
 
     if not HAS_OPENMM:
@@ -243,76 +266,77 @@ def main() -> None:
     print(f"Receptor: {os.path.basename(args.receptor_pdb)}", flush=True)
     print(f"Poses dir: {args.poses_dir}", flush=True)
     print(f"Max iterations: {args.max_iterations}", flush=True)
+    charge_label = 'NAGL AM1-BCC' if args.charge_method == 'am1bcc' else 'Gasteiger'
     print(f"Force field: Sage 2.3.0 + OBC2 implicit solvent", flush=True)
+    print(f"Charges: {charge_label}", flush=True)
     print(flush=True)
 
     # Find docked SDF files
     import glob
-    sdf_files = sorted(glob.glob(os.path.join(args.poses_dir, '*_docked.sdf.gz')))
-    if not sdf_files:
-        sdf_files = sorted(glob.glob(os.path.join(args.poses_dir, '*.sdf.gz')))
-    if not sdf_files:
-        sdf_files = sorted(glob.glob(os.path.join(args.poses_dir, '*.sdf')))
-
+    all_sdf_files = sorted(glob.glob(os.path.join(args.poses_dir, '*_docked.sdf.gz')))
+    sdf_files = [f for f in all_sdf_files if 'xray_reference' not in os.path.basename(f)]
     if not sdf_files:
         print("No pose files found", flush=True)
         print(json.dumps({"refined_count": 0, "output_dir": args.output_dir}))
         return
 
-    print(f"Found {len(sdf_files)} pose files", flush=True)
-
-    # Read first pose to set up the complex system
-    first_poses = read_sdf_poses(sdf_files[0])
-    if not first_poses:
-        print("ERROR: Could not read any poses from first file", file=sys.stderr)
-        sys.exit(1)
-
-    print("Setting up receptor-ligand system...", flush=True)
-    t0 = time.time()
-    result = create_complex_system(args.receptor_pdb, first_poses[0][0])
-    if result is None:
-        print("ERROR: Failed to create complex system", file=sys.stderr)
-        sys.exit(1)
-
-    context, topology, n_receptor, n_ligand = result
-    print(f"System ready ({time.time()-t0:.1f}s): {n_receptor} receptor + {n_ligand} ligand atoms", flush=True)
-    print(flush=True)
-
-    # Refine all poses
     total_refined = 0
-    for fi, sdf_path in enumerate(sdf_files):
-        name = Path(sdf_path).stem.replace('.sdf', '')
-        poses = read_sdf_poses(sdf_path)
 
-        if not poses:
-            print(f"  [{fi+1}/{len(sdf_files)}] {name}: no poses, skipping", flush=True)
-            continue
+    # --- Refine docked poses ---
+    if sdf_files:
+        print(f"Found {len(sdf_files)} docked pose files", flush=True)
 
-        output_path = os.path.join(args.output_dir, f"{name}.sdf.gz")
-        writer = Chem.SDWriter(gzip.open(output_path, 'wt'))
+        # Read first pose to set up the complex system
+        first_poses = read_sdf_poses(sdf_files[0])
+        if not first_poses:
+            print("ERROR: Could not read any poses from first file", file=sys.stderr)
+            sys.exit(1)
 
-        for pi, (mol, props) in enumerate(poses):
-            try:
-                energy, refined = refine_pose(context, mol, n_receptor, n_ligand, args.max_iterations)
+        print("Setting up receptor-ligand system...", flush=True)
+        t0 = time.time()
+        result = create_complex_system(args.receptor_pdb, first_poses[0][0], args.charge_method)
+        if result is None:
+            print("ERROR: Failed to create complex system", file=sys.stderr)
+            sys.exit(1)
 
-                # Copy original properties
-                for k, v in props.items():
-                    try:
-                        refined.SetProp(k, str(v))
-                    except Exception:
-                        pass
-                refined.SetProp('refinement_energy', f'{energy:.2f}')
+        context, topology, n_receptor, n_ligand = result
+        print(f"System ready ({time.time()-t0:.1f}s): {n_receptor} receptor + {n_ligand} ligand atoms", flush=True)
+        print(flush=True)
 
-                writer.write(refined)
-                total_refined += 1
-            except Exception as e:
-                print(f"  Warning: pose {pi} refinement failed: {e}", file=sys.stderr)
-                # Write unrefined pose as fallback
-                writer.write(mol)
-                total_refined += 1
+        # Refine all docked poses
+        for fi, sdf_path in enumerate(sdf_files):
+            name = Path(sdf_path).stem.replace('.sdf', '')
+            poses = read_sdf_poses(sdf_path)
 
-        writer.close()
-        print(f"  [{fi+1}/{len(sdf_files)}] {name}: {len(poses)} poses refined", flush=True)
+            if not poses:
+                print(f"  [{fi+1}/{len(sdf_files)}] {name}: no poses, skipping", flush=True)
+                continue
+
+            output_path = os.path.join(args.output_dir, f"{name}.sdf.gz")
+            writer = Chem.SDWriter(gzip.open(output_path, 'wt'))
+
+            for pi, (mol, props) in enumerate(poses):
+                try:
+                    energy, refined = refine_pose(context, mol, n_receptor, n_ligand, args.max_iterations)
+
+                    # Copy original properties
+                    for k, v in props.items():
+                        try:
+                            refined.SetProp(k, str(v))
+                        except Exception:
+                            pass
+                    refined.SetProp('refinement_energy', f'{energy:.2f}')
+
+                    writer.write(refined)
+                    total_refined += 1
+                except Exception as e:
+                    print(f"  Warning: pose {pi} refinement failed: {e}", file=sys.stderr)
+                    # Write unrefined pose as fallback
+                    writer.write(mol)
+                    total_refined += 1
+
+            writer.close()
+            print(f"  [{fi+1}/{len(sdf_files)}] {name}: {len(poses)} poses refined", flush=True)
 
     print(f"\nRefinement complete: {total_refined} poses refined", flush=True)
     print(json.dumps({

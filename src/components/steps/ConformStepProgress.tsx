@@ -1,6 +1,7 @@
 import { Component, onMount, onCleanup, createSignal, Show } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { projectPaths } from '../../utils/projectPaths';
+import { buildConformRunFolderName } from '../../utils/jobName';
 import TerminalOutput from '../shared/TerminalOutput';
 
 const ConformStepProgress: Component = () => {
@@ -39,8 +40,13 @@ const ConformStepProgress: Component = () => {
     const baseOutputDir = state().customOutputDir || defaultDir;
     const jobName = state().jobName.trim();
     const paths = projectPaths(baseOutputDir, jobName);
-    const ligandName = conform.ligandName || 'ligand';
-    const outputDir = paths.conformers(ligandName);
+    const runFolder = buildConformRunFolderName({
+      method: conform.config.method === 'etkdg' ? 'etkdg' : 'mcmm',
+      maxConformers: conform.config.maxConformers,
+      outputName: conform.outputName,
+      ligandName: conform.ligandName,
+    });
+    const outputDir = paths.conformers(runFolder);
     setConformOutputDir(outputDir);
 
     try {
@@ -105,7 +111,7 @@ const ConformStepProgress: Component = () => {
           <p class="text-sm text-base-content/90">
             {state().currentPhase === 'complete'
               ? `${state().conform.conformerPaths.length} conformers found`
-              : `${state().conform.config.method.toUpperCase()} — ${state().conform.ligandName}`}
+              : `${state().conform.config.method.toUpperCase()} — ${state().conform.outputName || state().conform.ligandName}`}
           </p>
         </div>
         <div class="flex items-center gap-2">

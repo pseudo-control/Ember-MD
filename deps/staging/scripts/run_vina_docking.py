@@ -198,6 +198,22 @@ def pdbqt_poses_to_sdf(pdbqt_path: str, output_sdf_path: str, scores: List[float
     writer.close()
 
 
+def write_single_molecule_sdf(mol: Any, output_path: str, tmp_dir: str, temp_name: str) -> None:
+    if output_path.endswith('.gz'):
+        temp_sdf = os.path.join(tmp_dir, temp_name)
+        writer = Chem.SDWriter(temp_sdf)
+        writer.write(mol)
+        writer.close()
+        with open(temp_sdf, 'rb') as f_in:
+            with gzip.open(output_path, 'wb') as f_out:
+                f_out.write(f_in.read())
+        return
+
+    writer = Chem.SDWriter(output_path)
+    writer.write(mol)
+    writer.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='Dock single ligand with AutoDock Vina')
     parser.add_argument('--receptor', required=True, help='Path to receptor PDB file')
@@ -212,6 +228,8 @@ def main() -> None:
     parser.add_argument('--core_constrain', action='store_true', help='MCS core-constrained alignment')
     parser.add_argument('--reference_sdf', default=None, help='Reference SDF for MCS alignment')
     parser.add_argument('--project_name', default=None, help='Project name prefix for output files')
+    parser.add_argument('--score_only', action='store_true', help='Run Vina score_only on the input ligand instead of docking')
+    parser.add_argument('--score_only_output_sdf', default=None, help='Optional output SDF(.gz) with vinaScoreOnlyAffinity property')
     args = parser.parse_args()
 
     # Validate inputs
@@ -248,6 +266,24 @@ def main() -> None:
         v.set_receptor(receptor_pdbqt)
         v.set_ligand_from_string(ligand_pdbqt_string)
         v.compute_vina_maps(center=center, box_size=size)
+
+        if args.score_only:
+            print('Scoring input pose with Vina score_only...', file=sys.stderr)
+            score_terms = v.score()
+            score = float(score_terms[0])
+
+            if args.score_only_output_sdf:
+                input_supplier = Chem.SDMolSupplier(args.ligand, removeHs=False)
+                input_mol = input_supplier[0] if len(input_supplier) > 0 else None
+                if input_mol is None:
+                    raise ValueError(f'Failed to load input ligand for score_only output: {args.ligand}')
+                input_mol.SetProp('vinaScoreOnlyAffinity', f'{score:.2f}')
+                input_mol.SetProp('isReferencePose', '1')
+                input_mol.SetProp('referenceSource', 'prepared_complex')
+                write_single_molecule_sdf(input_mol, args.score_only_output_sdf, tmp_dir, f'{name}_score_only.sdf')
+
+            print(f'SCORE_ONLY:{name}:{score:.3f}')
+            return
 
         print(f'Docking (exhaustiveness={args.exhaustiveness})...', file=sys.stderr)
         v.dock(exhaustiveness=args.exhaustiveness, n_poses=args.num_poses)

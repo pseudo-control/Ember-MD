@@ -1,24 +1,53 @@
 import { Component, Show } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import type { ConformerMethod } from '../../../shared/types/dock';
+import { buildConformRunFolderName, sanitizeConformOutputName } from '../../utils/jobName';
 
 const ConformStepConfigure: Component = () => {
   const {
     state,
     setConformStep,
+    setConformOutputName,
     setConformConfig,
   } = workflowStore;
+
+  const outputFolder = () => buildConformRunFolderName({
+    method: state().conform.config.method === 'etkdg' ? 'etkdg' : 'mcmm',
+    maxConformers: state().conform.config.maxConformers,
+    outputName: state().conform.outputName,
+    ligandName: state().conform.ligandName,
+  });
 
   return (
     <div class="h-full flex flex-col">
       <div class="text-center mb-3">
-        <h2 class="text-xl font-bold">Configure Conformer Search</h2>
+        <h2 class="text-xl font-bold">Configure MCMM</h2>
         <p class="text-sm text-base-content/90">{state().conform.ligandName}</p>
       </div>
 
       <div class="flex-1 min-h-0 overflow-auto flex flex-col items-center gap-4">
-        <div class="card bg-base-200 shadow-lg w-full max-w-md">
+        <div class="card bg-base-200 shadow-lg w-full max-w-lg">
           <div class="card-body p-4">
+            <h3 class="text-sm font-semibold mb-2">Save</h3>
+
+            <div class="form-control mb-3">
+              <label class="label py-0">
+                <span class="label-text text-[10px]">Run descriptor</span>
+              </label>
+              <input
+                type="text"
+                class="input input-bordered input-sm font-mono text-xs"
+                value={state().conform.outputName}
+                placeholder="lead-series-a"
+                onInput={(e) => setConformOutputName(sanitizeConformOutputName(e.currentTarget.value))}
+              />
+              <p class="text-[10px] text-base-content/60 mt-1">
+                Saved to {state().jobName}/conformers/{outputFolder()}
+              </p>
+            </div>
+
+            <div class="border-t border-base-300 my-2" />
+
             <h3 class="text-sm font-semibold mb-2">Method</h3>
 
             <div class="flex items-center justify-between py-0.5">
@@ -40,9 +69,11 @@ const ConformStepConfigure: Component = () => {
               </select>
             </div>
 
-            <Show when={state().conform.config.method === 'mcmm'}>
-              <p class="text-[10px] text-base-content/50 ml-1 mt-0.5">Sage 2.3.0 + OBC2 implicit solvent</p>
-            </Show>
+            <p class="text-[10px] text-base-content/50 ml-1 mt-0.5">
+              {state().conform.config.method === 'mcmm'
+                ? 'MCMM uses OpenFF Sage 2.3.0 + OBC2 implicit solvent.'
+                : 'ETKDG gives a fast RDKit conformer ensemble from the same saved run layout.'}
+            </p>
 
             <div class="border-t border-base-300 my-2" />
 

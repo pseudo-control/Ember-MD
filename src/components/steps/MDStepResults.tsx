@@ -4,7 +4,7 @@ import { ClusterResultData } from '../../../shared/types/ipc';
 import path from 'path';
 
 const MDStepResults: Component = () => {
-  const { state, setMode, setMdStep, setViewerPdbPath, setViewerPdbQueue, setViewerTrajectoryPath, resetMd, resetViewer } = workflowStore;
+  const { state, openViewerSession, resetMd } = workflowStore;
   const api = window.electronAPI;
 
   // Analysis state
@@ -103,23 +103,24 @@ const MDStepResults: Component = () => {
 
   const openTrajectoryInViewer = () => {
     if (!result()) return;
-    resetViewer();
-    setViewerPdbPath(result()!.systemPdbPath);
-    setViewerTrajectoryPath(result()!.trajectoryPath);
-    setMode('viewer');
+    openViewerSession({
+      pdbPath: result()!.systemPdbPath,
+      trajectoryPath: result()!.trajectoryPath,
+    });
   };
 
   const openClustersInViewer = () => {
     const clusters = clusterResults().filter(c => c.centroidPdbPath);
     if (clusters.length === 0) return;
-    resetViewer();
     const queue: ViewerQueueItem[] = clusters.map(c => ({
       pdbPath: c.centroidPdbPath!,
       label: `Cluster ${c.clusterId + 1} (${c.population.toFixed(0)}%)`,
     }));
-    setViewerPdbQueue(queue);
-    setViewerPdbPath(queue[0].pdbPath);
-    setMode('viewer');
+    openViewerSession({
+      pdbPath: queue[0].pdbPath,
+      pdbQueue: queue,
+      pdbQueueIndex: 0,
+    });
   };
 
   const handleOpenFolder = () => {

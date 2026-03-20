@@ -1,9 +1,9 @@
-import { Component, JSX, Show, For, createSignal, createEffect, onMount } from 'solid-js';
-import { workflowStore, WorkflowMode, ViewerQueueItem } from '../../stores/workflow';
+import { Component, JSX, Show, For, createSignal, onMount } from 'solid-js';
+import { workflowStore, WorkflowMode } from '../../stores/workflow';
 import HelpModal from '../HelpModal';
 import AboutModal from '../AboutModal';
-import { generateJobName, sanitizeJobName } from '../../utils/jobName';
-import type { ProjectInfo, ProjectJob } from '../../../shared/types/ipc';
+import { formatJobCountLabel, generateJobName, sanitizeJobName } from '../../utils/jobName';
+import type { ProjectInfo } from '../../../shared/types/ipc';
 import { theme, toggleTheme } from '../../utils/theme';
 
 interface StepInfo {
@@ -51,8 +51,7 @@ interface WizardLayoutProps {
 const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const {
     state, setMode, setJobName, setProjectReady,
-    resetViewer, setViewerPdbPath, setViewerLigandPath,
-    setViewerPdbQueue, setViewerTrajectoryPath,
+    clearViewerSession,
   } = workflowStore;
   const [showHelp, setShowHelp] = createSignal(false);
   const [showAbout, setShowAbout] = createSignal(false);
@@ -72,121 +71,6 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const [deleteFileCount, setDeleteFileCount] = createSignal<{ fileCount: number; totalSizeMb: number } | null>(null);
   const [isProcessing, setIsProcessing] = createSignal(false);
 
-  // Job selector state
-  const [jobs, setJobs] = createSignal<ProjectJob[]>([]);
-  const [activeJobId, setActiveJobId] = createSignal<string | null>(null);
-
-  const loadJobs = async () => {
-    if (!state().projectReady || !state().jobName) {
-      setJobs([]);
-      return;
-    }
-    try {
-      const result = await api.scanProjectArtifacts(state().jobName);
-      setJobs(result);
-      if (result.length > 0) {
-        console.log(`[Nav] Scanned ${result.length} jobs for ${state().jobName}:`, result.map((j: ProjectJob) => j.id));
-      }
-    } catch (err) {
-      console.error('[Nav] Failed to scan jobs:', err);
-    }
-  };
-
-  // Reload jobs when project identity changes
-  let lastJobProject = '';
-  createEffect(() => {
-    const ready = state().projectReady;
-    const name = state().jobName;
-    if (ready && name && name !== lastJobProject) {
-      lastJobProject = name;
-      loadJobs();
-    }
-  });
-
-  const activeJob = () => jobs().find((j) => j.id === activeJobId()) || null;
-
-  const [jobDropdownOpen, setJobDropdownOpen] = createSignal(false);
-
-  const jobSelectorLabel = () => {
-    const count = jobs().length;
-    if (count === 0) return 'No jobs';
-    return `Load Previous Job (${count})`;
-  };
-
-  const handleSelectJob = async (job: ProjectJob) => {
-    console.log(`[Nav] Select job: ${job.id} — ${job.label}`, job.path);
-    setActiveJobId(job.id);
-
-    // Close dropdown by blurring
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-
-    const {
-      setDockOutputDir, setDockResults, setDockReceptorPdbPath,
-      setDockConfig, setDockStep, setDockCordialScored,
-      setMdResult, setMdOutputDir, setMdStep,
-    } = workflowStore;
-
-    if (job.type === 'docking') {
-      // Re-hydrate docking results from disk, navigate to results screen
-      try {
-        const parseResult = await api.parseDockResults(job.path);
-        if (parseResult.ok) {
-          setDockOutputDir(job.path);
-          setDockResults(parseResult.value);
-          if (job.receptorPdb) setDockReceptorPdbPath(job.receptorPdb);
-          // Check if any result has CORDIAL scores
-          const hasCordial = parseResult.value.some((r: any) => r.cordialExpectedPkd != null);
-          setDockCordialScored(hasCordial);
-          setMode('dock');
-          setDockStep('dock-results');
-        } else {
-          // Fallback: open in viewer
-          resetViewer();
-          if (job.poses && job.poses.length > 0 && job.receptorPdb) {
-            const queue: ViewerQueueItem[] = job.poses.map((p) => ({
-              pdbPath: job.receptorPdb!,
-              ligandPath: p.path,
-              label: `${p.name}${p.affinity != null ? ` (${p.affinity.toFixed(1)} kcal/mol)` : ''}`,
-            }));
-            setViewerPdbQueue(queue);
-            setViewerPdbPath(queue[0].pdbPath);
-            setViewerLigandPath(queue[0].ligandPath || null);
-          }
-          setMode('viewer');
-        }
-      } catch {
-        // On error, fall back to viewer
-        resetViewer();
-        setMode('viewer');
-      }
-    } else if (job.type === 'simulation') {
-      // Re-hydrate MD result from job paths, navigate to results screen
-      const systemPdb = job.systemPdb || '';
-      const trajectoryDcd = job.trajectoryDcd || '';
-      const finalPdb = job.finalPdb || systemPdb;
-
-      if (systemPdb && trajectoryDcd) {
-        setMdResult({
-          systemPdbPath: systemPdb,
-          trajectoryPath: trajectoryDcd,
-          equilibratedPdbPath: systemPdb,
-          finalPdbPath: finalPdb,
-          energyCsvPath: trajectoryDcd.replace('trajectory.dcd', 'energy.csv'),
-        });
-        setMdOutputDir(job.path);
-        setMode('md');
-        setMdStep('md-results');
-      } else {
-        // No trajectory — open final PDB in viewer
-        resetViewer();
-        if (finalPdb) setViewerPdbPath(finalPdb);
-        setMode('viewer');
-      }
-    }
-  };
-
   const loadProjects = async () => {
     setIsLoadingProjects(true);
     try {
@@ -202,20 +86,20 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
 
   const handleSelectProject = async (project: ProjectInfo) => {
     console.log(`[Nav] Select project: ${project.name} (${project.runs.length} runs)`);
+    clearViewerSession();
     setJobName(project.name);
     await api.ensureProject(project.name);
     setProjectReady(true);
-    loadJobs();
   };
 
   const handleNewProject = async () => {
     const name = newProjectName().trim();
     if (!name) return;
     console.log(`[Nav] New project: ${name}`);
+    clearViewerSession();
     setJobName(name);
     await api.ensureProject(name);
     setProjectReady(true);
-    loadJobs();
   };
 
   const handleRerollName = () => {
@@ -226,6 +110,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const handleProjectNameClick = () => {
     if (state().isRunning) return;
     resetPickerView();
+    clearViewerSession();
     setProjectReady(false);
     loadProjects();
   };
@@ -373,18 +258,18 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
               View
             </button>
             <button
+              class={`tab tab-sm ${state().mode === 'conform' ? 'tab-active' : ''}`}
+              onClick={() => handleModeSwitch('conform')}
+              disabled={!canSwitchMode()}
+            >
+              MCMM
+            </button>
+            <button
               class={`tab tab-sm ${state().mode === 'dock' ? 'tab-active' : ''}`}
               onClick={() => handleModeSwitch('dock')}
               disabled={!canSwitchMode()}
             >
               Dock
-            </button>
-            <button
-              class={`tab tab-sm ${state().mode === 'conform' ? 'tab-active' : ''}`}
-              onClick={() => handleModeSwitch('conform')}
-              disabled={!canSwitchMode()}
-            >
-              Conform
             </button>
             <button
               class={`tab tab-sm ${state().mode === 'map' ? 'tab-active' : ''}`}
@@ -460,54 +345,6 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                 </svg>
                 {state().jobName}
               </button>
-              <Show when={jobs().length > 0}>
-                <div class="relative">
-                  <button
-                    class="btn btn-ghost btn-xs gap-1 px-2 text-xs text-base-content/70"
-                    onClick={() => setJobDropdownOpen(!jobDropdownOpen())}
-                  >
-                    {jobSelectorLabel()}
-                    <svg class={`w-3 h-3 transition-transform ${jobDropdownOpen() ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-                  <Show when={jobDropdownOpen()}>
-                    <div class="fixed inset-0 z-[998]" onClick={() => setJobDropdownOpen(false)} />
-                    <ul class="absolute top-full left-1/2 -translate-x-1/2 mt-1 z-[999] menu p-2 shadow-lg bg-base-200 border border-base-300 rounded-box w-72 max-h-72 overflow-y-auto">
-                      <Show when={jobs().some((j) => j.type === 'docking')}>
-                        <li class="menu-title"><span class="text-xs uppercase tracking-wider font-semibold">Docking</span></li>
-                        <For each={jobs().filter((j) => j.type === 'docking')}>
-                          {(job) => (
-                            <li>
-                              <a
-                                class={`text-sm ${activeJobId() === job.id ? 'active' : ''}`}
-                                onClick={() => { setJobDropdownOpen(false); handleSelectJob(job); }}
-                              >
-                                {job.label}
-                              </a>
-                            </li>
-                          )}
-                        </For>
-                      </Show>
-                      <Show when={jobs().some((j) => j.type === 'simulation')}>
-                        <li class="menu-title"><span class="text-xs uppercase tracking-wider font-semibold">Simulations</span></li>
-                        <For each={jobs().filter((j) => j.type === 'simulation')}>
-                          {(job) => (
-                            <li>
-                              <a
-                                class={`text-sm ${activeJobId() === job.id ? 'active' : ''}`}
-                                onClick={() => { setJobDropdownOpen(false); handleSelectJob(job); }}
-                              >
-                                {job.label}
-                              </a>
-                            </li>
-                          )}
-                        </For>
-                      </Show>
-                    </ul>
-                  </Show>
-                </div>
-              </Show>
             </div>
           </div>
         </Show>
@@ -638,7 +475,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                                 </svg>
                                 <div class="flex-1 min-w-0 flex items-baseline gap-1.5">
                                   <span class="text-sm font-semibold truncate">{project.name}</span>
-                                  <span class="text-xs text-base-content/50 flex-shrink-0">({project.runs.length})</span>
+                                  <span class="text-xs text-base-content/50 flex-shrink-0">({formatJobCountLabel(project.runs.length)})</span>
                                 </div>
                                 <span class="text-xs text-base-content/60 flex-shrink-0 mr-1">
                                   {formatDate(project.lastModified)}

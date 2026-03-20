@@ -1,6 +1,6 @@
 import { Component, For, Show, createSignal, onMount } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
-import { generateJobName, sanitizeJobName } from '../../utils/jobName';
+import { formatJobCountLabel, generateJobName, sanitizeJobName } from '../../utils/jobName';
 import type { ProjectInfo } from '../../../shared/types/ipc';
 
 const MDStepHome: Component = () => {
@@ -86,7 +86,7 @@ const MDStepHome: Component = () => {
                         </svg>
                         <div class="flex-1 min-w-0 flex items-baseline gap-1">
                           <span class="text-xs font-medium truncate">{project.name}</span>
-                          <span class="text-[10px] text-base-content/50 flex-shrink-0">({project.runs.length})</span>
+                          <span class="text-[10px] text-base-content/50 flex-shrink-0">({formatJobCountLabel(project.runs.length)})</span>
                         </div>
                         <span class="text-[10px] text-base-content/60 flex-shrink-0">
                           {formatDate(project.lastModified)}

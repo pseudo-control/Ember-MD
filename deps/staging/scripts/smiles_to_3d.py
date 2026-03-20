@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Convert SMILES CSV to 3D SDF files using RDKit ETKDG.
+Convert structure CSV rows to 3D SDF files using RDKit ETKDG.
 
 Usage:
     python smiles_to_3d.py --input_csv <path> --output_dir <path>
 
 Input CSV format:
-    Must have a "smiles" column (case-insensitive)
-    Optional "name" column for molecule names
+    Must have either a "smiles" column (case-insensitive) or a structure-file
+    column such as "structure_file", "mol_file", "file", or "path".
+    Optional "name" column for molecule names.
 
 Output:
     - SDF files in output_dir
@@ -59,6 +60,35 @@ def generate_3d_conformer(mol: Any, max_attempts: int = 10) -> Any:
     return mol
 
 
+def load_structure_file(file_path: str) -> Any:
+    """Load a structure file and ensure it has 3D coordinates."""
+    lower = file_path.lower()
+
+    if lower.endswith('.sdf.gz'):
+        import gzip
+        with gzip.open(file_path, 'rt') as f:
+            supplier = Chem.ForwardSDMolSupplier(f, removeHs=False)
+            mol = next((m for m in supplier if m is not None), None)
+    elif lower.endswith('.sdf'):
+        supplier = Chem.SDMolSupplier(file_path, removeHs=False)
+        mol = next((m for m in supplier if m is not None), None)
+    elif lower.endswith('.mol2'):
+        mol = Chem.MolFromMol2File(file_path, removeHs=False)
+    elif lower.endswith('.mol'):
+        mol = Chem.MolFromMolFile(file_path, removeHs=False)
+    else:
+        raise ValueError(f'Unsupported structure file: {file_path}')
+
+    if mol is None:
+        raise ValueError(f'Failed to parse structure file: {file_path}')
+
+    has_3d = mol.GetNumConformers() > 0 and mol.GetConformer().Is3D()
+    if has_3d:
+        return mol
+
+    return generate_3d_conformer(Chem.RemoveHs(mol))
+
+
 def calculate_properties(mol: Any) -> Tuple[float, float]:
     """Calculate QED and SA score."""
     qed_score = 0.5
@@ -76,38 +106,43 @@ def calculate_properties(mol: Any) -> Tuple[float, float]:
 
 
 def process_smiles_csv(input_csv: str, output_dir: str) -> List[Dict[str, Any]]:
-    """Process SMILES CSV and generate 3D SDF files."""
+    """Process a structure CSV and generate 3D SDF files."""
     molecules = []
 
     os.makedirs(output_dir, exist_ok=True)
+    csv_dir = os.path.dirname(os.path.abspath(input_csv))
 
     # Read CSV and find columns
     with open(input_csv, 'r', newline='', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
 
-        # Find SMILES column (case-insensitive)
-        headers = reader.fieldnames
+        # Find supported columns (case-insensitive)
+        headers = reader.fieldnames or []
         smiles_col = None
+        structure_col = None
         name_col = None
 
         for h in headers:
             h_lower = h.lower().strip()
             if h_lower == 'smiles':
                 smiles_col = h
+            elif h_lower in ('structure_file', 'mol_file', 'file', 'path', 'structure_path'):
+                structure_col = h
             elif h_lower in ('name', 'id', 'molecule_name', 'mol_name', 'compound'):
                 name_col = h
 
-        if smiles_col is None:
-            print("ERROR: No 'smiles' column found in CSV", file=sys.stderr)
+        if smiles_col is None and structure_col is None:
+            print("ERROR: CSV must contain either 'smiles' or a structure-file column", file=sys.stderr)
             sys.exit(1)
 
         rows = list(reader)
 
     total = len(rows)
-    print(f"Processing {total} SMILES from {input_csv}")
+    print(f"Processing {total} molecules from {input_csv}")
 
     for i, row in enumerate(rows):
-        smiles = row[smiles_col].strip()
+        smiles = row.get(smiles_col, '').strip() if smiles_col else ''
+        structure_ref = row.get(structure_col, '').strip() if structure_col else ''
 
         # Get name or generate one
         if name_col and row.get(name_col):
@@ -121,20 +156,34 @@ def process_smiles_csv(input_csv: str, output_dir: str) -> List[Dict[str, Any]]:
         print(f"PROGRESS: {i+1}/{total} - Converting {name}")
         sys.stdout.flush()
 
-        # Parse SMILES
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            print(f"  WARNING: Invalid SMILES: {smiles}", file=sys.stderr)
-            continue
-
-        # Generate 3D conformer
-        mol_3d = generate_3d_conformer(mol)
-        if mol_3d is None:
-            print(f"  WARNING: Could not generate 3D for: {name}", file=sys.stderr)
+        try:
+            if smiles:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    print(f"  WARNING: Invalid SMILES: {smiles}", file=sys.stderr)
+                    continue
+                mol_3d = generate_3d_conformer(mol)
+                if mol_3d is None:
+                    print(f"  WARNING: Could not generate 3D for: {name}", file=sys.stderr)
+                    continue
+            elif structure_ref:
+                structure_path = structure_ref
+                if not os.path.isabs(structure_path):
+                    structure_path = os.path.join(csv_dir, structure_path)
+                if not os.path.isfile(structure_path):
+                    print(f"  WARNING: Structure file not found: {structure_ref}", file=sys.stderr)
+                    continue
+                mol_3d = load_structure_file(structure_path)
+                smiles = Chem.MolToSmiles(Chem.RemoveAllHs(mol_3d))
+            else:
+                print(f"  WARNING: Row {i+1} has neither SMILES nor structure file", file=sys.stderr)
+                continue
+        except Exception as exc:
+            print(f"  WARNING: Could not process {name}: {exc}", file=sys.stderr)
             continue
 
         # Calculate properties
-        qed, sa_score = calculate_properties(mol)
+        qed, sa_score = calculate_properties(Chem.RemoveAllHs(mol_3d))
 
         # Save to SDF
         sdf_path = os.path.join(output_dir, f"{name}.sdf")
@@ -159,8 +208,8 @@ def process_smiles_csv(input_csv: str, output_dir: str) -> List[Dict[str, Any]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Convert SMILES CSV to 3D SDF')
-    parser.add_argument('--input_csv', required=True, help='Input CSV with SMILES column')
+    parser = argparse.ArgumentParser(description='Convert structure CSV to 3D SDF')
+    parser.add_argument('--input_csv', required=True, help='Input CSV with smiles or structure-file column')
     parser.add_argument('--output_dir', required=True, help='Output directory for SDF files')
     args = parser.parse_args()
 

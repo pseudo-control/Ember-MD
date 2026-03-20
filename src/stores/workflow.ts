@@ -134,6 +134,7 @@ export interface BindingSiteMapState {
 }
 
 export interface ViewerState {
+  sessionKey: number;
   pdbPath: string | null;
   ligandPath: string | null;
   pdbQueue: ViewerQueueItem[];
@@ -175,6 +176,16 @@ export interface ViewerState {
   selectedLayerId: string | null;
 }
 
+interface OpenViewerSessionOptions {
+  pdbPath?: string | null;
+  ligandPath?: string | null;
+  trajectoryPath?: string | null;
+  trajectoryInfo?: TrajectoryInfo | null;
+  pdbQueue?: ViewerQueueItem[];
+  pdbQueueIndex?: number;
+  bindingSiteMap?: BindingSiteMapState | null;
+}
+
 export interface MapState {
   method: MapMethod;
   isComputing: boolean;
@@ -188,6 +199,7 @@ export interface MapState {
 export interface ConformState {
   ligandSdfPath: string | null;
   ligandName: string | null;
+  outputName: string;
   config: ConformerConfig;
   outputDir: string | null;
   conformerPaths: string[];
@@ -274,7 +286,7 @@ const defaultDockState: DockState = {
   referenceLigandId: null,
   referenceLigandPath: null,
   detectedLigands: [],
-  ligandSource: 'sdf_directory',
+  ligandSource: 'structure_files',
   ligandSdfPaths: [],
   ligandMolecules: [],
   config: { ...DEFAULT_DOCK_CONFIG },
@@ -327,6 +339,7 @@ const defaultMapState: MapState = {
 const defaultConformState: ConformState = {
   ligandSdfPath: null,
   ligandName: null,
+  outputName: '',
   config: { ...DEFAULT_CONFORMER_CONFIG },
   outputDir: null,
   conformerPaths: [],
@@ -342,6 +355,7 @@ const defaultClusteringConfig: ClusteringConfig = {
 };
 
 const defaultViewerState: ViewerState = {
+  sessionKey: 0,
   pdbPath: null,
   ligandPath: null,
   pdbQueue: [],
@@ -869,6 +883,9 @@ function createWorkflowStore() {
   const setConformLigandName = (ligandName: string | null) =>
     setState((s) => ({ ...s, conform: { ...s.conform, ligandName } }));
 
+  const setConformOutputName = (outputName: string) =>
+    setState((s) => ({ ...s, conform: { ...s.conform, outputName } }));
+
   const setConformConfig = (config: Partial<ConformerConfig>) =>
     setState((s) => ({ ...s, conform: { ...s.conform, config: { ...s.conform.config, ...config } } }));
 
@@ -880,6 +897,37 @@ function createWorkflowStore() {
 
   const setConformRunning = (isRunning: boolean) =>
     setState((s) => ({ ...s, conform: { ...s.conform, isRunning } }));
+
+  const clearViewerSession = () =>
+    setState((s) => ({
+      ...s,
+      viewer: { ...defaultViewerState, sessionKey: s.viewer.sessionKey + 1 },
+    }));
+
+  const openViewerSession = (options: OpenViewerSessionOptions = {}) =>
+    setState((s) => {
+      const pdbQueue = options.pdbQueue ? [...options.pdbQueue] : [];
+      const pdbQueueIndex = pdbQueue.length > 0
+        ? Math.min(Math.max(options.pdbQueueIndex ?? 0, 0), pdbQueue.length - 1)
+        : 0;
+      const queueItem = pdbQueue[pdbQueueIndex];
+
+      return {
+        ...s,
+        mode: 'viewer',
+        viewer: {
+          ...defaultViewerState,
+          sessionKey: s.viewer.sessionKey + 1,
+          pdbQueue,
+          pdbQueueIndex,
+          pdbPath: options.pdbPath ?? queueItem?.pdbPath ?? null,
+          ligandPath: options.ligandPath ?? queueItem?.ligandPath ?? null,
+          trajectoryPath: options.trajectoryPath ?? null,
+          trajectoryInfo: options.trajectoryInfo ?? null,
+          bindingSiteMap: options.bindingSiteMap ?? null,
+        },
+      };
+    });
 
   const resetConform = () =>
     setState((s) => ({
@@ -895,7 +943,7 @@ function createWorkflowStore() {
     console.log('[Store] resetViewer');
     setState((s) => ({
       ...s,
-      viewer: { ...defaultViewerState },
+      viewer: { ...defaultViewerState, sessionKey: s.viewer.sessionKey },
     }));
   };
 
@@ -1051,11 +1099,14 @@ function createWorkflowStore() {
     // Conform state
     setConformLigandSdf,
     setConformLigandName,
+    setConformOutputName,
     setConformConfig,
     setConformOutputDir,
     setConformPaths,
     setConformRunning,
     resetConform,
+    clearViewerSession,
+    openViewerSession,
     // Utilities
     getBaseOutputDir: async () => {
       const custom = state().customOutputDir;

@@ -2,8 +2,8 @@
  * Docking mode types (Vina + CORDIAL)
  */
 
-// Ligand source types for multi-input support
-export type LigandSource = 'sdf_directory' | 'smiles_csv' | 'single_molecule';
+// Ligand source types for docking input
+export type LigandSource = 'structure_files' | 'molecule_csv';
 
 // Single molecule input result (from SMILES/MOL paste or file)
 export interface SingleMoleculeResult {
@@ -56,6 +56,8 @@ export const DEFAULT_PROTONATION_CONFIG: ProtonationConfig = {
   phMax: 8.4,
 };
 
+export const DEFAULT_RECEPTOR_WATER_DISTANCE = 3.5;
+
 // Stereoisomer enumeration configuration
 export interface StereoisomerConfig {
   enabled: boolean;
@@ -91,14 +93,18 @@ export const DEFAULT_CONFORMER_CONFIG: ConformerConfig = {
 };
 
 // Post-dock pocket refinement configuration
+export type ChargeMethod = 'gasteiger' | 'am1bcc';
+
 export interface RefinementConfig {
   enabled: boolean;
-  maxIterations: number;    // Default: 200
+  maxIterations: number;    // Default: 5000
+  chargeMethod: ChargeMethod;  // Default: 'am1bcc' (NAGL neural net AM1-BCC)
 }
 
 export const DEFAULT_REFINEMENT_CONFIG: RefinementConfig = {
   enabled: true,
   maxIterations: 5000,
+  chargeMethod: 'am1bcc',
 };
 
 // CORDIAL rescoring configuration
@@ -117,10 +123,58 @@ export interface CordialScore {
   sourceSdf: string;
   sourceName: string;
   poseIndex: number;
-  expectedPkd: number;           // Weighted sum of 8 ordinal classes (0-8 scale)
+  expectedPkd: number;           // Sum of ordinal cumulative probabilities P(pKd >= k), k=1..8
   pHighAffinity: number;         // P(pKd >= 6)
   pVeryHighAffinity: number;     // P(pKd >= 7)
   probabilities: number[];       // All 8 class probabilities
+}
+
+export interface PreparedComplexManifest {
+  schema_version: number;
+  prepared_at_epoch_s: number;
+  prepared_receptor_pdb: string;
+  prepared_reference_ligand_sdf: string;
+  raw_reference_ligand_sdf: string;
+  selected_protonated_reference_sdf: string;
+  reference_protonation_enabled: boolean;
+  charge_method: ChargeMethod;
+  reference_formal_charge: number;
+  reference_raw_smiles: string;
+  reference_prepared_smiles: string;
+  protonation_method: string;
+  protonation_ph_min: number;
+  protonation_ph_max: number;
+  protonation_candidate_count: number;
+  protonation_candidate_paths: string[];
+  xray_heavy_atom_rmsd: number;
+  refinement_energy: number;
+  retained_water_present: boolean;
+  receptor_prep_metadata_path?: string | null;
+  receptor_protonation_ph?: number | null;
+  receptor_propka_available?: boolean;
+  receptor_applied_overrides?: Array<{
+    residue_key: string;
+    chain_id: string;
+    residue_number: string;
+    residue_name: string;
+    selected_variant: string;
+    default_variant?: string | null;
+    reason: string;
+    pka?: number;
+  }>;
+  receptor_ignored_shifted_residues?: Array<{
+    residue_key: string;
+    chain_id: string;
+    residue_number: string;
+    residue_name: string;
+    pka: number;
+    default_state?: string;
+    propka_state?: string;
+    reason: string;
+  }>;
+  receptor_resolved_variants?: Record<string, string>;
+  receptor_pocket_filtered?: boolean;
+  receptor_pocket_residue_keys?: string[];
 }
 
 // Docking result for a single pose
@@ -128,12 +182,15 @@ export interface DockResult {
   ligandName: string;
   smiles: string;
   qed: number;
-  vinaAffinity: number;        // kcal/mol
+  vinaAffinity: number | null;        // Docked Vina affinity in kcal/mol
+  vinaScoreOnlyAffinity?: number;     // Vina score_only affinity for reference poses
   poseIndex: number;
   outputSdf: string;
   parentMolecule: string;
   protonationVariant: number | null;
   conformerIndex: number | null;
+  isReferencePose: boolean;
+  refinementEnergy?: number;
   cordialExpectedPkd?: number;
   cordialPHighAffinity?: number;
   cordialPVeryHighAffinity?: number;

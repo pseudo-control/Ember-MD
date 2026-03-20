@@ -128,6 +128,7 @@ export interface GenerationStats {
 export const IpcChannels = {
   // Invoke channels (renderer -> main -> renderer)
   SELECT_PDB_FILE: 'select-pdb-file',
+  SELECT_STRUCTURE_FILES_MULTI: 'select-structure-files-multi',
   SELECT_OUTPUT_FOLDER: 'select-output-folder',
   PREP_PDB: 'prep-pdb',
   GENERATE_SURFACE: 'generate-surface',
@@ -156,10 +157,13 @@ export const IpcChannels = {
   DETECT_PDB_LIGANDS: 'detect-pdb-ligands',
   EXTRACT_LIGAND: 'extract-ligand',
   PREPARE_RECEPTOR: 'prepare-receptor',
+  PREPARE_DOCKING_COMPLEX: 'prepare-docking-complex',
   EXPORT_DOCK_CSV: 'dock:export-csv',
   EXPORT_COMPLEX_PDB: 'export-complex-pdb',
   GET_CPU_COUNT: 'get-cpu-count',
   // Multi-input ligand source channels
+  SELECT_MOLECULE_FILES_MULTI: 'select-molecule-files-multi',
+  IMPORT_MOLECULE_FILES: 'import-molecule-files',
   SELECT_FOLDER: 'select-folder',
   SCAN_SDF_DIRECTORY: 'scan-sdf-directory',
   PARSE_SMILES_CSV: 'parse-smiles-csv',
@@ -397,14 +401,19 @@ export interface ProjectJobPose {
 
 export interface ProjectJob {
   id: string;               // Unique key: "dock:Vina_HWF" or "sim:ff19sb-OPC_MD-300K-1ns"
-  type: 'docking' | 'simulation';
+  type: 'docking' | 'docking-pose' | 'simulation' | 'conformer';
   folder: string;           // Run folder name (e.g., "Vina_HWF")
   label: string;            // Display name
   path: string;             // Root path of the job directory
+  parentId?: string;
+  parentLabel?: string;
+  sortKey?: number;
 
   // Docking-specific
   receptorPdb?: string;
   poses?: ProjectJobPose[];
+  ligandPath?: string;
+  poseIndex?: number;
 
   // Simulation-specific
   systemPdb?: string;
@@ -413,6 +422,10 @@ export interface ProjectJob {
   hasTrajectory?: boolean;
   clusterCount?: number;
   clusterDir?: string;
+
+  // Conformer-specific
+  conformerPaths?: string[];
+  conformerCount?: number;
 }
 
 // Keep legacy alias for backward compat during transition

@@ -36,7 +36,10 @@ def parse_sdf_properties(sdf_path: str, generate_thumbnail: bool = True, thumbna
         'smiles': None,
         'cnnScore': 0.0,
         'cnnAffinity': 0.0,
-        'vinaAffinity': 0.0,
+        'vinaAffinity': None,
+        'vinaScoreOnlyAffinity': None,
+        'refinementEnergy': None,
+        'isReferencePose': False,
         'qed': 0.0,
         'mw': 0.0,
         'logp': 0.0,
@@ -91,6 +94,16 @@ def parse_sdf_properties(sdf_path: str, generate_thumbnail: bool = True, thumbna
             if key in props:
                 result['vinaAffinity'] = float(props[key])
                 break
+
+        if 'vinaScoreOnlyAffinity' in props:
+            result['vinaScoreOnlyAffinity'] = float(props['vinaScoreOnlyAffinity'])
+
+        if 'refinement_energy' in props:
+            result['refinementEnergy'] = float(props['refinement_energy'])
+
+        if 'isReferencePose' in props:
+            value = str(props['isReferencePose']).strip().lower()
+            result['isReferencePose'] = value in ('1', 'true', 'yes')
 
         # Generate 2D thumbnail if requested
         if generate_thumbnail:

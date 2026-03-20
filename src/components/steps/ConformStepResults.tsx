@@ -1,16 +1,12 @@
 import { Component, For, Show } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
-import type { ViewerQueueItem } from '../../stores/workflow';
+import { buildConformerViewerQueue } from '../../utils/viewerQueue';
 
 const ConformStepResults: Component = () => {
   const {
     state,
     setConformStep,
-    setMode,
-    setViewerPdbPath,
-    setViewerPdbQueue,
-    setViewerPdbQueueIndex,
-    resetViewer,
+    openViewerSession,
   } = workflowStore;
   const api = window.electronAPI;
 
@@ -20,17 +16,13 @@ const ConformStepResults: Component = () => {
     const paths = conformers();
     if (paths.length === 0) return;
 
-    const queue: ViewerQueueItem[] = paths.map((sdf, i) => ({
-      pdbPath: sdf,
-      label: `Conformer ${i + 1}`,
-      type: 'conformer' as const,
-    }));
+    const queue = buildConformerViewerQueue(paths);
 
-    resetViewer();
-    setViewerPdbPath(queue[0].pdbPath);
-    setViewerPdbQueue(queue);
-    setViewerPdbQueueIndex(0);
-    setMode('viewer');
+    openViewerSession({
+      pdbPath: queue[0].pdbPath,
+      pdbQueue: queue,
+      pdbQueueIndex: 0,
+    });
   };
 
   const handleOpenFolder = () => {
@@ -43,7 +35,7 @@ const ConformStepResults: Component = () => {
       <div class="text-center mb-3">
         <h2 class="text-xl font-bold">Conformer Results</h2>
         <p class="text-sm text-base-content/90">
-          {conformers().length} conformers — {state().conform.ligandName}
+          {conformers().length} conformers — {state().conform.outputName || state().conform.ligandName}
         </p>
       </div>
 
@@ -60,6 +52,13 @@ const ConformStepResults: Component = () => {
                 </button>
               </div>
             </div>
+
+            <Show when={state().conform.outputDir}>
+              <div class="mb-3 rounded-lg bg-base-300 px-3 py-2">
+                <p class="text-[10px] uppercase tracking-wider text-base-content/60">Saved Run</p>
+                <p class="text-xs font-mono break-all">{state().conform.outputDir}</p>
+              </div>
+            </Show>
 
             <div class="overflow-x-auto">
               <table class="table table-xs table-zebra w-full">

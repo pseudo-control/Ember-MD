@@ -1,5 +1,6 @@
 import { Component, Show, For, createSignal, createMemo, createEffect, onMount, onCleanup, batch } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
+import { buildDockingViewerQueue } from '../../utils/viewerQueue';
 import path from 'path';
 
 type SortField = 'ligandName' | 'vinaAffinity' | 'cordialPHighAffinity' | 'cordialPVeryHighAffinity' | 'qed' | 'coreRmsd';
@@ -8,7 +9,7 @@ type SortDirection = 'asc' | 'desc';
 const PAGE_SIZE = 25;
 
 const DockStepResults: Component = () => {
-  const { state, setMode, setMdStep, setViewerPdbPath, setViewerLigandPath, setViewerPdbQueue, setViewerPdbQueueIndex, setMdReceptorPdb, setMdLigandSdf, setMdLigandName, setMdPdbPath, setMdConfig, resetDock, resetViewer } = workflowStore;
+  const { state, openViewerSession, setMode, setMdStep, setMdReceptorPdb, setMdLigandSdf, setMdLigandName, setMdPdbPath, setMdConfig, resetDock } = workflowStore;
   const api = window.electronAPI;
 
   const cordialScored = () => state().dock.cordialScored;
@@ -20,9 +21,16 @@ const DockStepResults: Component = () => {
   const [thumbnailUrl, setThumbnailUrl] = createSignal<string | null>(null);
 
   const results = () => state().dock.results;
-  const uniqueLigandCount = createMemo(() => new Set(results().map(r => r.ligandName)).size);
+  const dockedResults = createMemo(() => results().filter(r => !r.isReferencePose));
+  const referenceCount = createMemo(() => results().filter(r => r.isReferencePose).length);
+  const uniqueLigandCount = createMemo(() => new Set(dockedResults().map(r => r.ligandName)).size);
   const outputDir = () => state().dock.dockingOutputDir;
   const coreConstrained = () => state().dock.config.coreConstrained;
+  const scoreValue = (row: any) => row.vinaAffinity ?? row.vinaScoreOnlyAffinity ?? null;
+  const formatScore = (row: any) => {
+    const value = scoreValue(row);
+    return value == null ? '-' : value.toFixed(1);
+  };
 
   const receptorPdb = () => {
     const dir = outputDir();
@@ -50,9 +58,16 @@ const DockStepResults: Component = () => {
     const dir = sortDirection();
 
     items.sort((a, b) => {
+      if (a.isReferencePose !== b.isReferencePose) {
+        return a.isReferencePose ? 1 : -1;
+      }
       let cmp: number;
       if (field === 'ligandName') {
         cmp = a.ligandName.localeCompare(b.ligandName);
+      } else if (field === 'vinaAffinity') {
+        const va = scoreValue(a) ?? Number.POSITIVE_INFINITY;
+        const vb = scoreValue(b) ?? Number.POSITIVE_INFINITY;
+        cmp = va - vb;
       } else {
         const va = (a as any)[field] ?? 0;
         const vb = (b as any)[field] ?? 0;
@@ -170,19 +185,22 @@ const DockStepResults: Component = () => {
     const receptor = receptorPdb();
 
     const allResults = sortedResults();
-    const queue = allResults.map((r) => ({
-      pdbPath: receptor,
-      ligandPath: r.outputSdf,
-      label: `${r.ligandName} (${r.vinaAffinity.toFixed(1)})`,
-    }));
+    const queue = buildDockingViewerQueue(
+      receptor,
+      allResults.map((r) => ({
+        name: r.ligandName,
+        path: r.outputSdf,
+        affinity: scoreValue(r) ?? undefined,
+      })),
+    );
 
-    resetViewer();
-    setViewerPdbPath(receptor);
-    setViewerLigandPath(pose.outputSdf);
-    setViewerPdbQueue(queue);
     const selIdx = selectedIndex();
-    if (selIdx !== null && selIdx >= 0) setViewerPdbQueueIndex(selIdx);
-    setMode('viewer');
+    openViewerSession({
+      pdbPath: receptor,
+      ligandPath: pose.outputSdf,
+      pdbQueue: queue,
+      pdbQueueIndex: selIdx !== null && selIdx >= 0 ? selIdx : 0,
+    });
   };
 
   const handleSimulate = () => {
@@ -193,7 +211,7 @@ const DockStepResults: Component = () => {
     setMdLigandSdf(pose.outputSdf);
     setMdLigandName(pose.ligandName);
     setMdPdbPath(receptor || null);
-    setMdConfig({ restrainLigandNs: 2 });
+    setMdConfig({ restrainLigandNs: 0 });
     batch(() => {
       setMode('md');
       setMdStep('md-configure');
@@ -206,7 +224,10 @@ const DockStepResults: Component = () => {
       <div class="text-center mb-2">
         <h2 class="text-xl font-bold">Docking Complete</h2>
         <p class="text-sm text-base-content/70">
-          {results().length} poses from {uniqueLigandCount()} ligands
+          {dockedResults().length} docked poses from {uniqueLigandCount()} ligands
+          <Show when={referenceCount() > 0}>
+            {' '}+ {referenceCount()} reference pose
+          </Show>
         </p>
       </div>
 
@@ -262,8 +283,13 @@ const DockStepResults: Component = () => {
                               : 'border-base-content/30'
                           }`} />
                         </td>
-                        <td class="font-mono text-xs truncate max-w-[160px]">{row.ligandName}</td>
-                        <td class="text-right font-mono text-xs">{row.vinaAffinity.toFixed(1)}</td>
+                        <td class="font-mono text-xs truncate max-w-[160px]">
+                          {row.ligandName}
+                          <Show when={row.isReferencePose}>
+                            <span class="badge badge-ghost badge-xs ml-2">Ref</span>
+                          </Show>
+                        </td>
+                        <td class="text-right font-mono text-xs">{formatScore(row)}</td>
                         <Show when={cordialScored()}>
                           <td class="text-right font-mono text-xs">
                             {row.cordialPHighAffinity != null ? (row.cordialPHighAffinity * 100).toFixed(0) + '%' : '-'}
@@ -355,13 +381,24 @@ const DockStepResults: Component = () => {
 
                 {/* Scores */}
                 <div class="space-y-1">
-                  <p class="text-xs font-mono font-semibold truncate" title={pose().ligandName}>
-                    {pose().ligandName}
-                  </p>
-                  <div class="flex justify-between text-xs">
-                    <span class="text-base-content/60">Vina</span>
-                    <span class="font-mono font-semibold">{pose().vinaAffinity.toFixed(1)} kcal/mol</span>
+                  <div class="flex items-center gap-2">
+                    <p class="text-xs font-mono font-semibold truncate" title={pose().ligandName}>
+                      {pose().ligandName}
+                    </p>
+                    <Show when={pose().isReferencePose}>
+                      <span class="badge badge-ghost badge-xs">Reference</span>
+                    </Show>
                   </div>
+                  <div class="flex justify-between text-xs">
+                    <span class="text-base-content/60">{pose().isReferencePose ? 'Vina score_only' : 'Vina'}</span>
+                    <span class="font-mono font-semibold">{formatScore(pose())} {scoreValue(pose()) != null ? 'kcal/mol' : ''}</span>
+                  </div>
+                  <Show when={pose().refinementEnergy != null}>
+                    <div class="flex justify-between text-xs">
+                      <span class="text-base-content/60">Refinement</span>
+                      <span class="font-mono font-semibold">{pose().refinementEnergy!.toFixed(1)} kcal/mol</span>
+                    </div>
+                  </Show>
                   <Show when={cordialScored() && pose().cordialPHighAffinity != null}>
                     <div class="flex justify-between text-xs">
                       <span class="text-base-content/60">{"P(< 1\u00B5M)"}</span>
@@ -396,7 +433,9 @@ const DockStepResults: Component = () => {
       {/* Scoring legend + bottom actions */}
       <div class="flex items-start justify-between mt-2 pt-2 border-t border-base-300">
         <div class="text-xs text-base-content/50 leading-relaxed max-w-[420px]">
-          <span class="font-semibold text-base-content/70">Vina</span> = physics-based docking score (AutoDock Vina)
+          <span class="font-semibold text-base-content/70">Vina</span> = docked affinity
+          {' '}<span class="mx-1 text-base-content/30">|</span>{' '}
+          <span class="font-semibold text-base-content/70">Vina score_only</span> = reference-pose rescoring in the prepared pocket
           <Show when={cordialScored()}>
             {' '}<span class="mx-1 text-base-content/30">|</span>{' '}
             <span class="font-semibold text-base-content/70">{"P(< 1\u00B5M)"}</span> / <span class="font-semibold text-base-content/70">{"P(< 100nM)"}</span> = ML-predicted binding probability (CORDIAL)
