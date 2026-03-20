@@ -31,4 +31,10 @@ deps/staging/scripts/__pycache__/
 # Local molecular inputs/outputs and scratch data
 *.pka
 *.chk
+*.pdf
+*.trace/
 FRB4591_01_refine_8.pdb
+binding_site_map/
+__pycache__/
+scripts/__pycache__/
+deps/staging/scripts/tests/__pycache__/
