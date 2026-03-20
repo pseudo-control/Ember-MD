@@ -1,330 +1,139 @@
 # Ember
 
-Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Two modes: **Simulate** (AMBER MD) and **Viewer** (NGL molecular viewer with trajectory playback).
+Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Primary user-facing tabs: **View** (NGL 3D viewer), **MCMM** (standalone conformer generation), **Dock** (AutoDock Vina), **Map** (binding site mapping), and **Simulate** (OpenMM AMBER MD). The codebase also contains an **FEP** scoring panel, but its header tab is currently disabled.
 
-**Repo**: `pseudo-control/Ember-MD` (private, GitHub)
-
-**Note**: `README.md` and `deps/README.md` are stale — they still reference FragGen/OpenSBDD, Linux, CUDA, and GNINA. Do not use them as a source of truth for architecture or packaging. Use this file instead.
-
-**Script duplication**: `run_md_simulation.py` exists at both repo root (reference copy) and `deps/staging/scripts/` (bundled copy with plugin loading). The staging copy is canonical for the app; the root copy is for standalone Metal backend testing.
+**Repos**: `pseudo-control/Ember-MD` (this repo), `pseudo-control/Ember-Metal` (native Metal GPU backend, separate repo)
+**Stale docs**: `README.md` and `deps/README.md` still reference FragGen/GNINA/Linux — use this file instead.
+**Script duplication**: `run_md_simulation.py` exists at both repo root (reference copy) and `deps/staging/scripts/` (canonical bundled copy with plugin loading).
 
 ## Tech Stack
-- **Frontend**: SolidJS + TypeScript + Tailwind/DaisyUI (wireframe theme, system fonts)
+- **Frontend**: SolidJS + TypeScript + Tailwind/DaisyUI (wireframe/business themes)
 - **Desktop**: Electron 27, Webpack
-- **MD Engine**: OpenMM 8.1.2 (AMBER ff19SB/ff14SB + OPC/TIP3P + OpenFF Sage 2.0)
-- **GPU**: Native Metal (openmm-metal plugin, registers as HIP) + Apple OpenCL (cl2Metal fallback)
-- **Visualization**: NGL (WebGL molecular viewer)
-- **Cheminformatics**: RDKit, OpenBabel, PDBFixer, MDAnalysis, AmberTools
+- **MD Engine**: OpenMM 8.1.2 (AMBER ff19SB/ff14SB + OPC/TIP3P + OpenFF Sage 2.3.0)
+- **GPU**: OpenCL (cl2Metal, preferred in the app runtime for larger systems) → Metal (native MSL fallback, often faster on smaller systems) → CPU
+- **Visualization**: NGL (WebGL), always mounted and CSS-hidden outside View mode to avoid stage re-creation/OOM issues
+- **Cheminformatics**: RDKit, Meeko (PDBQT prep), Molscrub (protonation), PDBFixer, MDAnalysis, AmberTools
+- **Scoring**: CORDIAL neural-network rescoring (optional, `~/Desktop/CORDIAL`)
 
-## GPU Platform Cascade
+## Build
+```bash
+npm start               # Build + run dev mode
+npm run build:electron  # TS → electron-dist/
+npm run build           # Webpack → dist-webpack/
+npm run dist:mac        # Bundle .dmg via scripts/bundle-mac.sh (conda-pack → electron-builder dir build → create-dmg/plain DMG)
+                        # Auto-generates assets/dmg-background.png if missing
+                        # Requires: brew install create-dmg, Finder automation permission
 ```
-CUDA → HIP (openmm-metal plugin) → OpenCL (cl2Metal) → CPU
-```
-- **HIP/Metal (native)**: openmm-metal plugin with native MSL kernels, registers as "HIP". 45/45 tests pass. Command buffer batching for GPU throughput. VENDOR_APPLE enabled for SIMD intrinsics (`simd_sum`, `simdgroup_barrier`). **130.7 ns/day** on M4 (22K atoms), targeting ≥210.
-- **OpenCL (fallback)**: Apple's cl2Metal translates OpenCL to Metal GPU instructions. ~210 ns/day on M4. Works across all macOS versions but deprecated since 10.14.
-- **Performance**: Native Metal at 130.7 ns/day (optimization in progress). OpenCL baseline ~210 ns/day. ~51 ns/day for 92K atom ApoA1.
-- **Architecture**: Persistent command buffer batching — `executeKernel` encodes into shared `MTLCommandBuffer`, `flushQueue()` commits only at sync points (data reads, blit ops, FFT, cross-context dispatches).
 
 ## Project Structure
 ```
-/electron/
-  main.ts               # IPC handlers, child process management, path resolution
-  preload.ts            # Context bridge (inlined channel names)
-
-/src/
-  App.tsx               # Root + step routing (Simulate & Viewer modes)
-  stores/workflow.ts    # SolidJS signals (WorkflowState, MDState, ViewerState)
-  utils/jobName.ts      # Job name generation + folder naming
-  components/layout/WizardLayout.tsx  # Mode tabs + step indicators + header
-  components/AboutModal.tsx           # License info (MIT + dependencies)
-  components/HelpModal.tsx            # Quick reference
-  components/steps/
-    MDStep{Load,Configure,Progress,Results}.tsx  # MD simulation steps
-  components/viewer/
-    ViewerMode.tsx            # NGL molecular viewer
-    TrajectoryControls.tsx    # Playback UI
-    ClusteringModal.tsx       # Trajectory clustering
-    AnalysisPanel.tsx         # MD analysis tools
-
-/shared/types/
-  md.ts                 # MDConfig, MDStage, MDSystemInfo, MDBenchmarkResult
-  ipc.ts                # IPC channels, trajectory types, clustering types
-  electron-api.ts       # window.electronAPI typing
-  gnina.ts              # Legacy types (kept for backend compatibility)
-
-/deps/staging/scripts/  # Python scripts called by Electron via subprocess
-  run_md_simulation.py  # Full MD pipeline (build, equilibrate, produce)
-  extract_xray_ligand.py # Ligand extraction with OpenBabel bond orders
-  cluster_trajectory.py, analyze_*.py, generate_md_report.py  # Analysis
+/electron/main.ts          — IPC handlers, subprocess management, logging, path resolution
+/electron/preload.ts       — Context bridge (inlined channel names)
+/src/App.tsx               — Root: ViewerMode always mounted (CSS-hidden); routes View, MCMM, Dock, Map, MD, and FEP panel
+/src/stores/workflow.ts    — SolidJS signals (WorkflowState, MDState, DockState, ViewerState, MapState, ConformState)
+/src/utils/projectPaths.ts — Project directory layout (DockingPaths, SimulationPaths, conformers path)
+/src/utils/jobName.ts      — Job name generation + folder naming
+/src/components/layout/WizardLayout.tsx — Header: View | MCMM | Dock | Map | Simulate | FEP(disabled), project+job selector, step indicators
+/src/components/steps/     — DockStep{Load,Configure,Progress,Results}, MDStep{Load,Configure,Progress,Results}, ConformStep{Load,Configure,Progress,Results}
+/src/components/viewer/    — ViewerMode, TrajectoryControls, ClusteringModal, AnalysisPanel, FepScoringPanel, LayerPanel, BindingSiteMapPanel
+/src/components/map/       — MapMode (binding site mapping)
+/shared/types/             — md.ts, dock.ts, ipc.ts, electron-api.ts, errors.ts, result.ts
+/scripts/score_cordial.py  — CORDIAL rescoring (outside deps/staging/)
+/deps/staging/scripts/     — Canonical Python scripts called by Electron
+                             run_md_simulation.py, run_vina_docking.py, run_abfe.py,
+                             detect_pdb_ligands.py, extract_xray_ligand.py, enumerate_protonation.py,
+                             enumerate_stereoisomers.py, generate_conformers.py, cluster_trajectory.py,
+                             analyze_*.py, utils.py, etc.
 ```
 
-## Build Commands
-```bash
-npm run build:electron  # TS → electron-dist/
-npm run build           # Webpack → dist-webpack/
-npm start               # Build + run dev mode
-npm run dist:mac        # Bundle self-contained .dmg (includes Python env)
+## Project Directory Layout
+Each project lives under `~/Ember/{projectName}/`. Defined in `src/utils/projectPaths.ts`.
+```text
+{project}/
+  .ember-project
+  structures/                        — Imported PDB/CIF files
+  surfaces/binding_site_map/         — OpenDX interaction grids
+
+  docking/Vina_{ligandId}/           — Self-contained docking job
+    inputs/receptor.pdb, reference_ligand.sdf, ligands/*.sdf
+    prep/                            — Extraction, protonation, stereoisomers, conformers
+    results/all_docked.sdf, cordial_scores.json, poses/*_docked.sdf.gz
+
+  simulations/{run}/
+    inputs/                          — receptor.pdb, ligand.sdf
+    results/                         — system.pdb, trajectory.dcd, final.pdb, energy.csv, seed.txt
+    analysis/                        — clustering/, rmsd/, rmsf/, hbonds/, contacts/
+
+  conformers/{run}/                  — Standalone conformer generation output
+  fep/                               — FEP scoring output
 ```
+**Legacy fallbacks**: scanners still check old layouts such as `*_receptor_prepared.pdb`, top-level `poses/`, prefixed `*_system.pdb`, and `raw/`.
 
-## DMG Bundling (npm run dist:mac)
-1. Builds TypeScript + Webpack
-2. Packs conda env `openmm-metal` via `conda-pack` (cached at bundle-mac/python-env.tar.gz)
-3. Extracts to bundle-mac/extra-resources/{python,scripts}
-4. Copies Metal plugin dylibs to python/lib/plugins/
-5. Packages with electron-builder (extraResources in package.json)
-6. Creates styled DMG with `create-dmg` (background, icon positioning, Applications link)
+**Path API**: `projectPaths(baseDir, name).docking(run)` returns `{ root, inputs, inputsLigands, prep, results, resultsPoses }`. `.simulations(run)` returns `{ root, inputs, results, analysis, analysisClustering }`. `.conformers(run)` returns the standalone conformer output directory.
 
-**Requires**: `create-dmg` (brew install), Finder automation permission for Terminal
+## Header UI
+Three-zone layout: mode tabs on the left, project name + job selector in the center, step indicators on the right. The visible tabs are `View`, `MCMM`, `Dock`, `Map`, `Simulate`, and a disabled `FEP` tab labeled “coming soon”. The job selector currently groups jobs under docking and simulation.
 
-## Path Resolution (main.ts)
-Bundled app checks `process.resourcesPath` first, then falls back to dev paths:
-- **Scripts**: `Resources/scripts/` → `deps/staging/scripts/` → env var FRAGGEN_ROOT
-- **Python**: `Resources/python/bin/python` → `~/miniconda3/envs/openmm-metal/bin/python` → `fraggen` env
-- **PATH**: `condaEnvBin` prepended to `process.env.PATH` in `initializePaths()` so child processes find `sqm`, `obabel`, etc.
-- **OpenBabel**: `extract_xray_ligand.py` sets `BABEL_LIBDIR` and `DYLD_LIBRARY_PATH` relative to `sys.executable`
-- **OpenMM plugins**: `run_md_simulation.py` loads from both default and bundled plugin directories
+## Simulate Mode
+**Equilibration**: AMBER-style restrained minimization → graduated minimization → NVT heating 5→100 K → NPT heating 100→300 K → restrained NPT → gradual restraint release → unrestrained NPT → production with HMR. Shared type metadata currently treats equilibration as roughly 270 ps.
 
-## MD Simulation
-**Equilibration Protocol** (AMBER-style, ~270ps protein-ligand, ~170ps ligand-only):
-1. Restrained minimization → graduated minimization
-2. NVT heating 5K→100K → NPT heating 100K→300K (barostat added at 100K)
-3. NPT equilibration with backbone restraints → gradual release
-4. Unrestrained NPT equilibration → production with HMR (4fs)
+**Random seed**: `MDConfig.seed` (`0 = auto`). Applied to velocity initialization and Langevin noise, then written to `seed.txt` for reproducibility.
 
-**Force Field Presets**:
-- Fast: ff14SB + TIP3P
-- Accurate (default): ff19SB + OPC (4-site water)
-- Ligand: OpenFF Sage 2.0 (AM1-BCC charges via AmberTools sqm)
+**Presets**: `ff19sb-opc` (default), `ff14sb-tip3p`, `ff19sb-opc3`, `charmm36-mtip3p`. Ligands use OpenFF Sage 2.3.0.
 
-**Key detail**: Force field path is `amber/protein.ff19SB.xml` (not `amber19/`). Production OpenCL uses single precision (not mixed — Apple doesn't support it).
+**Key details**: protein FF path is `amber/protein.ff19SB.xml`. OpenCL production uses single precision. Restraints use `periodicdistance()^2` for PBC compatibility.
 
-**Critical**: Restraint forces use `periodicdistance(x,y,z,x0,y0,z0)^2` for PBC compatibility.
+## Dock Mode
+Pipeline: receptor prep (Meeko Polymer) → ligand PDBQT prep (Meeko) → autobox from reference ligand → Vina docking → optional post-dock pocket refinement (OpenMM, Sage 2.3.0 + OBC2, receptor-restrained) → multi-pose SDF.gz output. Optional CORDIAL rescoring, MCS core-constrained RMSD, protonation via Molscrub, stereoisomer enumeration via RDKit, and conformer generation before docking.
 
-## Viewer
-- NGL WebGL viewer with multi-PDB queue navigation
-- Trajectory playback: DCD files, 10fps base rate, smoothing=1 (every frame)
-- Auto-centers on ligand after detection
-- Clustering: K-means by ligand RMSD, saves centroid PDBs
-- Analysis: RMSD, RMSF, H-bonds, full HTML report
+**Receptor prep**: removes the docking ligand and common crystallization artifacts, keeps nearby crystallographic waters, metal ions, and relevant cofactors near the binding site. Metals are re-injected into PDBQT after Meeko processing with explicit AD4 atom types and charges.
+
+## MCMM Mode
+Standalone conformer generation is exposed in the UI as **MCMM**. Internally the workflow state is still named `conform`, but user-facing docs and tabs should call this MCMM mode. The screen supports both `ETKDG` and `MCMM`; defaults come from `DEFAULT_CONFORMER_CONFIG` and currently favor `MCMM` with 50 max conformers, 1.0 A RMSD cutoff, 5.0 kcal/mol energy window, 1000 MCMM steps, 298 K, and amide cis/trans sampling enabled. MCMM uses Sage 2.3.0 + OBC2 implicit solvent.
+
+## FEP Panel
+`FepScoringPanel` and `run_abfe.py` are present in the codebase, and `state().mode === 'score'` renders the panel. In the current header UI the `FEP` tab is disabled, so this is implemented but not exposed as a normal selectable tab.
+
+## View Mode
+NGL viewer with queue navigation for docking poses or cluster centroids. Trajectory playback updates coordinates in place after the first frame instead of reparsing PDBs. Supports clustering, RMSD/RMSF/H-bond/contact analysis, binding-site maps, surface coloring, and multi-structure layer alignment.
+
+## Logging
+`~/Ember/logs/ember-<timestamp>.log` captures main-process and renderer console output. Tags commonly include `[Viewer]`, `[Dock]`, `[MD]`, `[FEP]`, `[Nav]`, and `[Store]`.
 
 ## Key Patterns
 ```typescript
-// SolidJS store
-const [state, setState] = createSignal<WorkflowState>({...});
+// SolidJS store update
 setState(s => ({ ...s, md: { ...s.md, config: { ...s.md.config, ...config } } }));
 
-// View PDB from results (no resetViewer — causes NGL race condition)
-setViewerPdbPath(pdbPath);
+// ViewerMode stays mounted and is only CSS-hidden outside View mode
+<div style={{ display: state().mode === 'viewer' ? 'block' : 'none' }}>
+  <ViewerMode />
+</div>
+
+// Load a job in the viewer
+resetViewer();
+setViewerPdbPath(pdb);
+setViewerLigandPath(sdf);
 setMode('viewer');
 
-// NGL autoView: Stage only takes duration, StructureComponent takes selection
-(proteinComponent as any).autoView(ligandSelection);  // centers on ligand
-stage.autoView();  // centers on everything
-
-// Ligand selection: use resname, not chain
+// NGL ligand selection: use resname, not chain
 return `[${ligand.resname}] and ${ligand.resnum}`;
 ```
 
-## Output Structure
-**Naming**: `{jobName}_{ff}_MD-{temp}K-{ns}ns` (e.g., `bold-pulse-shark_ff19sb-OPC_MD-300K-1ns`)
+## Path Resolution (main.ts)
+Bundled app paths prefer `process.resourcesPath/scripts` and `process.resourcesPath/python/bin/python`. Dev mode falls back to `deps/staging/scripts/` and typical `openmm-metal`/`fraggen` conda env paths. Legacy env vars such as `FRAGGEN_ROOT` and `FRAGGEN_PYTHON` are still honored.
 
-Files: `_system.pdb`, `_trajectory.dcd`, `_energy.csv`, `_checkpoint.chk`, `_final.pdb`, `_equilibrated.pdb`, `simulation.log`, `clustering/`
+## GPU Platform Cascade
+For the canonical bundled MD runner in `deps/staging/scripts/run_md_simulation.py`, the runtime platform order is `CUDA → OpenCL (cl2Metal) → Metal → CPU`. OpenCL is currently tried before Metal in both benchmarking and full simulation setup.
+
+## Metal Backend
+Native Metal backend work lives in the separate `pseudo-control/Ember-Metal` repo. Use that repo’s instruction file for low-level backend architecture, profiling, and MSL porting notes rather than duplicating them here.
 
 ## Known Limitations
-- macOS only (Apple Silicon). No CUDA, no Linux in this version.
-- OpenCL deprecated by Apple but stable. HIP plugin as fallback insurance.
-- Small systems (<3K atoms) don't saturate GPU — PME/FFT dominates.
-- App unsigned — won't appear in Launchpad. Launch from /Applications or Spotlight.
-- DMG styling requires Terminal→Finder automation permission in System Settings.
-
-## OpenMM Metal Backend — Reference Files
-
-Reference files for building a native Apple Metal GPU backend for OpenMM:
-
-| File | Purpose |
-|------|---------|
-| `run_md_simulation.py` | Full OpenMM MD simulation script — defines every API feature the Metal backend must support |
-| `test_opc_water_model.py` | OPC 4-site water model validation suite (762 lines) — adapt as Metal platform correctness tests |
-
-### What the Metal Backend Must Support
-
-From `run_md_simulation.py`:
-
-- **Forces**: HarmonicBondForce, HarmonicAngleForce, PeriodicTorsionForce, NonbondedForce (PME), CustomExternalForce (restraints with `periodicdistance`)
-- **Integrators**: LangevinMiddleIntegrator (2fs equilibration, 4fs production with HMR)
-- **Constraints**: HBonds (SHAKE/SETTLE)
-- **Barostat**: MonteCarloBarostat (NPT)
-- **Force fields**: ff19SB + OPC (4-site), ff14SB + TIP3P (3-site), OpenFF Sage 2.0 (ligand)
-- **PME**: 1.0 nm cutoff, 0.0005 Ewald error tolerance
-- **HMR**: Hydrogen mass repartitioning for 4fs timestep
-- **Checkpointing**: `saveCheckpoint()` / `loadCheckpoint()`
-
-### Performance Targets
-
-- M4 base (10-core GPU): ~40-60 ns/day for a ~30K atom protein-ligand system
-- CPU Reference baseline: ~3-5 ns/day on the same system
-
-### Verification
-
-1. All 45 native Metal tests must pass (see **Test Suite Architecture** below for tiers and CMake flags)
-2. Run `run_md_simulation.py` on Metal platform and compare forces/energies against CPU Reference
-3. Max deviation: <0.01 kJ/mol per atom
-4. Adapt `test_opc_water_model.py` to validate OPC water on Metal (density, geometry, SETTLE)
-
-## Native Metal Backend (Active Project)
-
-**Goal**: Replace cl2Metal-compiled OpenCL kernels with native Metal Shading Language (MSL) kernels in the openmm-metal plugin.
-
-**Source location**: `~/openmm-metal-project/openmm-metal/`
-
-**Why**: macOS 26 broke `__asm("air....")` inline assembly that cl2Metal used for SIMD intrinsics. Current fix disables VENDOR_APPLE entirely (slower local-memory reductions). Native MSL restores SIMD intrinsics and enables iOS cross-compilation.
-
-**Architecture**: OpenCL C .metal files → native MSL .metal files. Host code migrated from OpenCL C++ API (`cl::Context`, `cl::Buffer`, etc.) to Metal Objective-C++ API (`id<MTLDevice>`, `id<MTLBuffer>`, etc.) in .mm files.
-
-**Performance targets**:
-- M4 Mac: ≥210 ns/day (22K atoms, ff19SB/OPC) — match or exceed current cl2Metal baseline
-- iPhone 17 (A19): 100+ ns/day — first production MD on a phone
-- SIMD intrinsics: `simd_sum()`, `simd_ballot()`, `ctz()` — native, no `__asm` needed
-
-**Validation**: All 45 native Metal tests must pass (27 short + 12 long + 6 very-long). Force deviation vs CPU Reference < 0.01 kJ/mol/nm per atom.
-
-**Current status (2026-03-16)**: 45/45 tests pass on the native Metal branch. All three tiers green: short 27/27, long 12/12, very-long 6/6.
-
-**Resolved blockers**:
-- `TestMetalDispersionPME` — fixed by switching from Abramowitz-Stegun 5-term erfc polynomial (max error 1.5e-7, systematic bias accumulated across PME grid) to Numerical Recipes 9-term Chebyshev rational approximation (max error ~1.2e-7, better bias distribution). Energy now within 5e-5 tolerance.
-- `TestMetalLocalEnergyMinimizer` — fixed by clamping `realToFixedPoint()` in `common.metal` to prevent undefined behavior when converting `inf` to `long` (Metal produces 0 for `(long)inf`, unlike OpenCL which saturates). Clamped forces now correctly trigger the existing CPU fallback in L-BFGS for extreme overlapping-particle configurations.
-
-### Test Suite Architecture
-
-The native Metal backend (`.build-metal/`) has **45 tests** across 3 tiers, controlled by CMake flags. Turner's original HIP build (`.build/`) had 34 tests — the 7-test difference is AMOEBA/Drude/WCA plugin tests that don't apply to native Metal.
-
-**Short tests (27)** — `platforms/metal/tests/` — built by default:
-```
-TestMetalCheckpoints          TestMetalCustomCVForce         TestMetalGayBerneForce
-TestMetalCMAPTorsionForce     TestMetalCustomExternalForce   TestMetalGBSAOBCForce
-TestMetalCMMotionRemover      TestMetalCustomGBForce         TestMetalHarmonicAngleForce
-TestMetalCompoundIntegrator   TestMetalCustomHbondForce      TestMetalHarmonicBondForce
-TestMetalCustomAngleForce     TestMetalCustomTorsionForce    TestMetalMultipleForces
-TestMetalCustomBondForce      TestMetalDeviceQuery           TestMetalPeriodicTorsionForce
-TestMetalCustomCentroidBondForce  TestMetalFFT               TestMetalRandom
-TestMetalRBTorsionForce       TestMetalRMSDForce             TestMetalSettle
-TestMetalSort                 TestMetalVariableVerletIntegrator
-```
-These validate bonded forces, constraints, checkpoints, utilities. Necessary but not sufficient for Ember.
-
-**Long tests (12)** — `platforms/metal/long_tests/` — requires `-DOPENMM_BUILD_LONG_TESTS=ON`:
-```
-TestMetalAndersenThermostat        TestMetalEwald                    TestMetalLocalEnergyMinimizer
-TestMetalCustomManyParticleForce   TestMetalLangevinIntegrator       TestMetalMonteCarloFlexibleBarostat
-TestMetalCustomNonbondedForce *    TestMetalLangevinMiddleIntegrator *  TestMetalNonbondedForce *
-TestMetalDispersionPME             TestMetalVerletIntegrator         TestMetalVirtualSites
-```
-
-**Very-long tests (6)** — `platforms/metal/very_long_tests/` — requires both long tests flags + `-DOPENMM_BUILD_VERY_LONG_TESTS=ON`:
-```
-TestMetalBrownianIntegrator                TestMetalMonteCarloBarostat *
-TestMetalCustomIntegrator                  TestMetalNoseHooverIntegrator
-TestMetalMonteCarloAnisotropicBarostat     TestMetalVariableLangevinIntegrator
-```
-
-**Ember-critical tests** (marked with * above):
-| Test | Why |
-|------|-----|
-| `TestMetalNonbondedForce` | PME electrostatics — dominant force calculation (~70% of runtime) |
-| `TestMetalLangevinMiddleIntegrator` | The integrator Ember uses for all equilibration and production |
-| `TestMetalMonteCarloBarostat` | NPT ensemble — every Ember equilibration and production run |
-| `TestMetalCustomNonbondedForce` | OpenFF Sage 2.0 ligand parameters |
-| `TestMetalLocalEnergyMinimizer` | Used at the start of every Ember simulation |
-
-**To build all tiers**:
-```bash
-cd ~/openmm-metal-project/openmm-metal/.build-metal
-cmake .. -DOPENMM_BUILD_LONG_TESTS=ON -DOPENMM_BUILD_VERY_LONG_TESTS=ON
-make -j8
-```
-
-**To run all tests**:
-```bash
-for test in .build-metal/TestMetal*; do
-  printf "%-46s" "$(basename $test)"
-  $test single -1 -1 >/dev/null 2>&1 && echo PASS || echo FAIL
-done
-```
-
-### Metal Shading Language (MSL) Compatibility Gotchas
-
-When porting OpenCL kernels to native MSL, these are non-obvious differences that cause silent compilation failures or wrong results:
-
-**Missing math intrinsics:**
-- `erf()` does not exist in MSL. `erfc()` does. Use `1.0f - erfc(x)` as a drop-in replacement for `erf(x)`.
-- The source transformer in `MetalContext.mm` maps `ERF(x)` → `1.0f-erfc(x)` and `ERFC(x)` → `erfc(x)`.
-
-**Reserved words that differ from OpenCL:**
-- `thread` — MSL address space qualifier. OpenCL kernels that use `int thread = LOCAL_ID;` will compile, but downstream uses like `if (thread < 32)` can fail or misbehave. The transformer must rename these.
-- `uint8` — In OpenCL, this is an 8-element vector type. In MSL, it's a scalar `uint8_t` alias. The transformer rewrites `uint8` vector types to avoid the collision.
-
-**Dual kernel source paths:**
-- Some kernels exist in **both** `platforms/metal/src/kernels/*.metal` (Metal-specific) and `platforms/common/src/kernels/*.cc` (shared). The `.cc` versions are compiled into `CommonKernelSources.cpp` at build time and may be what actually runs at runtime, depending on the code path.
-- Example: `andersenThermostat` has both `.metal` and `.cc` copies. Patching only the `.metal` file won't fix tests that load the common source. **Always check and patch both.**
-
-**Test file format:**
-- `TestMetalNonbondedForce` was renamed from `.cpp` to `.mm` because it uses `#import <Metal/Metal.h>` for GPU memory queries. The `long_tests/CMakeLists.txt` glob includes `"*Test*.mm"` to pick it up.
-
-### Debug Environment Variables
-
-Set these when running tests or debugging the Metal backend:
-
-| Env Var | Purpose |
-|---------|---------|
-| `OPENMM_METAL_PROFILE_KERNELS=1` | GPU timing per kernel dispatch (Chrome Tracing format) |
-| `OPENMM_METAL_DUMP_SOURCE=1` | Writes each compiled MSL to `/tmp/metal_kernel_N.metal` (post-transformation source — what Metal actually sees) |
-| `OPENMM_METAL_LOG_ARGS=1` | Logs every `executeKernel` call with kernel name, grid/threadgroup sizes, and argument bindings (buffer names+sizes, primitive byte sizes, threadgroup memory) |
-
-**Usage**: `OPENMM_METAL_DUMP_SOURCE=1 OPENMM_METAL_LOG_ARGS=1 python test_script.py 2>metal_debug.log`
-
-### Error Handling Architecture
-
-All Metal API calls are fail-fast with `fprintf(stderr, "[Metal] ...")` + `throw OpenMMException(...)`:
-
-**Compilation & Pipeline:**
-- **MSL compilation** (`createProgram`): On failure, always writes full transformed source to `/tmp/metal_kernel_FAILED_N.metal` (plus first 600 lines to stderr with line numbers). On success, logs function count. Source dump to `/tmp/` when `OPENMM_METAL_DUMP_SOURCE=1`.
-- **Pipeline creation** (`createKernel`, `createUtilityKernel`): Logs available function names on failure.
-- **Source transformation**: STEP 1 logs each wrapped param with kernel name (`kernel 'X': wrapped 'int Y' → 'constant int& Y'`). STEP 1b logs each mutable param fix with kernel name. STEP 2 logs function names and edit count. Pre/post transform dumps for `generateRandomNumbers` kernels.
-
-**GPU Execution:**
-- **Kernel execution** (`executeKernel`): Checks `commandBuffer.status` after every dispatch. Logs argument bindings when `OPENMM_METAL_LOG_ARGS=1`.
-- **FFT** (`execFFT` VkFFT path): Nil checks, VkFFT error code logging, commandBuffer status check. Pipeline creation checks NSError pointer.
-- **Energy reduction** (`reduceEnergy`): Nil checks on commandBuffer/encoder, status check.
-
-**Buffer Operations:**
-- **clearBuffer / clearAutoclearBuffers / copyTo**: Nil checks on commandBuffer/encoder, status check after completion.
-- **Buffer allocation** (`initialize`): Checks `[mtlBuffer contents]` for nil before memset.
-- **Upload/download** (`uploadSubArray`, `download`): Validates `[mtlBuffer contents]` and destination pointer are non-nil before memcpy.
-- **Pinned buffer** (`pinnedMemory`): Nil check on `[pinned contents]` during context init.
-
-**Force Kernel Compilation (context on failure):**
-- **Nonbonded**: Logs force group, exclusion/symmetry flags, parameter counts.
-- **Bonded**: Logs force source count and energy derivative count.
-- **Ewald**: Logs kmax values and alpha.
-- **Coulomb PME**: Logs grid dimensions and alpha.
-- **LJPME dispersion**: Logs dispersion grid dimensions and dispersion alpha.
-- **Nonbonded parameters**: Logs define count.
-- **CPU PME fallback**: Logs when CPU PME unavailable and falling back to GPU path (previously silent).
-- **Sort**: Logs data type, key type, element count. Also logs when short-list sort fails and falls back.
-- **Compact (prefix sum)**: Logs on compilation failure.
-
-**Device Init:**
-- Logs device name, max buffer length (MB), recommended working set (MB), max threads per threadgroup.
-
-**Key pattern**: Every `[commandBuffer waitUntilCompleted]` is followed by a status check. Every `newLibraryWithSource`/`newComputePipelineStateWithFunction` checks for nil + NSError. Every `[mtlBuffer contents]` is nil-checked before use. No silent degradation paths.
-
-### Debugging C++ in the Metal Backend
-
-When debugging numerical issues or GPU failures:
-1. Run with `OPENMM_METAL_DUMP_SOURCE=1` to inspect the MSL that Metal actually compiles (post-transformation, with `constant int&` rewriting applied)
-2. Run with `OPENMM_METAL_LOG_ARGS=1` to verify correct buffer bindings — if a kernel produces garbage, check that the right arrays are bound at the right indices
-3. All `[Metal]` prefixed stderr output can be captured with `2>metal_debug.log`
-4. MSL compilation errors include line/column numbers against the dynamically-generated source — the source dump is essential since line numbers refer to the assembled source (defines + common.metal + kernel source), not the original .metal file
+- macOS only in practice for the current app workflow
+- App is unsigned, so launch from `/Applications` or Spotlight rather than Launchpad
+- `run_md_simulation.py` exists both at repo root and in `deps/staging/scripts/`; the staging copy is canonical for the app
+- The header `FEP` tab is disabled even though the scoring panel exists in code
 
 ## License
-MIT. See LICENSE file. Bundles GPL-2.0 components (OpenBabel, MDAnalysis) as separate processes.
+MIT. GPL-licensed scientific tools are invoked as separate processes. Meeko and Molscrub are Apache-2.0.
