@@ -20,7 +20,7 @@ import { projectPaths } from '../../utils/projectPaths';
 import { loadProjectJob } from '../../utils/projectJobLoader';
 import { theme } from '../../utils/theme';
 import type { AtomProxy, ResidueProxy, SelectionSchemeEntry, NglLoadOptions, BindingSiteResultsJson, PreparedPath } from '../../types/ngl';
-import type { ProjectJob } from '../../../shared/types/ipc';
+import type { ProjectJob, LigandPkaResult, QupkakeCapabilityResult } from '../../../shared/types/ipc';
 
 // NGL representation name mapping (shared across all style update functions)
 const LIGAND_REP_MAP: Record<string, string> = {
@@ -28,6 +28,8 @@ const LIGAND_REP_MAP: Record<string, string> = {
   stick: 'licorice',
   spacefill: 'spacefill',
 };
+
+const NGL_LABEL_RADIUS_SIZE = 1.875;
 
 // Maestro interaction colors
 const INTERACTION_COLORS = {
@@ -66,6 +68,13 @@ interface IxAtom {
 interface RingInfo {
   centroid: [number, number, number];
   normal: [number, number, number];
+}
+
+interface SurfacePropsCacheEntry {
+  atomCount: number;
+  hydrophobic: number[];
+  electrostatic: number[];
+  cachedPath: string;
 }
 
 // Salt bridge charged group atoms
@@ -453,21 +462,53 @@ const ViewerMode: Component = () => {
 
   const [isLoading, setIsLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [surfacePropsLoading, setSurfacePropsLoading] = createSignal(false);
-  const [surfacePropsData, setSurfacePropsData] = createSignal<{
-    hydrophobic: number[];
-    electrostatic: number[];
-  } | null>(null);
+  const [surfacePropsLoadingCount, setSurfacePropsLoadingCount] = createSignal(0);
   const [recentJobs, setRecentJobs] = createSignal<ProjectJob[]>([]);
-  const [selectedRecentJobId, setSelectedRecentJobId] = createSignal<string | null>(null);
   const [isLoadingRecentJobs, setIsLoadingRecentJobs] = createSignal(false);
-  const [isLoadingSelectedJob, setIsLoadingSelectedJob] = createSignal(false);
-  // Track which PDB the cached surface props are for
-  let surfacePropsPdbPath: string | null = null;
+  const [loadingRecentJobId, setLoadingRecentJobId] = createSignal<string | null>(null);
+  const [smilesInput, setSmilesInput] = createSignal('');
+  const [isLoadingSmiles, setIsLoadingSmiles] = createSignal(false);
+  const [isCheckingQupkake, setIsCheckingQupkake] = createSignal(false);
+  const [qupkakeCapability, setQupkakeCapability] = createSignal<QupkakeCapabilityResult | null>(null);
+  const [isComputingPka, setIsComputingPka] = createSignal(false);
+  const [pkaResult, setPkaResult] = createSignal<LigandPkaResult | null>(null);
+  const [pkaError, setPkaError] = createSignal<string | null>(null);
+  const surfacePropsCache = new Map<string, SurfacePropsCacheEntry>();
+  const surfacePropsInflight = new Map<string, Promise<SurfacePropsCacheEntry | null>>();
   let lastViewerSessionKey = state().viewer.sessionKey;
   let recentJobsRequestId = 0;
+  let qupkakeAvailabilityRequestId = 0;
+  let pkaRequestId = 0;
+  let lastPkaContextKey: string | null = null;
 
   const api = window.electronAPI;
+
+  const checkQupkakeCapability = () => {
+    if (isCheckingQupkake() || qupkakeCapability()) return;
+
+    const requestId = ++qupkakeAvailabilityRequestId;
+    setIsCheckingQupkake(true);
+
+    void (async () => {
+      try {
+        const capability = await api.checkQupkakeInstalled();
+        if (requestId !== qupkakeAvailabilityRequestId) return;
+        setQupkakeCapability(capability);
+      } catch (err) {
+        if (requestId !== qupkakeAvailabilityRequestId) return;
+        setQupkakeCapability({
+          available: false,
+          validated: false,
+          message: `Failed to check QupKake availability: ${(err as Error).message}`,
+        });
+      } finally {
+        if (requestId === qupkakeAvailabilityRequestId) {
+          setIsCheckingQupkake(false);
+        }
+      }
+    })();
+  };
+  const surfacePropsLoading = () => surfacePropsLoadingCount() > 0;
 
   const sortedRecentJobs = (jobs: ProjectJob[]) => {
     const typeOrder: Record<string, number> = { docking: 0, simulation: 1, conformer: 2 };
@@ -477,16 +518,12 @@ const ViewerMode: Component = () => {
     });
   };
 
-  const selectedRecentJob = () =>
-    recentJobs().find((job) => job.id === selectedRecentJobId()) || null;
-
   createEffect(() => {
     const ready = state().projectReady;
     const projectName = state().jobName;
 
     if (!ready || !projectName) {
       setRecentJobs([]);
-      setSelectedRecentJobId(null);
       return;
     }
 
@@ -499,14 +536,10 @@ const ViewerMode: Component = () => {
         if (requestId !== recentJobsRequestId) return;
         const loadableJobs = sortedRecentJobs(jobs.filter((job) => job.type !== 'docking-pose'));
         setRecentJobs(loadableJobs);
-        setSelectedRecentJobId((current) =>
-          loadableJobs.some((job) => job.id === current) ? current : loadableJobs[0]?.id || null,
-        );
       } catch (err) {
         if (requestId !== recentJobsRequestId) return;
         console.error('[Viewer] Failed to scan project artifacts:', err);
         setRecentJobs([]);
-        setSelectedRecentJobId(null);
       } finally {
         if (requestId === recentJobsRequestId) {
           setIsLoadingRecentJobs(false);
@@ -542,8 +575,14 @@ const ViewerMode: Component = () => {
     alignedComponents.clear();
     layerComponents.clear();
     setIsAligned(false);
-    setSurfacePropsData(null);
-    surfacePropsPdbPath = null;
+    surfacePropsCache.clear();
+    surfacePropsInflight.clear();
+    setSurfacePropsLoadingCount(0);
+    pkaRequestId++;
+    lastPkaContextKey = null;
+    setIsComputingPka(false);
+    setPkaResult(null);
+    setPkaError(null);
     setError(null);
   };
 
@@ -602,8 +641,65 @@ const ViewerMode: Component = () => {
     return (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
   };
 
-  // Create a surface color scheme from computed per-atom values
-  // Uses precomputed data from compute_surface_props.py (Gaussian-smoothed, not per-residue)
+  const getSurfacePropsOutputDir = (sourcePath: string) => {
+    const sourceDir = sourcePath.substring(0, sourcePath.lastIndexOf('/'));
+    return state().customOutputDir
+      ? `${state().customOutputDir}/${state().jobName}/surfaces`
+      : `${sourceDir}/surfaces`;
+  };
+
+  const ensureSurfacePropsLoaded = async (sourcePath: string): Promise<SurfacePropsCacheEntry | null> => {
+    if (!sourcePath) return null;
+
+    const cached = surfacePropsCache.get(sourcePath);
+    if (cached) return cached;
+
+    const inflight = surfacePropsInflight.get(sourcePath);
+    if (inflight) return inflight;
+
+    const viewerSessionKey = state().viewer.sessionKey;
+    const loadPromise = (async () => {
+      const result = await api.computeSurfaceProps(sourcePath, getSurfacePropsOutputDir(sourcePath));
+      if (!result.ok) {
+        console.error('[Viewer] Surface property computation failed:', sourcePath, result.error?.message);
+        return null;
+      }
+      surfacePropsCache.set(sourcePath, result.value);
+      if (state().viewer.sessionKey === viewerSessionKey) {
+        updateAllStyles();
+        if (ligandComponent) {
+          updateExternalLigandStyle();
+        }
+      }
+      return result.value;
+    })().finally(() => {
+      surfacePropsInflight.delete(sourcePath);
+      setSurfacePropsLoadingCount(surfacePropsInflight.size);
+    });
+
+    surfacePropsInflight.set(sourcePath, loadPromise);
+    setSurfacePropsLoadingCount(surfacePropsInflight.size);
+    return loadPromise;
+  };
+
+  const getSurfacePropValues = (
+    sourcePath: string | null,
+    property: 'hydrophobic' | 'electrostatic',
+    expectedAtomCount?: number,
+  ): number[] | null => {
+    if (!sourcePath) return null;
+    const entry = surfacePropsCache.get(sourcePath);
+    if (!entry) return null;
+    if (expectedAtomCount != null && entry.atomCount !== expectedAtomCount) {
+      console.warn(
+        `[Viewer] Surface atom-count mismatch for ${sourcePath}: cached=${entry.atomCount} ngl=${expectedAtomCount}`,
+      );
+      return null;
+    }
+    return entry[property];
+  };
+
+  // Create a surface color scheme from per-atom values for the current structure.
   const createComputedScheme = (
     values: number[],
     lowColor: number,
@@ -626,18 +722,68 @@ const ViewerMode: Component = () => {
   };
 
   // Hydrophobic: teal (hydrophilic) → white → goldenrod (hydrophobic)
-  const createHydrophobicScheme = (): string | null => {
-    const data = surfacePropsData();
-    if (!data) return null;
-    return createComputedScheme(data.hydrophobic, 0x3BA8A0, 0xFAFAFA, 0xB8860B);
+  const createHydrophobicScheme = (sourcePath: string | null, expectedAtomCount?: number): string | null => {
+    const values = getSurfacePropValues(sourcePath, 'hydrophobic', expectedAtomCount);
+    if (!values) return null;
+    return createComputedScheme(values, 0x3BA8A0, 0xFAFAFA, 0xB8860B);
   };
 
   // Coulombic electrostatic: red (negative/anionic) → white → blue (positive/cationic)
   // APBS/Maestro convention: blue = positive potential, red = negative potential
-  const createElectrostaticScheme = (): string | null => {
-    const data = surfacePropsData();
-    if (!data) return null;
-    return createComputedScheme(data.electrostatic, 0xD32F2F, 0xFAFAFA, 0x2979FF);
+  const createElectrostaticScheme = (sourcePath: string | null, expectedAtomCount?: number): string | null => {
+    const values = getSurfacePropValues(sourcePath, 'electrostatic', expectedAtomCount);
+    if (!values) return null;
+    return createComputedScheme(values, 0xD32F2F, 0xFAFAFA, 0x2979FF);
+  };
+
+  const getComputedSurfaceColorScheme = (sourcePath: string | null, expectedAtomCount?: number): string | null => {
+    switch (state().viewer.surfaceColorScheme) {
+      case 'hydrophobic':
+        return createHydrophobicScheme(sourcePath, expectedAtomCount);
+      case 'electrostatic':
+        return createElectrostaticScheme(sourcePath, expectedAtomCount);
+      default:
+        return null;
+    }
+  };
+
+  const addColoredSurfaceRepresentation = (
+    target: NGL.Component,
+    options: {
+      opacity: number;
+      sourcePath: string | null;
+      expectedAtomCount?: number;
+      sele?: string;
+      solidColor: number | string;
+    },
+  ) => {
+    const { opacity, sourcePath, expectedAtomCount, sele, solidColor } = options;
+    const scheme = state().viewer.surfaceColorScheme;
+    const surfaceParams: Record<string, any> = { opacity, color: solidColor };
+    if (sele) surfaceParams.sele = sele;
+
+    if (scheme === 'uniform-grey') {
+      target.addRepresentation('surface', surfaceParams);
+      return;
+    }
+
+    const colorSchemeId = getComputedSurfaceColorScheme(sourcePath, expectedAtomCount);
+    if (colorSchemeId) {
+      target.addRepresentation('surface', {
+        ...surfaceParams,
+        color: colorSchemeId,
+      });
+      return;
+    }
+
+    if (sourcePath) {
+      void ensureSurfacePropsLoaded(sourcePath);
+    }
+
+    target.addRepresentation('surface', {
+      ...surfaceParams,
+      color: 0x888888,
+    });
   };
 
   // Create a selection-based color scheme with custom carbon color
@@ -692,6 +838,7 @@ const ViewerMode: Component = () => {
   const [stageReady, setStageReady] = createSignal(false);
 
   onMount(() => {
+    checkQupkakeCapability();
     if (containerRef) {
       stage = new NGL.Stage(containerRef, {
         backgroundColor: '#ffffff',
@@ -792,9 +939,12 @@ const ViewerMode: Component = () => {
 
     // Base selection for protein (exclude water, ions, and ligand if present)
     const ligandSele = getLigandSelection();
+    const proteinPath = state().viewer.pdbPath;
     const proteinBaseSele = ligandSele
       ? `protein and not water and not ion and not (${ligandSele})`
       : 'protein and not water and not ion';
+    const structure = (proteinComponent as NGL.StructureComponent).structure;
+    const componentAtomCount = structure?.atomCount;
 
     // Main protein representation
     if (rep === 'spacefill') {
@@ -803,7 +953,6 @@ const ViewerMode: Component = () => {
 
       // Always show only polar hydrogens for protein spacefill
       let proteinFullSele = proteinBaseSele;
-      const structure = (proteinComponent as NGL.StructureComponent).structure;
       if (structure) {
         const polarHIndices = getPolarHydrogenIndices(structure, proteinBaseSele);
         if (polarHIndices.length > 0) {
@@ -842,30 +991,13 @@ const ViewerMode: Component = () => {
 
     // Protein surface
     if (state().viewer.proteinSurface) {
-      const scheme = state().viewer.surfaceColorScheme;
-      const opacity = state().viewer.proteinSurfaceOpacity;
-
-      if (scheme === 'uniform-grey') {
-        proteinComponent.addRepresentation('surface', {
-          sele: 'protein', opacity, color: 0x888888,
-        });
-      } else {
-        // Computed schemes — requires precomputed data from Python
-        let colorSchemeId: string | null = null;
-        if (scheme === 'hydrophobic') colorSchemeId = createHydrophobicScheme();
-        else if (scheme === 'electrostatic') colorSchemeId = createElectrostaticScheme();
-
-        if (colorSchemeId) {
-          proteinComponent.addRepresentation('surface', {
-            sele: 'protein', opacity, color: colorSchemeId,
-          });
-        } else {
-          // Data not loaded yet — show grey as placeholder while computing
-          proteinComponent.addRepresentation('surface', {
-            sele: 'protein', opacity, color: 0x888888,
-          });
-        }
-      }
+      addColoredSurfaceRepresentation(proteinComponent, {
+        sele: 'protein',
+        opacity: state().viewer.proteinSurfaceOpacity,
+        sourcePath: proteinPath,
+        expectedAtomCount: componentAtomCount,
+        solidColor: 0x888888,
+      });
     }
 
     // If there's an auto-detected ligand selected, handle ligand-related visualizations
@@ -902,10 +1034,12 @@ const ViewerMode: Component = () => {
 
         // Ligand surface
         if (state().viewer.ligandSurface) {
-          proteinComponent.addRepresentation('surface', {
+          addColoredSurfaceRepresentation(proteinComponent, {
             sele: ligandSele,
             opacity: state().viewer.ligandSurfaceOpacity,
-            colorScheme: 'element',
+            sourcePath: proteinPath,
+            expectedAtomCount: componentAtomCount,
+            solidColor: ligandColorSchemeId,
           });
         }
       }
@@ -972,7 +1106,7 @@ const ViewerMode: Component = () => {
                     zOffset: 2.0,
                     fixedSize: true,
                     radiusType: 'size',
-                    radiusSize: 1.5,
+                    radiusSize: NGL_LABEL_RADIUS_SIZE,
                     showBackground: true,
                     backgroundColor: 'black',
                     backgroundOpacity: 0.7,
@@ -1122,7 +1256,7 @@ const ViewerMode: Component = () => {
                         zOffset: 2.0,
                         fixedSize: true,
                         radiusType: 'size',
-                        radiusSize: 1.5,
+                        radiusSize: NGL_LABEL_RADIUS_SIZE,
                         showBackground: true,
                         backgroundColor: 'black',
                         backgroundOpacity: 0.7,
@@ -1192,10 +1326,62 @@ const ViewerMode: Component = () => {
     });
 
     if (state().viewer.ligandSurface) {
-      target.addRepresentation('surface', {
+      const structure = (target as NGL.StructureComponent).structure;
+      addColoredSurfaceRepresentation(target, {
         opacity: state().viewer.ligandSurfaceOpacity,
-        color: ligandColorSchemeId,
+        sourcePath: state().viewer.ligandPath,
+        expectedAtomCount: structure?.atomCount,
+        solidColor: ligandColorSchemeId,
       });
+    }
+
+    const pka = pkaResult();
+    if (pka?.entries.length) {
+      const structure = (target as NGL.StructureComponent).structure;
+      if (structure) {
+        const atomLabels = new Map<number, string[]>();
+
+        for (const entry of pka.entries) {
+          const atomIndex = entry.atomIndices?.[0];
+          if (atomIndex === undefined || atomIndex === null) continue;
+          const existing = atomLabels.get(atomIndex) || [];
+          const suffix = entry.type === 'basic' ? 'b' : entry.type === 'acidic' ? 'a' : '';
+          existing.push(`${entry.pka.toFixed(2)}${suffix ? ` ${suffix}` : ''}`);
+          atomLabels.set(atomIndex, existing);
+        }
+
+        if (atomLabels.size > 0) {
+          const labelText: Record<number, string> = {};
+          const labelIndices = Array.from(atomLabels.keys());
+          const labelSele = `@${labelIndices.join(',')}`;
+
+          structure.eachAtom((atom: AtomProxy) => {
+            const labels = atomLabels.get(atom.index);
+            if (!labels || labels.length === 0) return;
+            labelText[atom.index] = labels.join(' / ');
+          }, new NGL.Selection(labelSele));
+
+          if (Object.keys(labelText).length > 0) {
+            target.addRepresentation('label', {
+              sele: labelSele,
+              labelType: 'text',
+              labelText,
+              color: 'white',
+              fontWeight: 'bold',
+              xOffset: 0,
+              yOffset: 0,
+              zOffset: 2.0,
+              fixedSize: true,
+              radiusType: 'size',
+              radiusSize: NGL_LABEL_RADIUS_SIZE,
+              showBackground: true,
+              backgroundColor: 'black',
+              backgroundOpacity: 0.7,
+              depthWrite: false,
+            });
+          }
+        }
+      }
     }
   };
 
@@ -1214,6 +1400,7 @@ const ViewerMode: Component = () => {
       const pdbPath = await prepareStructure(rawPdbPath);
       if (state().viewer.sessionKey !== viewerSessionKey) return;
       console.log(`[Viewer] Loading PDB: ${pdbPath} (preserveLigand=${preserveExternalLigand})`);
+      surfacePropsCache.delete(pdbPath);
 
       // Clear binding site volumes from previous PDB
       clearBindingSiteVolumes();
@@ -1248,12 +1435,6 @@ const ViewerMode: Component = () => {
           }
           proteinComponent = null;
           return;
-        }
-
-        // Clear cached surface props if PDB changed
-        if (surfacePropsPdbPath !== pdbPath) {
-          setSurfacePropsData(null);
-          surfacePropsPdbPath = null;
         }
 
         updateProteinStyle();
@@ -1317,14 +1498,39 @@ const ViewerMode: Component = () => {
     return sourcePath;
   };
 
-  // Load external ligand from path (supports .sdf and .sdf.gz)
+  const normalizeLigandPathForViewer = async (filePath: string): Promise<string> => {
+    if (!/\.mol2?$/i.test(filePath)) {
+      return filePath;
+    }
+
+    const defaultDir = await api.getDefaultOutputDir();
+    const baseOutputDir = state().customOutputDir || defaultDir;
+    const safeName = (filePath.split('/').pop() || 'ligand')
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^A-Za-z0-9._-]+/g, '_');
+    const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const outputDir = `${baseOutputDir}/${state().jobName}/structures/viewer-normalized/${safeName}-${uniqueSuffix}`;
+
+    const result = await api.convertSingleMolecule(filePath, outputDir, 'mol_file');
+    if (!result.ok) {
+      throw new Error(result.error?.message || `Failed to normalize ligand for viewing: ${filePath}`);
+    }
+
+    return result.value.sdfPath;
+  };
+
+  // Load external ligand from path (supports .sdf, .sdf.gz, .mol, and .mol2)
   const handleLoadExternalLigand = async (filePath: string) => {
     console.log('[Viewer] Loading external ligand:', filePath);
     const viewerSessionKey = state().viewer.sessionKey;
     setIsLoading(true);
     setError(null);
+    surfacePropsCache.delete(filePath);
 
     try {
+      const normalizedLigandPath = await normalizeLigandPathForViewer(filePath);
+      surfacePropsCache.delete(normalizedLigandPath);
+
       // Load SDF into NGL
       if (stage) {
         // Remove previous external ligand component if any
@@ -1338,8 +1544,8 @@ const ViewerMode: Component = () => {
           firstModelOnly: true,
         };
 
-        console.log('[Viewer] Loading ligand file:', filePath, 'options:', loadOptions);
-        ligandComponent = await stage.loadFile(filePath, loadOptions) as NGL.Component || null;
+        console.log('[Viewer] Loading ligand file:', normalizedLigandPath, 'options:', loadOptions);
+        ligandComponent = await stage.loadFile(normalizedLigandPath, loadOptions) as NGL.Component || null;
         if (state().viewer.sessionKey !== viewerSessionKey) {
           if (ligandComponent && stage) {
             stage.removeComponent(ligandComponent);
@@ -1369,7 +1575,7 @@ const ViewerMode: Component = () => {
       }
 
       if (state().viewer.sessionKey === viewerSessionKey) {
-        setViewerLigandPath(filePath);
+        setViewerLigandPath(normalizedLigandPath);
       }
     } catch (err) {
       console.error('[Viewer] Failed to load ligand:', err);
@@ -1503,13 +1709,36 @@ const ViewerMode: Component = () => {
     }
   };
 
+  const requestVisibleSurfaceProps = () => {
+    if (state().viewer.surfaceColorScheme === 'uniform-grey') return;
+
+    const paths = new Set<string>();
+    const pdbPath = state().viewer.pdbPath;
+    const ligandPath = state().viewer.ligandPath;
+
+    if (pdbPath && (state().viewer.proteinSurface || (state().viewer.selectedLigandId && state().viewer.ligandSurface))) {
+      paths.add(pdbPath);
+    }
+    if (ligandPath && ligandComponent && state().viewer.ligandSurface) {
+      paths.add(ligandPath);
+    }
+
+    for (const sourcePath of paths) {
+      void ensureSurfacePropsLoaded(sourcePath);
+    }
+  };
+
   const handleProteinRepChange = (rep: ProteinRepresentation) => {
     setViewerProteinRep(rep);
     updateAllStyles();
   };
 
   const handleProteinSurfaceToggle = () => {
-    setViewerProteinSurface(!state().viewer.proteinSurface);
+    const next = !state().viewer.proteinSurface;
+    setViewerProteinSurface(next);
+    if (next) {
+      requestVisibleSurfaceProps();
+    }
     updateAllStyles();
   };
 
@@ -1520,36 +1749,14 @@ const ViewerMode: Component = () => {
 
   const handleSurfaceColorChange = async (scheme: SurfaceColorScheme) => {
     setViewerSurfaceColorScheme(scheme);
-
-    // For computed schemes, ensure property data is loaded
-    if (scheme !== 'uniform-grey' && !surfacePropsData()) {
-      const pdbPath = state().viewer.pdbPath;
-      if (!pdbPath) return;
-
-      setSurfacePropsLoading(true);
-      try {
-        // Store in surfaces/ subdir in the project dir, or next to the PDB
-        const pdbDir = pdbPath.substring(0, pdbPath.lastIndexOf('/'));
-        const outputDir = state().customOutputDir
-          ? `${state().customOutputDir}/${state().jobName}/surfaces`
-          : `${pdbDir}/surfaces`;
-
-        const result = await api.computeSurfaceProps(pdbPath, outputDir);
-        if (result.ok) {
-          surfacePropsPdbPath = pdbPath;
-          setSurfacePropsData({
-            hydrophobic: result.value.hydrophobic,
-            electrostatic: result.value.electrostatic,
-          });
-        } else {
-          console.error('Surface props computation failed:', result.error?.message);
-        }
-      } finally {
-        setSurfacePropsLoading(false);
-      }
+    if (scheme !== 'uniform-grey') {
+      requestVisibleSurfaceProps();
     }
 
     updateAllStyles();
+    if (ligandComponent) {
+      updateExternalLigandStyle();
+    }
   };
 
   const handleProteinCarbonColorChange = (color: string) => {
@@ -1625,7 +1832,11 @@ const ViewerMode: Component = () => {
   };
 
   const handleLigandSurfaceToggle = () => {
-    setViewerLigandSurface(!state().viewer.ligandSurface);
+    const next = !state().viewer.ligandSurface;
+    setViewerLigandSurface(next);
+    if (next) {
+      requestVisibleSurfaceProps();
+    }
     if (state().viewer.selectedLigandId) {
       updateAllStyles();
     } else if (ligandComponent) {
@@ -2105,6 +2316,58 @@ const ViewerMode: Component = () => {
     return stage.loadFile(path, options).then((c) => (c as NGL.Component) || null);
   };
 
+  const joinPath = (dirPath: string, fileName: string) =>
+    dirPath.endsWith('/') ? `${dirPath}${fileName}` : `${dirPath}/${fileName}`;
+
+  const parentDir = (filePath: string) => {
+    const lastSlash = filePath.lastIndexOf('/');
+    if (lastSlash <= 0) return null;
+    return filePath.slice(0, lastSlash);
+  };
+
+  const pickTopologyCandidate = (pdbFiles: string[], trajectoryFileName: string): string | null => {
+    if (pdbFiles.length === 0) return null;
+
+    const legacySystemName = trajectoryFileName.replace(/_trajectory\.dcd$/i, '_system.pdb');
+    const preferredNames = [
+      'system.pdb',
+      legacySystemName,
+      'final.pdb',
+    ];
+
+    for (const preferred of preferredNames) {
+      const match = pdbFiles.find((fileName) => fileName.toLowerCase() === preferred.toLowerCase());
+      if (match) return match;
+    }
+
+    return pdbFiles.find((fileName) => /_system\.pdb$/i.test(fileName))
+      || pdbFiles.find((fileName) => /system\.pdb$/i.test(fileName))
+      || pdbFiles[0]
+      || null;
+  };
+
+  const resolveTrajectoryTopology = async (trajectoryPath: string): Promise<string | null> => {
+    const trajectoryDir = parentDir(trajectoryPath);
+    if (!trajectoryDir) return null;
+
+    const trajectoryFileName = trajectoryPath.split('/').pop() || '';
+    const searchDirs = [trajectoryDir];
+    const containerDir = parentDir(trajectoryDir);
+    if (containerDir && containerDir !== trajectoryDir) {
+      searchDirs.push(containerDir);
+    }
+
+    for (const dirPath of searchDirs) {
+      const pdbFiles = await api.listPdbInDirectory(dirPath);
+      const match = pickTopologyCandidate(pdbFiles, trajectoryFileName);
+      if (match) {
+        return joinPath(dirPath, match);
+      }
+    }
+
+    return null;
+  };
+
   const loadImportedStructures = async (selected: string[]) => {
     setIsLoading(true);
     setError(null);
@@ -2172,14 +2435,15 @@ const ViewerMode: Component = () => {
       for (const filePath of ligandInputs) {
         const id = nextLayerId();
         const label = labelFor(filePath);
+        const normalizedLigandPath = await normalizeLigandPathForViewer(filePath);
 
         if (stage) {
-          const comp = await stage.loadFile(filePath, { defaultRepresentation: false, firstModelOnly: true }) as NGL.Component || null;
+          const comp = await stage.loadFile(normalizedLigandPath, { defaultRepresentation: false, firstModelOnly: true }) as NGL.Component || null;
           if (comp) {
             layerComponents.set(id, comp);
             ligandComponent = comp;
             updateExternalLigandStyle(comp);
-            setViewerLigandPath(filePath);
+            setViewerLigandPath(normalizedLigandPath);
             if (proteinComponent) {
               updateProteinStyle();
             }
@@ -2191,7 +2455,7 @@ const ViewerMode: Component = () => {
           id,
           type: 'ligand',
           label,
-          filePath,
+          filePath: normalizedLigandPath,
           visible: true,
         });
       }
@@ -2239,27 +2503,72 @@ const ViewerMode: Component = () => {
     const dcdPath = trajectoryFiles[0];
     if (!dcdPath) return;
 
-    const topologyPath = importResult.lastPreparedProtein || state().viewer.pdbPath;
+    const inferredTopologyPath = structureFiles.length === 0
+      ? await resolveTrajectoryTopology(dcdPath)
+      : null;
+    const topologyPath = importResult.lastPreparedProtein || inferredTopologyPath || state().viewer.pdbPath;
     if (!topologyPath) {
       setError('Load a topology structure before opening a DCD trajectory.');
       return;
     }
 
-    if (importResult.lastPreparedProtein) {
-      setViewerPdbPath(importResult.lastPreparedProtein);
+    if (topologyPath !== state().viewer.pdbPath || !proteinComponent) {
+      await handleLoadPdb(topologyPath, false);
     }
     await handleLoadTrajectory(dcdPath);
   };
 
-  const handleLoadRecentJob = async () => {
-    const job = selectedRecentJob();
-    if (!job || isLoadingSelectedJob()) return;
+  const handleOpenRecentJob = async (jobId: string) => {
+    const job = recentJobs().find((entry) => entry.id === jobId);
+    if (!job || loadingRecentJobId()) return;
 
-    setIsLoadingSelectedJob(true);
+    setLoadingRecentJobId(jobId);
     try {
       await loadProjectJob(job, api);
     } finally {
-      setIsLoadingSelectedJob(false);
+      setLoadingRecentJobId(null);
+    }
+  };
+
+  const handleLoadSmiles = async () => {
+    const smiles = smilesInput().trim();
+    if (!smiles || isLoadingSmiles()) return;
+
+    setIsLoadingSmiles(true);
+    setError(null);
+
+    try {
+      const defaultDir = await api.getDefaultOutputDir();
+      const baseOutputDir = state().customOutputDir || defaultDir;
+      const outputDir = `${baseOutputDir}/${state().jobName}/structures`;
+
+      const result = await api.convertSingleMolecule(smiles, outputDir, 'smiles');
+      if (!result.ok) {
+        setError(result.error?.message || 'Failed to convert SMILES');
+        return;
+      }
+
+      const sdfPath = result.value.sdfPath;
+      const id = nextLayerId();
+      const label = result.value.name || (smiles.length > 20 ? `${smiles.substring(0, 20)}...` : smiles);
+
+      if (stage) {
+        const comp = await stage.loadFile(sdfPath, { defaultRepresentation: false });
+        if (comp) {
+          layerComponents.set(id, comp);
+          ligandComponent = comp;
+          updateExternalLigandStyle(comp);
+          comp.autoView();
+        }
+      }
+
+      addViewerLayer({ id, type: 'ligand', label, filePath: sdfPath, visible: true });
+      setViewerLigandPath(sdfPath);
+      setSmilesInput('');
+    } catch (err) {
+      setError(`SMILES conversion failed: ${(err as Error).message}`);
+    } finally {
+      setIsLoadingSmiles(false);
     }
   };
 
@@ -2632,6 +2941,57 @@ const ViewerMode: Component = () => {
   const hasAutoDetectedLigand = () => state().viewer.detectedLigands.length > 0;
   const hasExternalLigand = () => state().viewer.ligandPath !== null;
   const hasAnyLigand = () => hasAutoDetectedLigand() || hasExternalLigand();
+  const isLigandLikePath = (filePath: string | null) => !!filePath && /\.(sdf(\.gz)?|mol2?)$/i.test(filePath);
+  const getStandaloneLigandPath = () => {
+    const pdbPath = state().viewer.pdbPath;
+    if (isLigandLikePath(pdbPath)) return pdbPath;
+    const ligandPath = state().viewer.ligandPath;
+    if (!pdbPath && isLigandLikePath(ligandPath)) return ligandPath;
+    return null;
+  };
+  const canEstimateLigandPka = () =>
+    !state().viewer.trajectoryPath
+    && state().viewer.detectedLigands.length === 0
+    && !state().viewer.selectedLigandId
+    && state().viewer.layers.filter((layer) => layer.type === 'protein').length === 0
+    && getStandaloneLigandPath() !== null;
+  const getPkaContextKey = () => {
+    const ligandPath = getStandaloneLigandPath();
+    if (!canEstimateLigandPka() || !ligandPath) return null;
+    return `${state().viewer.sessionKey}:${ligandPath}`;
+  };
+  const qupkakeAvailable = () => qupkakeCapability()?.available === true;
+  const qupkakeValidated = () => qupkakeCapability()?.validated === true;
+  const qupkakeWarning = () => {
+    const capability = qupkakeCapability();
+    if (!capability?.available || capability.validated) return null;
+    return capability.warning || 'QupKake is available, but this macOS runtime is still experimental.';
+  };
+
+  createEffect(() => {
+    const contextKey = getPkaContextKey();
+    if (contextKey === lastPkaContextKey) return;
+    lastPkaContextKey = contextKey;
+
+    pkaRequestId++;
+    setIsComputingPka(false);
+    setPkaResult(null);
+    setPkaError(null);
+
+    if (!contextKey) {
+      return;
+    }
+
+    checkQupkakeCapability();
+  });
+
+  createEffect(() => {
+    pkaResult();
+    pkaError();
+    if (ligandComponent) {
+      updateExternalLigandStyle();
+    }
+  });
 
   const handleSimulate = () => {
     const pdbPath = state().viewer.pdbPath;
@@ -2651,43 +3011,74 @@ const ViewerMode: Component = () => {
     });
   };
 
+  const handlePredictLigandPka = async () => {
+    const ligandPath = getStandaloneLigandPath();
+    if (!ligandPath || !qupkakeAvailable() || isComputingPka()) return;
+
+    const viewerSessionKey = state().viewer.sessionKey;
+    const requestId = ++pkaRequestId;
+    setIsComputingPka(true);
+    setPkaError(null);
+
+    try {
+      const result = await api.predictLigandPka(ligandPath);
+      if (state().viewer.sessionKey !== viewerSessionKey || requestId !== pkaRequestId) return;
+      if (result.ok) {
+        setPkaResult(result.value);
+      } else {
+        setPkaResult(null);
+        setPkaError(result.error?.message || 'Failed to predict pKa');
+      }
+    } catch (err) {
+      if (state().viewer.sessionKey !== viewerSessionKey || requestId !== pkaRequestId) return;
+      setPkaResult(null);
+      setPkaError(`Failed to predict pKa: ${(err as Error).message}`);
+    } finally {
+      if (state().viewer.sessionKey === viewerSessionKey && requestId === pkaRequestId) {
+        setIsComputingPka(false);
+      }
+    }
+  };
+
+  const viewerLoadPanel = (fillHeight: boolean) => (
+    <LayerPanel
+      layers={state().viewer.layers}
+      layerGroups={state().viewer.layerGroups}
+      selectedLayerId={state().viewer.selectedLayerId}
+      proteinCount={proteinLayerCount()}
+      canClear={hasViewerSession()}
+      fillHeight={fillHeight}
+      recentJobs={recentJobs()}
+      isLoadingRecentJobs={isLoadingRecentJobs()}
+      loadingRecentJobId={loadingRecentJobId()}
+      smilesInput={smilesInput()}
+      isLoadingSmiles={isLoadingSmiles()}
+      onBrowseFiles={handleImportFiles}
+      onAlignAll={handleLayerAlignAll}
+      onClearAll={handleClearAll}
+      onSmilesInput={setSmilesInput}
+      onLoadSmiles={handleLoadSmiles}
+      onOpenRecentJob={handleOpenRecentJob}
+      onToggleVisibility={handleLayerToggleVisibility}
+      onRemoveLayer={handleLayerRemove}
+      onSelectLayer={handleLayerSelect}
+      onToggleGroupExpanded={toggleViewerLayerGroupExpanded}
+      onToggleGroupVisible={(groupId) => {
+        const group = state().viewer.layerGroups.find((g) => g.id === groupId);
+        const newVisible = group ? !group.visible : true;
+        toggleViewerLayerGroupVisible(groupId);
+        const groupLayerItems = state().viewer.layers.filter((l) => l.groupId === groupId);
+        for (const layer of groupLayerItems) {
+          const comp = layerComponents.get(layer.id);
+          if (comp) comp.setVisibility(newVisible);
+        }
+      }}
+      onRemoveGroup={handleGroupRemove}
+    />
+  );
+
   return (
     <div class="h-full flex flex-col gap-2">
-      {/* Layer Panel */}
-      <LayerPanel
-        layers={state().viewer.layers}
-        layerGroups={state().viewer.layerGroups}
-        selectedLayerId={state().viewer.selectedLayerId}
-        proteinCount={proteinLayerCount()}
-        canClear={hasViewerSession()}
-        recentJobs={recentJobs()}
-        selectedRecentJobId={selectedRecentJobId()}
-        isLoadingRecentJobs={isLoadingRecentJobs()}
-        isLoadingSelectedJob={isLoadingSelectedJob()}
-        onImportFiles={handleImportFiles}
-        onAlignAll={handleLayerAlignAll}
-        onClearAll={handleClearAll}
-        onSelectRecentJob={setSelectedRecentJobId}
-        onLoadRecentJob={handleLoadRecentJob}
-        onToggleVisibility={handleLayerToggleVisibility}
-        onRemoveLayer={handleLayerRemove}
-        onSelectLayer={handleLayerSelect}
-        onToggleGroupExpanded={toggleViewerLayerGroupExpanded}
-        onToggleGroupVisible={(groupId) => {
-          // Read current group visibility, toggle, and sync NGL in same tick
-          const group = state().viewer.layerGroups.find((g) => g.id === groupId);
-          const newVisible = group ? !group.visible : true;
-          toggleViewerLayerGroupVisible(groupId);
-          // Apply to NGL components directly
-          const groupLayerItems = state().viewer.layers.filter((l) => l.groupId === groupId);
-          for (const layer of groupLayerItems) {
-            const comp = layerComponents.get(layer.id);
-            if (comp) comp.setVisibility(newVisible);
-          }
-        }}
-        onRemoveGroup={handleGroupRemove}
-      />
-
       {/* Queue Navigation (docking poses / multi-structure) */}
       <Show when={state().viewer.pdbQueue.length > 1}>
         <div class="card bg-base-200 p-2">
@@ -2791,45 +3182,64 @@ const ViewerMode: Component = () => {
           style={{ width: '100%', height: '100%' }}
         />
         {/* Floating buttons */}
-        <Show when={state().viewer.pdbPath}>
-          <div class="absolute top-2 right-2 z-10 flex gap-1.5">
-            {/* Grow — binding site expansion map */}
-            <Show when={hasAutoDetectedLigand()}>
-              <button
-                class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
-                onClick={handleComputeBindingSiteMap}
-                disabled={state().viewer.isComputingBindingSiteMap}
-                title="Grow — show where to expand the ligand"
-              >
-                {state().viewer.isComputingBindingSiteMap ? (
-                  <span class="loading loading-spinner loading-xs" />
-                ) : (
-                  <span class="font-mono text-xs">MAP</span>
-                )}
-              </button>
-            </Show>
-            {/* Simulate (visible when a ligand is loaded) */}
-            <Show when={hasAnyLigand()}>
-              <button
-                class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
-                onClick={handleSimulate}
-                title="Simulate — run MD on this structure"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                </svg>
-              </button>
-            </Show>
-            {/* Export (always visible) */}
-            <button
-              class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
-              onClick={handleExportPdb}
-              title="Export as PDB"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-            </button>
+        <Show when={state().viewer.pdbPath || (canEstimateLigandPka() && qupkakeAvailable())}>
+          <div class="absolute top-2 right-2 z-10 flex flex-col items-end gap-2">
+            <div class="flex gap-1.5">
+              {/* Grow — binding site expansion map */}
+              <Show when={hasAutoDetectedLigand()}>
+                <button
+                  class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
+                  onClick={handleComputeBindingSiteMap}
+                  disabled={state().viewer.isComputingBindingSiteMap}
+                  title="Grow — show where to expand the ligand"
+                >
+                  {state().viewer.isComputingBindingSiteMap ? (
+                    <span class="loading loading-spinner loading-xs" />
+                  ) : (
+                    <span class="font-mono text-xs">MAP</span>
+                  )}
+                </button>
+              </Show>
+              <Show when={canEstimateLigandPka() && qupkakeAvailable()}>
+                <button
+                  class={`btn btn-sm btn-ghost px-2 ${qupkakeValidated() ? 'bg-base-300/80 hover:bg-base-300' : 'border border-warning/40 bg-warning/15 text-warning-content hover:bg-warning/25'}`}
+                  onClick={handlePredictLigandPka}
+                  disabled={isComputingPka()}
+                  title={isCheckingQupkake()
+                    ? 'Checking QupKake...'
+                    : qupkakeValidated()
+                      ? 'Predict micro-pKa with QupKake'
+                      : 'Predict micro-pKa with QupKake (experimental runtime on this Mac)'}
+                >
+                  <Show when={isComputingPka()} fallback={<span class="font-semibold text-xs leading-none">pKa</span>}>
+                    <span class="loading loading-spinner loading-xs" />
+                  </Show>
+                </button>
+              </Show>
+              {/* Simulate (visible when a ligand is loaded with a structure) */}
+              <Show when={state().viewer.pdbPath && hasAnyLigand()}>
+                <button
+                  class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
+                  onClick={handleSimulate}
+                  title="Simulate — run MD on this structure"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                  </svg>
+                </button>
+              </Show>
+              <Show when={state().viewer.pdbPath}>
+                <button
+                  class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
+                  onClick={handleExportPdb}
+                  title="Export as PDB"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                </button>
+              </Show>
+            </div>
           </div>
         </Show>
         <Show when={isLoading()}>
@@ -2837,18 +3247,9 @@ const ViewerMode: Component = () => {
             <span class="loading loading-spinner loading-lg text-primary" />
           </div>
         </Show>
-        <Show when={!state().viewer.pdbPath && !state().viewer.ligandPath && state().viewer.layers.length === 0 && !isLoading()}>
-          <div class="absolute inset-0 flex items-center justify-center text-base-content/80">
-            <div class="flex flex-col items-center gap-3 max-w-xs">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-              </svg>
-              <div class="text-xs text-center text-base-content/70 leading-relaxed">
-                <p>Use the import panel above or load a recent job.</p>
-                <p>Structures: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`</p>
-                <p>Trajectory: `.dcd` with a loaded topology</p>
-              </div>
-            </div>
+        <Show when={!hasViewerSession() && !isLoading()}>
+          <div class="absolute inset-0 p-4 overflow-auto">
+            {viewerLoadPanel(true)}
           </div>
         </Show>
       </div>
@@ -2994,6 +3395,19 @@ const ViewerMode: Component = () => {
               <span class="text-xs">Surface</span>
             </label>
             <Show when={state().viewer.ligandSurface}>
+              <select
+                class="select select-xs select-bordered w-32"
+                value={state().viewer.surfaceColorScheme}
+                onChange={(e) => handleSurfaceColorChange(e.target.value as SurfaceColorScheme)}
+                disabled={!hasAnyLigand()}
+              >
+                <option value="uniform-grey">Solid</option>
+                <option value="hydrophobic">Hydrophobic</option>
+                <option value="electrostatic">Electrostatic</option>
+              </select>
+              <Show when={surfacePropsLoading()}>
+                <span class="loading loading-spinner loading-xs text-secondary" title="Computing surface properties..." />
+              </Show>
               <select
                 class="select select-xs select-bordered w-16"
                 value={state().viewer.ligandSurfaceOpacity}

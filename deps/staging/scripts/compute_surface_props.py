@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-Compute per-atom surface properties (hydrophobic, electrostatic) for a protein PDB.
+Compute per-atom surface coloring properties for the currently loaded molecule.
 
-Hydrophobic: Gaussian-smoothed Kyte-Doolittle per-atom values.
-Electrostatic: Coulombic potential from AMBER partial charges with distance-dependent
-dielectric (epsilon = 4*r), computed at each atom position. Uses PDBFixer to clean
-the structure so OpenMM charge assignment succeeds on real-world PDBs.
+The viewer uses NGL's real molecular surface geometry and colors that surface from
+these per-atom fields. This script therefore focuses on current-structure,
+atom-resolved properties rather than residue-level proxies.
+
+Supported inputs:
+- protein / complex structures: PDB, CIF
+- ligands / small molecules: SDF, SDF.GZ, MOL, MOL2, PDB
+
+Outputs:
+- hydrophobic: atom-based lipophilic potential, normalized to [-1, 1]
+- electrostatic: Coulombic potential from partial charges, normalized to [-1, 1]
 """
 
 import argparse
+import gzip
+import io
 import json
+import math
 import sys
 import warnings
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 warnings.filterwarnings('ignore')
 
@@ -23,10 +33,18 @@ KYTE_DOOLITTLE = {
     'GLU': -3.5, 'GLN': -3.5, 'ASP': -3.5, 'ASN': -3.5, 'LYS': -3.9, 'ARG': -4.5,
 }
 
-# Per-atom partial charges for standard amino acid atoms (AMBER ff14SB subset)
-# Only used as last-resort fallback if PDBFixer + OpenMM both fail
-BACKBONE_CHARGES = {'N': -0.4157, 'H': 0.2719, 'CA': 0.0337, 'HA': 0.0823,
-                    'C': 0.5973, 'O': -0.5679}
+STANDARD_AA = set(KYTE_DOOLITTLE)
+HALOGENS = {'F', 'CL', 'BR', 'I'}
+METALS = {
+    'LI', 'NA', 'K', 'RB', 'CS',
+    'MG', 'CA', 'SR', 'BA',
+    'ZN', 'FE', 'MN', 'CU', 'CO', 'NI',
+}
+
+BACKBONE_CHARGES = {
+    'N': -0.4157, 'H': 0.2719, 'CA': 0.0337, 'HA': 0.0823,
+    'C': 0.5973, 'O': -0.5679, 'OXT': -0.5679,
+}
 SIDECHAIN_CHARGES = {
     'ARG': {'CZ': 0.8281, 'NH1': -0.8693, 'NH2': -0.8693, 'NE': -0.5295, 'HE': 0.3456,
             'HH11': 0.4494, 'HH12': 0.4494, 'HH21': 0.4494, 'HH22': 0.4494},
@@ -34,6 +52,9 @@ SIDECHAIN_CHARGES = {
     'ASP': {'CG': 0.7994, 'OD1': -0.8014, 'OD2': -0.8014},
     'GLU': {'CD': 0.8054, 'OE1': -0.8188, 'OE2': -0.8188},
     'HIS': {'ND1': -0.3811, 'HD1': 0.3649, 'NE2': -0.5727, 'CE1': 0.2057, 'CD2': -0.2207},
+    'HSD': {'ND1': -0.3811, 'HD1': 0.3649, 'NE2': -0.5727, 'CE1': 0.2057, 'CD2': -0.2207},
+    'HSE': {'ND1': -0.3811, 'HD1': 0.3649, 'NE2': -0.5727, 'CE1': 0.2057, 'CD2': -0.2207},
+    'HSP': {'ND1': -0.3811, 'HD1': 0.3649, 'NE2': -0.5727, 'CE1': 0.2057, 'CD2': -0.2207},
     'SER': {'OG': -0.6546, 'HG': 0.4275},
     'THR': {'OG1': -0.6761, 'HG1': 0.4102},
     'TYR': {'OH': -0.5579, 'HH': 0.3992},
@@ -45,182 +66,236 @@ SIDECHAIN_CHARGES = {
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description='Compute per-atom surface properties for a protein PDB'
-    )
-    parser.add_argument('--pdb_path', required=True, help='Input PDB file')
-    parser.add_argument('--output_path', required=True, help='Output JSON file path')
+    parser = argparse.ArgumentParser(description='Compute per-atom surface properties')
+    parser.add_argument('--pdb_path', required=True, help='Input structure or ligand file')
+    parser.add_argument('--output_path', required=True, help='Output JSON path')
     args = parser.parse_args()
 
     try:
         import numpy as np
-        from scipy.spatial import cKDTree
-    except ImportError as e:
-        print(json.dumps({"error": f"Missing required package: {e}"}))
-        sys.exit(1)
 
-    try:
-        # ============================================================
-        # Step 1: Parse PDB and extract atom coordinates
-        # ============================================================
-        print("PROGRESS:parsing_pdb", file=sys.stderr)
+        coords, atom_names, residue_names, elements, charges, lipophilicity = load_atom_fields(args.pdb_path)
+        atom_count = len(coords)
+        if atom_count == 0:
+            raise ValueError('No atoms found')
 
-        from openmm.app import PDBFile
-        pdb = PDBFile(args.pdb_path)
-        positions = pdb.getPositions(asNumpy=True)
-        atom_coords = (positions.value_in_unit(positions.unit) * 10.0).astype(np.float32)
-        n_atoms = len(atom_coords)
-
-        # Build per-atom info
-        atom_names = []
-        residue_names = []
-        ca_indices = []
-        ca_residues = []
-
-        for atom in pdb.topology.atoms():
-            atom_names.append(atom.name)
-            residue_names.append(atom.residue.name)
-            if atom.name == 'CA':
-                ca_indices.append(atom.index)
-                ca_residues.append(atom.residue.name)
-
-        ca_indices = np.array(ca_indices, dtype=np.intp)
-        ca_coords = atom_coords[ca_indices]
-        print(f"  Atoms: {n_atoms}, CA atoms: {len(ca_indices)}", file=sys.stderr)
-
-        if len(ca_indices) == 0:
-            print(json.dumps({"error": "No CA atoms found — not a protein structure"}))
-            sys.exit(1)
-
-        # ============================================================
-        # Step 2: Hydrophobic (Kyte-Doolittle, Gaussian-smoothed)
-        # ============================================================
-        print("PROGRESS:computing_hydrophobic", file=sys.stderr)
-
-        kd_ca = np.array([KYTE_DOOLITTLE.get(r, 0.0) for r in ca_residues], dtype=np.float32)
-        tree_ca = cKDTree(ca_coords)
-        sigma_h = 5.0
-        cutoff_h = 12.0
-        two_sigma_sq_h = 2.0 * sigma_h * sigma_h
-
-        hydrophobic = np.zeros(n_atoms, dtype=np.float32)
-        nbrs_h = tree_ca.query_ball_point(atom_coords, cutoff_h)
-        for i in range(n_atoms):
-            idx = nbrs_h[i]
-            if not idx:
-                continue
-            idx = np.array(idx, dtype=np.intp)
-            d2 = np.sum((ca_coords[idx] - atom_coords[i]) ** 2, axis=1)
-            w = np.exp(-d2 / two_sigma_sq_h)
-            ws = w.sum()
-            if ws > 1e-12:
-                hydrophobic[i] = np.dot(w, kd_ca[idx]) / ws
-
-        # Normalize to [-1, 1]
-        hmin, hmax = hydrophobic.min(), hydrophobic.max()
-        if hmax - hmin > 1e-12:
-            hydrophobic = (hydrophobic - hmin) / (hmax - hmin) * 2.0 - 1.0
-
-        # ============================================================
-        # Step 3: Electrostatic (Coulombic with distance-dependent dielectric)
-        # ============================================================
-        print("PROGRESS:computing_electrostatic", file=sys.stderr)
-
-        charges = _get_charges(args.pdb_path, pdb, atom_coords, atom_names, residue_names, n_atoms)
-
-        # Coulombic potential with distance-dependent dielectric: phi_i = sum q_j / (4 * r_ij)
-        # The factor 4*r is the Skolnick distance-dependent dielectric (epsilon = 4r)
-        # This gives smooth gradients, not sharp per-residue blocks
-        print("  Computing Coulombic potential (epsilon=4r)...", file=sys.stderr)
-        tree_all = cKDTree(atom_coords)
-        cutoff_e = 12.0
-        electrostatic = np.zeros(n_atoms, dtype=np.float32)
-        nbrs_e = tree_all.query_ball_point(atom_coords, cutoff_e)
-
-        for i in range(n_atoms):
-            idx = nbrs_e[i]
-            if not idx:
-                continue
-            idx = np.array(idx, dtype=np.intp)
-            mask = idx != i
-            idx = idx[mask]
-            if len(idx) == 0:
-                continue
-            d = np.sqrt(np.sum((atom_coords[idx] - atom_coords[i]) ** 2, axis=1))
-            d = np.maximum(d, 0.5)  # floor to avoid singularity
-            # phi = sum(q / (4*r)) — distance-dependent dielectric
-            electrostatic[i] = np.sum(charges[idx] / (4.0 * d))
-
-        # Normalize with percentile clamping to handle outliers
-        p5, p95 = np.percentile(electrostatic, 5), np.percentile(electrostatic, 95)
-        if p95 - p5 > 1e-12:
-            electrostatic = np.clip(electrostatic, p5, p95)
-            electrostatic = (electrostatic - p5) / (p95 - p5) * 2.0 - 1.0
-        else:
-            electrostatic = np.zeros(n_atoms, dtype=np.float32)
-
-        # ============================================================
-        # Step 4: Write output
-        # ============================================================
-        print("PROGRESS:writing_output", file=sys.stderr)
+        hydrophobic = compute_smoothed_field(coords, lipophilicity, sigma=2.4, cutoff=7.0)
+        electrostatic = compute_coulombic_potential(coords, charges, cutoff=12.0)
 
         result = {
-            "atomCount": n_atoms,
-            "hydrophobic": [round(float(v), 4) for v in hydrophobic],
-            "electrostatic": [round(float(v), 4) for v in electrostatic],
+            'atomCount': atom_count,
+            'hydrophobic': normalize_signed(hydrophobic).round(4).astype(float).tolist(),
+            'electrostatic': normalize_signed(electrostatic).round(4).astype(float).tolist(),
         }
 
-        with open(args.output_path, 'w') as f:
-            json.dump(result, f)
-
-        print(f"  Written to: {args.output_path}", file=sys.stderr)
-        print("PROGRESS:done", file=sys.stderr)
-
-    except Exception as e:
+        with open(args.output_path, 'w', encoding='utf-8') as handle:
+            json.dump(result, handle)
+    except Exception as exc:
         import traceback
         traceback.print_exc(file=sys.stderr)
-        print(json.dumps({"error": str(e)}))
+        print(json.dumps({'error': str(exc)}))
         sys.exit(1)
 
 
-def _get_charges(pdb_path: str, pdb_obj: Any, atom_coords: Any, atom_names: List[str], residue_names: List[str], n_atoms: int) -> Any:
-    """Get per-atom partial charges. Tries three methods in order:
-    1. PDBFixer → OpenMM ff14SB (best — works on most real PDBs)
-    2. Raw PDB → OpenMM ff14SB (fails if PDB has missing atoms/residues)
-    3. Per-atom AMBER charge lookup table (last resort)
-    """
+def load_atom_fields(file_path: str) -> Tuple[Any, List[str], List[str], List[str], Any, Any]:
+    file_path_lower = file_path.lower()
+
+    if file_path_lower.endswith(('.sdf', '.sdf.gz', '.mol', '.mol2')):
+        return load_small_molecule(file_path)
+
+    if file_path_lower.endswith('.pdb'):
+        return load_pdb_like_structure(file_path, use_cif=False)
+
+    if file_path_lower.endswith('.cif'):
+        return load_pdb_like_structure(file_path, use_cif=True)
+
+    raise ValueError(f'Unsupported surface-property input: {file_path}')
+
+
+def load_small_molecule(file_path: str) -> Tuple[Any, List[str], List[str], List[str], Any, Any]:
+    import numpy as np
+    from rdkit import Chem
+    from rdkit.Chem import rdMolDescriptors
+
+    mol = None
+    lower = file_path.lower()
+
+    if lower.endswith('.sdf'):
+        supplier = Chem.SDMolSupplier(file_path, removeHs=False, sanitize=True)
+        mol = next((entry for entry in supplier if entry is not None), None)
+    elif lower.endswith('.sdf.gz'):
+        with gzip.open(file_path, 'rt', encoding='utf-8', errors='ignore') as handle:
+            block = handle.read()
+        supplier = Chem.ForwardSDMolSupplier(io.BytesIO(block.encode('utf-8')), removeHs=False, sanitize=True)
+        mol = next((entry for entry in supplier if entry is not None), None)
+    elif lower.endswith('.mol'):
+        mol = Chem.MolFromMolFile(file_path, removeHs=False, sanitize=True)
+    elif lower.endswith('.mol2'):
+        mol = Chem.MolFromMol2File(file_path, removeHs=False, sanitize=True)
+
+    if mol is None:
+        raise ValueError(f'Failed to parse small-molecule file: {file_path}')
+
+    if mol.GetNumConformers() == 0:
+        raise ValueError(f'No 3D conformer found in: {file_path}')
+
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        pass
+
+    conf = mol.GetConformer()
+    coords = np.array(conf.GetPositions(), dtype=np.float32)
+    atom_names: List[str] = []
+    residue_names: List[str] = []
+    elements: List[str] = []
+
+    for atom in mol.GetAtoms():
+        info = atom.GetPDBResidueInfo()
+        atom_names.append(info.GetName().strip() if info and info.GetName() else atom.GetSymbol())
+        residue_names.append(info.GetResidueName().strip() if info and info.GetResidueName() else 'LIG')
+        elements.append(atom.GetSymbol().upper())
+
+    charges = np.array(compute_rdkit_charges(mol), dtype=np.float32)
+
+    try:
+        crippen = rdMolDescriptors._CalcCrippenContribs(mol)
+        lipophilicity = np.array([float(logp) for logp, _mr in crippen], dtype=np.float32)
+    except Exception:
+        lipophilicity = np.array([
+            generic_lipophilicity(elements[i], charges[i], atom_names[i], residue_names[i])
+            for i in range(mol.GetNumAtoms())
+        ], dtype=np.float32)
+
+    lipophilicity -= np.minimum(np.abs(charges), 1.5) * 0.35
+    return coords, atom_names, residue_names, elements, charges, lipophilicity
+
+
+def load_pdb_like_structure(file_path: str, use_cif: bool) -> Tuple[Any, List[str], List[str], List[str], Any, Any]:
+    import numpy as np
+    from openmm.app import PDBFile, PDBxFile
+
+    structure = PDBxFile(file_path) if use_cif else PDBFile(file_path)
+    positions = structure.getPositions(asNumpy=True)
+    coords = np.array(positions.value_in_unit(positions.unit) * 10.0, dtype=np.float32)
+
+    atom_names: List[str] = []
+    residue_names: List[str] = []
+    elements: List[str] = []
+    atom_keys: List[Tuple[str, str, str, str]] = []
+
+    for atom in structure.topology.atoms():
+        atom_names.append(atom.name)
+        residue_names.append(atom.residue.name)
+        elements.append((atom.element.symbol if atom.element else atom.name[:1]).upper())
+        chain_id = getattr(atom.residue.chain, 'id', '')
+        residue_id = str(atom.residue.id)
+        atom_keys.append((chain_id, residue_id, atom.residue.name, atom.name))
+
+    charges = get_pdb_like_charges(file_path, structure, atom_names, residue_names, elements, atom_keys)
+    lipophilicity = np.array([
+        protein_lipophilicity(atom_names[i], residue_names[i], elements[i], charges[i])
+        for i in range(len(atom_names))
+    ], dtype=np.float32)
+    return coords, atom_names, residue_names, elements, charges, lipophilicity
+
+
+def compute_rdkit_charges(mol: Any) -> List[float]:
+    from rdkit.Chem import AllChem
+
+    try:
+        AllChem.ComputeGasteigerCharges(mol)
+        charges = []
+        for atom in mol.GetAtoms():
+            raw = atom.GetProp('_GasteigerCharge') if atom.HasProp('_GasteigerCharge') else '0.0'
+            try:
+                charge = float(raw)
+            except Exception:
+                charge = 0.0
+            if not math.isfinite(charge):
+                charge = 0.0
+            charges.append(charge)
+        return charges
+    except Exception:
+        charges = []
+        for atom in mol.GetAtoms():
+            charge = float(atom.GetFormalCharge())
+            if atom.GetSymbol().upper() == 'N' and charge == 0.0:
+                charge = -0.15
+            elif atom.GetSymbol().upper() == 'O' and charge == 0.0:
+                charge = -0.25
+            charges.append(charge)
+        return charges
+
+
+def get_pdb_like_charges(
+    file_path: str,
+    structure: Any,
+    atom_names: Sequence[str],
+    residue_names: Sequence[str],
+    elements: Sequence[str],
+    atom_keys: Sequence[Tuple[str, str, str, str]],
+) -> Any:
     import numpy as np
 
-    # Method 1: PDBFixer + OpenMM
-    charges = _charges_via_pdbfixer(pdb_path, n_atoms)
-    if charges is not None:
-        print("  Charges: PDBFixer + OpenMM ff14SB", file=sys.stderr)
-        return charges
+    charges = np.full(len(atom_names), np.nan, dtype=np.float32)
 
-    # Method 2: Raw PDB + OpenMM (no fixer)
-    charges = _charges_via_openmm_raw(pdb_obj, n_atoms)
-    if charges is not None:
-        print("  Charges: Raw OpenMM ff14SB", file=sys.stderr)
-        return charges
+    raw = charges_via_openmm_raw(structure)
+    if raw is not None and len(raw) == len(atom_names):
+        charges[:] = raw
+    else:
+        fixed = charges_via_pdbfixer(file_path, atom_keys)
+        if fixed is not None:
+            fixed_mask = ~np.isnan(fixed)
+            charges[fixed_mask] = fixed[fixed_mask]
 
-    # Method 3: Per-atom lookup table
-    print("  Charges: AMBER atom-level lookup (fallback)", file=sys.stderr)
-    return _charges_via_lookup(atom_names, residue_names, n_atoms)
+    lookup = charges_via_lookup(atom_names, residue_names, elements)
+    generic = generic_element_charges(atom_names, residue_names, elements)
+
+    missing = np.isnan(charges)
+    if np.any(missing):
+        charges[missing] = lookup[missing]
+        still_missing = np.isnan(charges)
+        if np.any(still_missing):
+            charges[still_missing] = generic[still_missing]
+
+    # Fill remaining standard-residue zeros from generic atom heuristics.
+    zero_mask = np.abs(charges) < 1e-6
+    charges[zero_mask] = generic[zero_mask]
+    return charges.astype(np.float32)
 
 
-def _charges_via_pdbfixer(pdb_path: str, n_atoms: int) -> Optional[Any]:
-    """Use PDBFixer to clean PDB, then assign charges via OpenMM."""
+def charges_via_openmm_raw(structure: Any) -> Optional[Any]:
+    import numpy as np
+    try:
+        from openmm import NonbondedForce, unit
+        from openmm.app import ForceField, NoCutoff
+
+        ff = ForceField('amber/protein.ff14SB.xml', 'amber/tip3p_standard.xml')
+        system = ff.createSystem(structure.topology, nonbondedMethod=NoCutoff)
+
+        charges = np.zeros(sum(1 for _ in structure.topology.atoms()), dtype=np.float32)
+        for force in system.getForces():
+            if isinstance(force, NonbondedForce):
+                for idx in range(force.getNumParticles()):
+                    charges[idx] = force.getParticleParameters(idx)[0].value_in_unit(unit.elementary_charge)
+                return charges
+    except Exception:
+        return None
+    return None
+
+
+def charges_via_pdbfixer(file_path: str, atom_keys: Sequence[Tuple[str, str, str, str]]) -> Optional[Any]:
     import numpy as np
     try:
         from pdbfixer import PDBFixer
-        from openmm.app import ForceField, NoCutoff
         from openmm import NonbondedForce, unit
+        from openmm.app import ForceField, NoCutoff
 
-        fixer = PDBFixer(filename=pdb_path)
+        fixer = PDBFixer(filename=file_path)
         fixer.findMissingResidues()
         fixer.findNonstandardResidues()
         fixer.replaceNonstandardResidues()
-        fixer.removeHeterogens(keepWater=False)
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
         fixer.addMissingHydrogens(7.4)
@@ -228,65 +303,204 @@ def _charges_via_pdbfixer(pdb_path: str, n_atoms: int) -> Optional[Any]:
         ff = ForceField('amber/protein.ff14SB.xml', 'amber/tip3p_standard.xml')
         system = ff.createSystem(fixer.topology, nonbondedMethod=NoCutoff)
 
-        # PDBFixer may add atoms — extract charges for original atom count
-        fixed_n = sum(1 for _ in fixer.topology.atoms())
-        charges = np.zeros(fixed_n, dtype=np.float32)
-
+        fixed_charges = []
         for force in system.getForces():
             if isinstance(force, NonbondedForce):
-                for i in range(force.getNumParticles()):
-                    charges[i] = force.getParticleParameters(i)[0].value_in_unit(unit.elementary_charge)
+                for idx in range(force.getNumParticles()):
+                    fixed_charges.append(force.getParticleParameters(idx)[0].value_in_unit(unit.elementary_charge))
                 break
         else:
             return None
 
-        # If fixer added atoms, truncate to original count
-        # The original atoms come first in PDBFixer output
-        return charges[:n_atoms] if len(charges) >= n_atoms else None
+        charge_by_key: Dict[Tuple[str, str, str, str], List[float]] = {}
+        for atom, charge in zip(fixer.topology.atoms(), fixed_charges):
+            chain_id = getattr(atom.residue.chain, 'id', '')
+            residue_id = str(atom.residue.id)
+            key = (chain_id, residue_id, atom.residue.name, atom.name)
+            charge_by_key.setdefault(key, []).append(float(charge))
 
-    except Exception as e:
-        print(f"  PDBFixer method failed: {e}", file=sys.stderr)
+        mapped = np.full(len(atom_keys), np.nan, dtype=np.float32)
+        seen_counts: Dict[Tuple[str, str, str, str], int] = {}
+        for idx, key in enumerate(atom_keys):
+            values = charge_by_key.get(key)
+            if not values:
+                continue
+            use_idx = seen_counts.get(key, 0)
+            if use_idx < len(values):
+                mapped[idx] = values[use_idx]
+                seen_counts[key] = use_idx + 1
+        return mapped
+    except Exception:
         return None
 
 
-def _charges_via_openmm_raw(pdb_obj: Any, n_atoms: int) -> Optional[Any]:
-    """Try raw PDB with OpenMM (no PDBFixer cleanup)."""
+def charges_via_lookup(atom_names: Sequence[str], residue_names: Sequence[str], elements: Sequence[str]) -> Any:
     import numpy as np
-    try:
-        from openmm.app import ForceField, NoCutoff
-        from openmm import NonbondedForce, unit
 
-        ff = ForceField('amber/protein.ff14SB.xml', 'amber/tip3p_standard.xml')
-        system = ff.createSystem(pdb_obj.topology, nonbondedMethod=NoCutoff)
+    charges = np.zeros(len(atom_names), dtype=np.float32)
+    for idx, (atom_name, residue_name, element) in enumerate(zip(atom_names, residue_names, elements)):
+        if atom_name in BACKBONE_CHARGES:
+            charges[idx] = BACKBONE_CHARGES[atom_name]
+            continue
 
-        charges = np.zeros(n_atoms, dtype=np.float32)
-        for force in system.getForces():
-            if isinstance(force, NonbondedForce):
-                for i in range(min(force.getNumParticles(), n_atoms)):
-                    charges[i] = force.getParticleParameters(i)[0].value_in_unit(unit.elementary_charge)
-                return charges
+        residue_table = SIDECHAIN_CHARGES.get(residue_name)
+        if residue_table and atom_name in residue_table:
+            charges[idx] = residue_table[atom_name]
+            continue
 
-        return None
-    except Exception as e:
-        print(f"  Raw OpenMM method failed: {e}", file=sys.stderr)
-        return None
-
-
-def _charges_via_lookup(atom_names: List[str], residue_names: List[str], n_atoms: int) -> Any:
-    """Last resort: use hardcoded AMBER partial charge tables for key atoms."""
-    import numpy as np
-    charges = np.zeros(n_atoms, dtype=np.float32)
-    for i in range(n_atoms):
-        aname = atom_names[i]
-        rname = residue_names[i]
-        # Check backbone
-        if aname in BACKBONE_CHARGES:
-            charges[i] = BACKBONE_CHARGES[aname]
-        # Check sidechain
-        elif rname in SIDECHAIN_CHARGES and aname in SIDECHAIN_CHARGES[rname]:
-            charges[i] = SIDECHAIN_CHARGES[rname][aname]
-        # Default: 0 (nonpolar carbon, etc.)
+        if element in METALS:
+            charges[idx] = 2.0 if element in {'MG', 'CA', 'ZN', 'FE', 'MN'} else 1.0
+        elif residue_name in {'NA', 'K'}:
+            charges[idx] = 1.0
+        elif residue_name in {'CL'}:
+            charges[idx] = -1.0
     return charges
+
+
+def generic_element_charges(atom_names: Sequence[str], residue_names: Sequence[str], elements: Sequence[str]) -> Any:
+    import numpy as np
+
+    charges = np.zeros(len(atom_names), dtype=np.float32)
+    for idx, (atom_name, residue_name, element) in enumerate(zip(atom_names, residue_names, elements)):
+        if element == 'O':
+            charges[idx] = -0.35
+        elif element == 'N':
+            charges[idx] = -0.20
+        elif element == 'S':
+            charges[idx] = -0.10
+        elif element == 'P':
+            charges[idx] = 0.40
+        elif element in HALOGENS:
+            charges[idx] = -0.05
+        elif element in METALS:
+            charges[idx] = 2.0 if element in {'MG', 'CA', 'ZN', 'FE', 'MN'} else 1.0
+
+        if residue_name in {'LYS', 'ARG'} and atom_name.startswith(('N', 'NZ', 'NH', 'NE')):
+            charges[idx] = max(charges[idx], 0.35)
+        elif residue_name in {'ASP', 'GLU'} and atom_name.startswith(('O', 'OD', 'OE')):
+            charges[idx] = min(charges[idx], -0.45)
+        elif residue_name in {'NA', 'K'}:
+            charges[idx] = 1.0
+        elif residue_name in {'CL'}:
+            charges[idx] = -1.0
+    return charges
+
+
+def protein_lipophilicity(atom_name: str, residue_name: str, element: str, charge: float) -> float:
+    residue_score = max(-1.0, min(1.0, KYTE_DOOLITTLE.get(residue_name, 0.0) / 4.5))
+
+    if residue_name in STANDARD_AA:
+        if atom_name in {'N', 'H', 'HN', 'H1', 'H2', 'H3', 'C', 'O', 'OXT'}:
+            base = -0.55 if element in {'N', 'O'} else -0.10
+        elif atom_name in {'CA', 'HA', 'HA2', 'HA3'}:
+            base = 0.05
+        elif element == 'C':
+            base = 0.30 + 0.70 * residue_score
+        elif element == 'S':
+            base = 0.20 + 0.45 * residue_score
+        elif element in {'N', 'O', 'P'}:
+            base = -0.70
+        elif element in HALOGENS:
+            base = 0.55
+        else:
+            base = 0.0
+    else:
+        base = generic_lipophilicity(element, charge, atom_name, residue_name)
+
+    base -= min(abs(charge), 1.5) * 0.45
+    return float(max(-2.0, min(2.0, base)))
+
+
+def generic_lipophilicity(element: str, charge: float, atom_name: str, residue_name: str) -> float:
+    if element == 'C':
+        base = 0.65
+    elif element == 'S':
+        base = 0.45
+    elif element in HALOGENS:
+        base = 0.55
+    elif element in {'N', 'O', 'P'}:
+        base = -0.65
+    elif element == 'H':
+        base = 0.0
+    elif element in METALS:
+        base = -0.80
+    else:
+        base = 0.0
+
+    if residue_name in {'NA', 'K', 'CL'}:
+        base = -1.0
+    if atom_name.startswith(('NZ', 'NH', 'NE', 'OD', 'OE')):
+        base -= 0.20
+
+    base -= min(abs(charge), 1.5) * 0.45
+    return float(max(-2.0, min(2.0, base)))
+
+
+def compute_smoothed_field(coords: Any, atom_values: Any, sigma: float, cutoff: float) -> Any:
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(coords)
+    neighborhoods = tree.query_ball_point(coords, cutoff)
+    denom_scale = 2.0 * sigma * sigma
+    field = np.zeros(len(coords), dtype=np.float32)
+
+    for idx, neighbors in enumerate(neighborhoods):
+        if not neighbors:
+            field[idx] = atom_values[idx]
+            continue
+        points = coords[np.array(neighbors, dtype=np.intp)]
+        deltas = points - coords[idx]
+        distances_sq = np.sum(deltas * deltas, axis=1)
+        weights = np.exp(-distances_sq / denom_scale)
+        weight_sum = float(weights.sum())
+        if weight_sum > 1e-8:
+            field[idx] = float(np.dot(weights, atom_values[np.array(neighbors, dtype=np.intp)]) / weight_sum)
+        else:
+            field[idx] = atom_values[idx]
+    return field
+
+
+def compute_coulombic_potential(coords: Any, charges: Any, cutoff: float) -> Any:
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(coords)
+    neighborhoods = tree.query_ball_point(coords, cutoff)
+    potential = np.zeros(len(coords), dtype=np.float32)
+
+    for idx, neighbors in enumerate(neighborhoods):
+        if not neighbors:
+            continue
+        nbr_idx = np.array(neighbors, dtype=np.intp)
+        nbr_idx = nbr_idx[nbr_idx != idx]
+        if len(nbr_idx) == 0:
+            continue
+        deltas = coords[nbr_idx] - coords[idx]
+        distances = np.sqrt(np.sum(deltas * deltas, axis=1))
+        distances = np.maximum(distances, 0.6)
+        potential[idx] = float(np.sum(charges[nbr_idx] / (4.0 * distances)))
+    return potential
+
+
+def normalize_signed(values: Any) -> Any:
+    import numpy as np
+
+    if len(values) == 0:
+        return values
+
+    v = np.array(values, dtype=np.float32)
+    lo = float(np.percentile(v, 5))
+    hi = float(np.percentile(v, 95))
+
+    if hi - lo < 1e-8:
+        max_abs = float(np.max(np.abs(v)))
+        if max_abs < 1e-8:
+            return np.zeros_like(v)
+        return np.clip(v / max_abs, -1.0, 1.0)
+
+    v = np.clip(v, lo, hi)
+    return ((v - lo) / (hi - lo) * 2.0 - 1.0).astype(np.float32)
 
 
 if __name__ == '__main__':

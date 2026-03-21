@@ -54,6 +54,8 @@ const IpcChannels = {
   // CORDIAL rescoring
   CHECK_CORDIAL_INSTALLED: 'check-cordial-installed',
   RUN_CORDIAL_SCORING: 'run-cordial-scoring',
+  CHECK_QUPKAKE_INSTALLED: 'check-qupkake-installed',
+  PREDICT_LIGAND_PKA: 'predict-ligand-pka',
   // Viewer channels
   PREPARE_FOR_VIEWING: 'prepare-for-viewing',
   SAVE_PDB_FILE: 'save-pdb-file',
@@ -451,6 +453,11 @@ const electronAPI = {
 
   runCordialScoring: (dockOutputDir: string, batchSize: number) =>
     ipcRenderer.invoke(IpcChannels.RUN_CORDIAL_SCORING, dockOutputDir, batchSize),
+
+  checkQupkakeInstalled: () => ipcRenderer.invoke(IpcChannels.CHECK_QUPKAKE_INSTALLED),
+
+  predictLigandPka: (ligandPath: string) =>
+    ipcRenderer.invoke(IpcChannels.PREDICT_LIGAND_PKA, ligandPath),
 
   // Dock event listener
   onDockOutput: (callback: (data: OutputData) => void) => {

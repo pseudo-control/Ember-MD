@@ -19,6 +19,7 @@ export type AppError =
   | { type: 'BENCHMARK_FAILED'; message: string }
   | { type: 'SIMULATION_FAILED'; message: string }
   | { type: 'CORDIAL_FAILED'; message: string }
+  | { type: 'QUPKAKE_FAILED'; message: string }
   | { type: 'FILE_WRITE_ERROR'; path: string; message: string }
   | { type: 'TRAJECTORY_READ_FAILED'; message: string }
   | { type: 'CLUSTERING_FAILED'; message: string }
@@ -80,6 +81,8 @@ export function formatError(error: AppError): string {
       return `Simulation failed: ${error.message}`;
     case 'CORDIAL_FAILED':
       return `CORDIAL scoring failed: ${error.message}`;
+    case 'QUPKAKE_FAILED':
+      return `QupKake failed: ${error.message}`;
     case 'FILE_WRITE_ERROR':
       return `File write error at ${error.path}: ${error.message}`;
     case 'TRAJECTORY_READ_FAILED':

@@ -68,7 +68,7 @@ const MDStepHome: Component = () => {
         </div>
       }>
         <div class="flex-1 flex items-center justify-center">
-          <div class="card bg-base-200 shadow-lg w-80">
+          <div class="card bg-base-200 shadow-lg w-full max-w-[34rem] mx-4">
             <div class="card-body p-5">
 
               {/* Recent projects */}

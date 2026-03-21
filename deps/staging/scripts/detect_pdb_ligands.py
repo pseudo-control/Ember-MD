@@ -426,10 +426,11 @@ def prepare_receptor(
                 )
             print(f"  Receptor preparation complete ({len(metadata.get('applied_overrides', []))} override(s))", file=sys.stderr)
         except Exception as e:
-            print(f"  WARNING: PROPKA-guided receptor preparation failed: {e}, using unprotonated receptor",
-                  file=sys.stderr)
-            import shutil
-            shutil.copy2(tmp_path, output_path)
+            print(
+                f"  ERROR: PROPKA-guided receptor preparation failed: {e}",
+                file=sys.stderr,
+            )
+            return False
         finally:
             if os.path.exists(tmp_path) and tmp_path != output_path:
                 try:

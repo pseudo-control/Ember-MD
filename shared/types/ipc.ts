@@ -175,6 +175,8 @@ export const IpcChannels = {
   // CORDIAL rescoring
   CHECK_CORDIAL_INSTALLED: 'check-cordial-installed',
   RUN_CORDIAL_SCORING: 'run-cordial-scoring',
+  CHECK_QUPKAKE_INSTALLED: 'check-qupkake-installed',
+  PREDICT_LIGAND_PKA: 'predict-ligand-pka',
 
   // Viewer channels
   PREPARE_FOR_VIEWING: 'prepare-for-viewing',
@@ -478,9 +480,36 @@ export interface PocketMapOptions {
 
 export interface SurfacePropsResult {
   atomCount: number;
-  hydrophobic: number[];    // per-atom, [-1, 1]
-  electrostatic: number[];  // Coulombic potential (epsilon=4r), [-1, 1]
+  hydrophobic: number[];    // current-structure atom field, normalized to [-1, 1]
+  electrostatic: number[];  // current-structure electrostatic potential, normalized to [-1, 1]
   cachedPath: string;       // where the JSON was stored
+}
+
+export interface LigandPkaEntry {
+  label: string;
+  pka: number;
+  type?: 'acidic' | 'basic';
+  atomIndices?: number[];
+}
+
+export interface LigandPkaResult {
+  name: string;
+  smiles?: string;
+  method: 'qupkake';
+  methodLabel: 'QupKake';
+  runtimeMs?: number;
+  entries: LigandPkaEntry[];
+}
+
+export interface QupkakeCapabilityResult {
+  available: boolean;
+  validated: boolean;
+  warning?: string;
+  message?: string;
+  pythonPath?: string;
+  xtbPath?: string;
+  qupkakeRoot?: string;
+  validationLigand?: string;
 }
 
 // === FEP scoring types ===

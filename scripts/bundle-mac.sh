@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUNDLE_DIR="$PROJECT_DIR/bundle-mac"
 CONDA_ENV="openmm-metal"
+QUPKAKE_ENV="qupkake"
 
 echo "=== OpenSBDD Mac Bundle ==="
 echo "Project: $PROJECT_DIR"
@@ -23,14 +24,24 @@ npm run build
 # Step 2: Pack conda environment
 echo "[2/5] Packing conda environment ($CONDA_ENV)..."
 CONDA_PACK_FILE="$BUNDLE_DIR/python-env.tar.gz"
+QUPKAKE_PACK_FILE="$BUNDLE_DIR/qupkake-python-env.tar.gz"
 mkdir -p "$BUNDLE_DIR"
 
 if [ ! -f "$CONDA_PACK_FILE" ]; then
-    conda run -n "$CONDA_ENV" conda-pack -n "$CONDA_ENV" -o "$CONDA_PACK_FILE" --ignore-editable-packages 2>&1 | tail -5
+    conda run -n "$CONDA_ENV" conda-pack -n "$CONDA_ENV" -o "$CONDA_PACK_FILE" --ignore-editable-packages --ignore-missing-files 2>&1 | tail -5
     echo "  Packed to $CONDA_PACK_FILE ($(du -sh "$CONDA_PACK_FILE" | cut -f1))"
 else
     echo "  Using cached pack: $CONDA_PACK_FILE ($(du -sh "$CONDA_PACK_FILE" | cut -f1))"
     echo "  (Delete $CONDA_PACK_FILE to repack)"
+fi
+
+echo "  Packing dedicated QupKake environment ($QUPKAKE_ENV)..."
+if [ ! -f "$QUPKAKE_PACK_FILE" ]; then
+    conda run -n "$QUPKAKE_ENV" conda-pack -n "$QUPKAKE_ENV" -o "$QUPKAKE_PACK_FILE" --ignore-editable-packages --ignore-missing-files 2>&1 | tail -5
+    echo "  Packed to $QUPKAKE_PACK_FILE ($(du -sh "$QUPKAKE_PACK_FILE" | cut -f1))"
+else
+    echo "  Using cached pack: $QUPKAKE_PACK_FILE ($(du -sh "$QUPKAKE_PACK_FILE" | cut -f1))"
+    echo "  (Delete $QUPKAKE_PACK_FILE to repack)"
 fi
 
 # Step 3: Prepare extraResources
@@ -39,14 +50,28 @@ EXTRA_DIR="$BUNDLE_DIR/extra-resources"
 rm -rf "$EXTRA_DIR"
 mkdir -p "$EXTRA_DIR/scripts"
 mkdir -p "$EXTRA_DIR/python"
+mkdir -p "$EXTRA_DIR/qupkake-python"
+mkdir -p "$EXTRA_DIR/qupkake-xtb"
+mkdir -p "$EXTRA_DIR/cordial"
+mkdir -p "$EXTRA_DIR/qupkake-fork"
 
 # Copy Python scripts
 cp -r "$PROJECT_DIR/deps/staging/scripts/"*.py "$EXTRA_DIR/scripts/" 2>/dev/null || true
 cp -r "$PROJECT_DIR/deps/staging/scripts/configs" "$EXTRA_DIR/scripts/configs" 2>/dev/null || true
+cp "$PROJECT_DIR/scripts/score_cordial.py" "$EXTRA_DIR/scripts/" 2>/dev/null || true
+
+# Bundle forked QupKake source if available
+if [ -d "$PROJECT_DIR/vendor/QupKake/qupkake" ]; then
+    echo "  Including forked QupKake source..."
+    rm -rf "$EXTRA_DIR/qupkake-fork"
+    mkdir -p "$EXTRA_DIR/qupkake-fork"
+    cp -R "$PROJECT_DIR/vendor/QupKake/"* "$EXTRA_DIR/qupkake-fork/"
+fi
 
 # Extract conda env
 echo "  Extracting conda env (this takes a minute)..."
 tar xzf "$CONDA_PACK_FILE" -C "$EXTRA_DIR/python"
+tar xzf "$QUPKAKE_PACK_FILE" -C "$EXTRA_DIR/qupkake-python"
 
 # Fix conda-pack prefixes
 echo "  Fixing conda-pack prefixes..."
@@ -54,7 +79,66 @@ cd "$EXTRA_DIR/python"
 if [ -f bin/conda-unpack ]; then
     bash bin/conda-unpack 2>/dev/null || true
 fi
+cd "$EXTRA_DIR/qupkake-python"
+if [ -f bin/conda-unpack ]; then
+    bash bin/conda-unpack 2>/dev/null || true
+fi
 cd "$PROJECT_DIR"
+
+# Bundle source-built xTB beside the dedicated QupKake runtime if available.
+QUPKAKE_XTB_ROOT=""
+for candidate in \
+    "${QUPKAKE_XTB_ROOT:-}" \
+    "$PROJECT_DIR/vendor/xtb-6.4.1/install-openblas" \
+    "$PROJECT_DIR/vendor/xtb-6.4.1/install" \
+    "$HOME/xtb-6.4.1/install-openblas" \
+    "$HOME/xtb-6.4.1/install"; do
+    if [ -n "$candidate" ] && [ -x "$candidate/bin/xtb" ]; then
+        QUPKAKE_XTB_ROOT="$candidate"
+        break
+    fi
+done
+
+if [ -n "$QUPKAKE_XTB_ROOT" ]; then
+    echo "  Including native xTB from $QUPKAKE_XTB_ROOT..."
+    rm -rf "$EXTRA_DIR/qupkake-xtb"
+    mkdir -p "$EXTRA_DIR/qupkake-xtb"
+    cp -R "$QUPKAKE_XTB_ROOT/bin" "$EXTRA_DIR/qupkake-xtb/"
+    cp -R "$QUPKAKE_XTB_ROOT/lib" "$EXTRA_DIR/qupkake-xtb/" 2>/dev/null || true
+    cp -R "$QUPKAKE_XTB_ROOT/share" "$EXTRA_DIR/qupkake-xtb/" 2>/dev/null || true
+elif [ -x "$EXTRA_DIR/qupkake-python/bin/xtb" ]; then
+    echo "  Falling back to xTB from the dedicated QupKake env..."
+    rm -rf "$EXTRA_DIR/qupkake-xtb"
+    mkdir -p "$EXTRA_DIR/qupkake-xtb/bin"
+    cp "$EXTRA_DIR/qupkake-python/bin/xtb" "$EXTRA_DIR/qupkake-xtb/bin/xtb"
+else
+    echo "  No xTB binary found for QupKake bundling"
+    exit 1
+fi
+
+# Bundle CORDIAL if available
+CORDIAL_SOURCE=""
+for candidate in \
+    "${CORDIAL_ROOT:-}" \
+    "$PROJECT_DIR/CORDIAL" \
+    "$HOME/CORDIAL" \
+    "$HOME/cordial" \
+    "$HOME/Desktop/CORDIAL" \
+    "$HOME/Desktop/FragGen/CORDIAL"; do
+    if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -d "$candidate/weights" ] && [ -d "$candidate/modules" ]; then
+        CORDIAL_SOURCE="$candidate"
+        break
+    fi
+done
+
+if [ -n "$CORDIAL_SOURCE" ]; then
+    echo "  Including CORDIAL from $CORDIAL_SOURCE..."
+    rm -rf "$EXTRA_DIR/cordial"
+    mkdir -p "$EXTRA_DIR/cordial"
+    cp -R "$CORDIAL_SOURCE/"* "$EXTRA_DIR/cordial/"
+else
+    echo "  CORDIAL not found locally; skipping bundled CORDIAL resources"
+fi
 
 # Copy Metal plugin dylibs if available
 METAL_BUILD="$HOME/openmm-metal-project/openmm-metal/.build-metal"

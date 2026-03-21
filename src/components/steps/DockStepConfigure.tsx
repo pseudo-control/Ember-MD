@@ -58,7 +58,7 @@ const DockStepConfigure: Component = () => {
         try {
           const canonicalSdfs = await api.listSdfInDirectory(canonicalDir);
           if (canonicalSdfs.length > 0) {
-            setCachedConformers(canonicalSdfs);
+            setCachedConformers(canonicalSdfs.map((file) => path.join(canonicalDir, file)));
             return;
           }
         } catch { /* canonical dir doesn't exist */ }
@@ -66,7 +66,7 @@ const DockStepConfigure: Component = () => {
         try {
           const legacySdfs = await api.listSdfInDirectory(legacyDir);
           if (legacySdfs.length > 0) {
-            setCachedConformers(legacySdfs);
+            setCachedConformers(legacySdfs.map((file) => path.join(legacyDir, file)));
             return;
           }
         } catch { /* legacy dir doesn't exist */ }

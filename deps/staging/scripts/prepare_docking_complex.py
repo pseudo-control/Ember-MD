@@ -317,11 +317,19 @@ def restore_heavy_atoms(
     ligand_heavy_positions: list[Point3D],
 ) -> Tuple[list[Any], Any]:
     restored = list(minimized_positions)
-    receptor_conf = []
+    receptor_conf_nm = []
     for idx, atom in enumerate(receptor_topology.atoms()):
         if atom.element is not None and atom.element.symbol != "H":
             restored[idx] = receptor_positions[idx]
-        receptor_conf.append(restored[idx])
+
+        receptor_pos_nm = restored[idx].value_in_unit(omm_unit.nanometer)
+        receptor_conf_nm.append(
+            openmm.Vec3(
+                float(receptor_pos_nm[0]),
+                float(receptor_pos_nm[1]),
+                float(receptor_pos_nm[2]),
+            )
+        )
 
     refined_mol = Chem.RWMol(ligand_mol)
     conf = refined_mol.GetConformer()
@@ -332,7 +340,7 @@ def restore_heavy_atoms(
     for atom_idx, original_pos in zip(ligand_heavy_indices, ligand_heavy_positions):
         conf.SetAtomPosition(atom_idx, original_pos)
 
-    return receptor_conf, refined_mol
+    return receptor_conf_nm * omm_unit.nanometer, refined_mol
 
 
 def heavy_atom_rmsd(mol_a: Any, mol_b: Any) -> float:

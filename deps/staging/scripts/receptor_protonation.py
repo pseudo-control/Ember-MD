@@ -314,7 +314,10 @@ def default_variant_for_residue(
     if family == "CYS":
         return "CYX" if key in disulfide_keys else "CYS"
     if family == "TYR":
-        return "TYR"
+        # Neutral tyrosine is handled by Modeller's default logic. Unlike
+        # residues such as LYS/CYS/HIS, there is no explicit "TYR" hydrogen
+        # variant token we can pass in the variants list.
+        return None
     return None
 
 

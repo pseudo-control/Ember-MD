@@ -109,7 +109,15 @@ def pdb_to_pdbqt_string(pdb_path: str) -> str:
     import warnings
 
     with open(pdb_path) as f:
-        pdb_string = f.read()
+        # PDBFixer may append OXT to truncated chain termini. In some imported
+        # crystal fragments the inferred OXT geometry is close enough to CA that
+        # RDKit/Meeko perceives an impossible extra bond and rejects the whole
+        # receptor. OXT is not required for rigid docking, so drop it here.
+        pdb_lines = [
+            line for line in f
+            if not (line.startswith(('ATOM', 'HETATM')) and line[12:16].strip() == 'OXT')
+        ]
+    pdb_string = ''.join(pdb_lines)
 
     templates = ResidueChemTemplates.create_from_defaults()
     mk_prep = MoleculePreparation()

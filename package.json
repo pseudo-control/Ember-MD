@@ -1,6 +1,6 @@
 {
   "name": "ember-md",
-  "version": "0.2.16",
+  "version": "0.2.18",
   "description": "Ember - Molecular Dynamics on Apple Silicon",
   "main": "electron-dist/electron/main.js",
   "type": "commonjs",
@@ -73,6 +73,34 @@
       {
         "from": "bundle-mac/extra-resources/scripts",
         "to": "scripts",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "bundle-mac/extra-resources/qupkake-python",
+        "to": "qupkake-python",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "bundle-mac/extra-resources/qupkake-xtb",
+        "to": "qupkake-xtb",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "bundle-mac/extra-resources/cordial",
+        "to": "cordial",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "bundle-mac/extra-resources/qupkake-fork",
+        "to": "qupkake-fork",
         "filter": [
           "**/*"
         ]

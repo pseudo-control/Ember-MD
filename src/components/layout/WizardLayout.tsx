@@ -241,14 +241,67 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     }
   };
 
+  const handleViewerHome = () => {
+    if (!state().projectReady || state().isRunning) return;
+    clearViewerSession();
+    setMode('viewer');
+  };
+
   return (
     <div class="h-screen flex flex-col bg-base-100 overflow-hidden">
       {/* Draggable title bar area for macOS traffic lights */}
       <div class="h-6 bg-base-200 flex-shrink-0" style={{ "-webkit-app-region": "drag" }} />
       {/* Header: mode tabs (left) | project + job (center) | step indicators (right) */}
       <header class="bg-base-200 border-b border-base-300 px-4 py-2 flex items-center flex-shrink-0">
-        {/* Left: Mode tabs + help/about */}
+        {/* Left: Viewer home + utilities + mode tabs */}
         <div class="flex items-center gap-3 flex-shrink-0">
+          <div class="join bg-base-300 p-0.5 rounded-lg">
+            <button
+              class="btn btn-ghost btn-sm btn-square join-item"
+              onClick={handleViewerHome}
+              disabled={!state().projectReady || state().isRunning}
+              title="Viewer Home"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3.75 9.75 12 3l8.25 6.75v9a1.5 1.5 0 0 1-1.5 1.5H14.25V14h-4.5v6.25H5.25a1.5 1.5 0 0 1-1.5-1.5v-9Z" />
+              </svg>
+            </button>
+            <button
+              class="btn btn-ghost btn-sm btn-square join-item"
+              onClick={() => setShowHelp(true)}
+              title="Help"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
+            <button
+              class="btn btn-ghost btn-sm btn-square join-item"
+              onClick={() => setShowAbout(true)}
+              title="About Ember"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
+            <button
+              class="btn btn-ghost btn-sm btn-square join-item"
+              onClick={toggleTheme}
+              title="Toggle dark mode"
+            >
+              <Show when={theme() === 'business'} fallback={
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                    d="M12 3v1m0 16v1m8.66-9h-1M4.34 12h-1m15.07-6.07-.71.71M6.34 17.66l-.71.71M17.66 17.66l.71.71M6.34 6.34l.71.71M12 5a7 7 0 100 14A7 7 0 0012 5z" />
+                </svg>
+              }>
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                    d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+                </svg>
+              </Show>
+            </button>
+          </div>
           <div class="tabs tabs-boxed bg-base-300 p-0.5">
             <button
               class={`tab tab-sm ${state().mode === 'viewer' ? 'tab-active' : ''}`}
@@ -293,41 +346,6 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
               FEP
             </button>
           </div>
-          <button
-            class="btn btn-ghost btn-xs btn-circle"
-            onClick={() => setShowHelp(true)}
-            title="Help"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </button>
-          <button
-            class="btn btn-ghost btn-xs btn-circle"
-            onClick={() => setShowAbout(true)}
-            title="About Ember"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </button>
-          <button
-            class="btn btn-ghost btn-xs btn-circle"
-            onClick={toggleTheme}
-            title="Toggle dark mode"
-          >
-            <Show when={theme() === 'business'} fallback={
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M12 3v1m0 16v1m8.66-9h-1M4.34 12h-1m15.07-6.07-.71.71M6.34 17.66l-.71.71M17.66 17.66l.71.71M6.34 6.34l.71.71M12 5a7 7 0 100 14A7 7 0 0012 5z" />
-              </svg>
-            }>
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
-              </svg>
-            </Show>
-          </button>
         </div>
 
         {/* Center: Project name + Job selector — stacked vertically */}
@@ -449,7 +467,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
             <Show when={!isLoadingProjects()} fallback={
               <span class="loading loading-spinner loading-md" />
             }>
-              <div class="card bg-base-200 shadow-lg w-96">
+              <div class="card bg-base-200 shadow-lg w-full max-w-[34rem] mx-4">
                 <div class="card-body p-6">
 
                   {/* === List view (default) === */}

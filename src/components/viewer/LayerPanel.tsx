@@ -8,15 +8,18 @@ interface LayerPanelProps {
   selectedLayerId: string | null;
   proteinCount: number;
   canClear: boolean;
+  fillHeight?: boolean;
   recentJobs: ProjectJob[];
-  selectedRecentJobId: string | null;
   isLoadingRecentJobs: boolean;
-  isLoadingSelectedJob: boolean;
-  onImportFiles: () => void;
+  loadingRecentJobId: string | null;
+  smilesInput: string;
+  isLoadingSmiles: boolean;
+  onBrowseFiles: () => void;
   onAlignAll: () => void;
   onClearAll: () => void;
-  onSelectRecentJob: (jobId: string) => void;
-  onLoadRecentJob: () => void;
+  onSmilesInput: (value: string) => void;
+  onLoadSmiles: () => void;
+  onOpenRecentJob: (jobId: string) => void;
   onToggleVisibility: (layerId: string) => void;
   onRemoveLayer: (layerId: string) => void;
   onSelectLayer: (layerId: string) => void;
@@ -118,88 +121,97 @@ const LayerPanel: Component<LayerPanelProps> = (props) => {
   };
 
   return (
-    <div class="card bg-base-200 p-2">
-      <div class="grid grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] gap-3">
-        <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-3 min-w-0">
-          <div>
-            <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55 mb-1">
-              Import Files
-            </div>
+    <div class={`card bg-base-200 p-2 flex flex-col gap-2 ${props.fillHeight ? 'h-full' : ''}`}>
+      <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-3 min-w-0 flex-1 min-h-0">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
             <p class="text-xs text-base-content/75 leading-relaxed">
-              Open structures or one trajectory from a single file picker.
+              Browse structures or a trajectory, paste a SMILES string, or reopen a recent job.
             </p>
             <div class="text-[11px] text-base-content/55 leading-relaxed mt-1">
-              <p>Structures: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`</p>
-              <p>Trajectory: `.dcd`</p>
+              <p>Browse: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`, `.dcd`</p>
             </div>
           </div>
-          <button class="btn btn-sm btn-primary w-full" onClick={props.onImportFiles}>
-            Import Files
-          </button>
-          <div class="flex gap-2">
+          <div class="flex items-center gap-2 flex-shrink-0">
             <Show when={props.proteinCount >= 2}>
-              <button class="btn btn-xs btn-accent flex-1" onClick={props.onAlignAll}>
-                Align Loaded Structures
+              <button class="btn btn-xs btn-accent" onClick={props.onAlignAll}>
+                Align
               </button>
             </Show>
             <Show when={props.canClear}>
-              <button class="btn btn-xs btn-ghost flex-1" onClick={props.onClearAll}>
-                Close Viewer
+              <button class="btn btn-xs btn-ghost" onClick={props.onClearAll}>
+                Close
               </button>
             </Show>
-          </div>
-        </div>
-        <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-2 min-w-0">
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55">
-              Recent Jobs
-            </span>
             <button
               class="btn btn-xs btn-primary"
-              onClick={props.onLoadRecentJob}
-              disabled={!props.selectedRecentJobId || props.isLoadingSelectedJob}
+              onClick={props.onBrowseFiles}
             >
-              <Show when={props.isLoadingSelectedJob} fallback={'Load'}>
-                <span class="loading loading-spinner loading-xs" />
-              </Show>
+              Browse
             </button>
           </div>
-          <Show when={!props.isLoadingRecentJobs} fallback={
-            <div class="h-40 flex items-center justify-center">
-              <span class="loading loading-spinner loading-sm text-primary" />
+        </div>
+
+        <div class="flex gap-2">
+          <input
+            type="text"
+            class="input input-sm input-bordered flex-1 font-mono text-xs"
+            placeholder="Paste SMILES..."
+            value={props.smilesInput}
+            onInput={(e) => props.onSmilesInput(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') props.onLoadSmiles(); }}
+          />
+          <button
+            class="btn btn-sm btn-accent"
+            onClick={props.onLoadSmiles}
+            disabled={!props.smilesInput.trim() || props.isLoadingSmiles}
+          >
+            <Show when={props.isLoadingSmiles} fallback={'Add'}>
+              <span class="loading loading-spinner loading-xs" />
+            </Show>
+          </button>
+        </div>
+
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55">
+          Recent Jobs
+        </div>
+
+        <Show when={!props.isLoadingRecentJobs} fallback={
+          <div class="flex-1 min-h-[12rem] flex items-center justify-center">
+            <span class="loading loading-spinner loading-sm text-primary" />
+          </div>
+        }>
+          <Show when={props.recentJobs.length > 0} fallback={
+            <div class="flex-1 min-h-[12rem] flex items-center justify-center text-xs text-base-content/55 text-center">
+              No recent jobs in this project yet.
             </div>
           }>
-            <Show when={props.recentJobs.length > 0} fallback={
-              <div class="h-40 flex items-center justify-center text-xs text-base-content/55 text-center">
-                No recent jobs in this project.
-              </div>
-            }>
-              <div class="h-40 overflow-y-auto rounded border border-base-300 divide-y divide-base-300">
-                <For each={props.recentJobs}>
-                  {(job) => (
-                    <button
-                      class={`w-full px-2 py-2 text-left hover:bg-base-200 ${
-                        props.selectedRecentJobId === job.id ? 'bg-primary/15' : ''
-                      }`}
-                      onClick={() => props.onSelectRecentJob(job.id)}
-                    >
-                      <div class="flex items-center gap-2">
-                        <span class="badge badge-ghost badge-xs">{jobTypeLabel(job)}</span>
-                        <span class="text-xs font-medium truncate flex-1">{job.label}</span>
-                      </div>
-                      <div class="text-[10px] text-base-content/55 mt-1 truncate">{job.path}</div>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
+            <div class="flex-1 min-h-[12rem] overflow-y-auto rounded border border-base-300 divide-y divide-base-300">
+              <For each={props.recentJobs}>
+                {(job) => (
+                  <button
+                    class="w-full px-3 py-2.5 text-left hover:bg-base-200 disabled:opacity-70"
+                    onClick={() => props.onOpenRecentJob(job.id)}
+                    disabled={!!props.loadingRecentJobId}
+                  >
+                    <div class="flex items-center gap-2">
+                      <span class="badge badge-ghost badge-xs">{jobTypeLabel(job)}</span>
+                      <span class="text-xs font-medium truncate flex-1">{job.label}</span>
+                      <Show when={props.loadingRecentJobId === job.id}>
+                        <span class="loading loading-spinner loading-xs text-primary" />
+                      </Show>
+                    </div>
+                    <div class="text-[10px] text-base-content/55 mt-1 truncate">{job.path}</div>
+                  </button>
+                )}
+              </For>
+            </div>
           </Show>
-        </div>
+        </Show>
       </div>
 
-      {/* Layer list */}
       <Show when={props.layers.length > 0 || props.layerGroups.length > 0}>
-        <div class="mt-2 border border-base-300 rounded divide-y divide-base-300 max-h-48 overflow-y-auto">
+        <div class="border border-base-300 rounded divide-y divide-base-300 max-h-48 overflow-y-auto">
           {/* Groups */}
           <For each={props.layerGroups}>
             {(group) => {

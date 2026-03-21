@@ -66,8 +66,8 @@ class BindingSiteHotspot(TypedDict):
 class SurfacePropsResult(TypedDict):
     """Per-atom surface properties. Matches shared/types/ipc.ts SurfacePropsResult."""
     atomCount: int
-    hydrophobic: List[float]     # per-atom, [-1, 1]
-    electrostatic: List[float]   # per-atom, [-1, 1]
+    hydrophobic: List[float]     # current-structure atom field, [-1, 1]
+    electrostatic: List[float]   # current-structure electrostatic field, [-1, 1]
 
 
 class SingleMoleculeResult(TypedDict, total=False):

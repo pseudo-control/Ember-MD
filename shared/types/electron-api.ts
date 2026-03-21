@@ -43,6 +43,8 @@ import type {
   RunFilesResult,
   BindingSiteMapOptions,
   BindingSiteMapResult,
+  LigandPkaResult,
+  QupkakeCapabilityResult,
   PocketMapOptions,
   SurfacePropsResult,
   FepScoringOptions,
@@ -202,6 +204,8 @@ export interface ElectronAPI {
     dockOutputDir: string,
     batchSize: number
   ) => Promise<Result<{ scoresFile: string; count: number }, AppError>>;
+  checkQupkakeInstalled: () => Promise<QupkakeCapabilityResult>;
+  predictLigandPka: (ligandPath: string) => Promise<Result<LigandPkaResult, AppError>>;
 
   // Dock event listener
   onDockOutput: (callback: (data: OutputData) => void) => () => void;

@@ -20,10 +20,34 @@ import tempfile
 import csv
 from pathlib import Path
 
+# CORDIAL imports can pull in multiple OpenMP-linked libraries in the same
+# Python process on macOS/conda. Keep this subprocess single-threaded and allow
+# duplicate libomp initialization so rescoring can proceed.
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '1')
+
 def setup_cordial_path(cordial_root):
     """Add CORDIAL to Python path."""
     if cordial_root not in sys.path:
         sys.path.insert(0, cordial_root)
+
+
+def prepare_receptor_for_scoring(receptor_pdb: Path, temp_dir: str) -> Path:
+    """Write a CORDIAL/RDKit-friendly receptor copy for feature generation."""
+    sanitized_path = Path(temp_dir) / f'{receptor_pdb.stem}_cordial.pdb'
+    with receptor_pdb.open('r') as src, sanitized_path.open('w') as dst:
+        for line in src:
+            # PDBFixer can add OXT to truncated crystal fragments. RDKit-based
+            # parsers in Meeko/CORDIAL may then infer an impossible CA-OXT bond.
+            # OXT is not needed for docking rescoring features.
+            if line.startswith(('ATOM', 'HETATM')) and line[12:16].strip() == 'OXT':
+                continue
+            dst.write(line)
+    return sanitized_path
 
 def main():
     parser = argparse.ArgumentParser(description='Score docked poses with CORDIAL')
@@ -49,19 +73,20 @@ def main():
 
     dock_dir = Path(args.dock_dir)
 
-    # Find receptor PDB: inputs/receptor.pdb (new) or *_receptor_prepared.pdb (legacy)
-    new_receptor = dock_dir / 'inputs' / 'receptor.pdb'
-    if new_receptor.exists():
-        receptor_pdb = new_receptor
-    else:
-        receptor_candidates = list(dock_dir.glob('*_receptor_prepared.pdb')) + list(dock_dir.glob('*_receptor*.pdb'))
-        if not receptor_candidates:
-            receptor_pdb = dock_dir / 'receptor_prepared.pdb'
-            if not receptor_pdb.exists():
-                print(f"Error: No receptor PDB found in {dock_dir}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            receptor_pdb = receptor_candidates[0]
+    # Prefer the prepared-complex receptor actually used for docking/refinement,
+    # then fall back to the canonical input receptor and older layouts.
+    receptor_candidates = [
+        dock_dir / 'prep' / 'complex' / 'receptor_refined.pdb',
+        dock_dir / 'prep' / 'canonical_receptor.pdb',
+        dock_dir / 'inputs' / 'receptor.pdb',
+        dock_dir / 'receptor_prepared.pdb',
+    ]
+    receptor_candidates.extend(dock_dir.glob('*_receptor_prepared.pdb'))
+    receptor_candidates.extend(dock_dir.glob('*_receptor*.pdb'))
+    receptor_pdb = next((candidate for candidate in receptor_candidates if candidate.exists()), None)
+    if receptor_pdb is None:
+        print(f"Error: No receptor PDB found in {dock_dir}", file=sys.stderr)
+        sys.exit(1)
 
     # Find docked SDF files: results/poses/ (new) > poses/ (legacy) > top-level
     new_poses_dir = dock_dir / 'results' / 'poses'
@@ -83,11 +108,13 @@ def main():
         print(f"Error: No docked SDF files found in {dock_dir}", file=sys.stderr)
         sys.exit(1)
 
+    # Extract all poses to temporary SDF files and create pair file
+    temp_dir = tempfile.mkdtemp(prefix='cordial_')
+    receptor_pdb = prepare_receptor_for_scoring(receptor_pdb, temp_dir)
+
     print(f"Found receptor: {receptor_pdb}")
     print(f"Found {len(docked_sdfs)} docked SDF files")
 
-    # Extract all poses to temporary SDF files and create pair file
-    temp_dir = tempfile.mkdtemp(prefix='cordial_')
     pair_file_path = os.path.join(temp_dir, 'pairs.csv')
     pose_metadata = []  # Track which pose came from which file
 
