@@ -15,8 +15,10 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
-from prepare_receptor import prepare_receptor as unified_prepare
-from receptor_protonation import identify_pocket_residue_keys_from_pdb
+from receptor_protonation import (
+    identify_pocket_residue_keys_from_pdb,
+    prepare_receptor_with_propka,
+)
 from utils import convert_cif_to_pdb
 
 # Common non-ligand HETATM residues to exclude
@@ -393,22 +395,19 @@ def prepare_receptor(
     if kept_metals:
         print(f"  Keeping {kept_metals} metal ion atoms in receptor", file=sys.stderr)
 
-    # Protein preparation pipeline (unified):
+    # Protein preparation pipeline:
     # 1. Reduce: optimize Asn/Gln/His orientations (flip ambiguous residues)
     # 2. PROPKA: detect shifted pocket-adjacent titratable residues
-    # 3. PDBFixer: chain break detection/splitting + add missing atoms
-    # 4. Sanitize positions (fix PDBFixer nested-Quantity bug)
-    # 5. Modeller.addHydrogens(..., variants=...) for explicit residue states
+    # 3. PDBFixer: add missing atoms
+    # 4. Modeller.addHydrogens(..., variants=...) for explicit residue states
     if add_hydrogens:
         try:
             print(f"  Pocket residues considered for PROPKA overrides: {len(pocket_residue_keys)}", file=sys.stderr)
-            _, metadata = unified_prepare(
+            metadata = prepare_receptor_with_propka(
                 tmp_path,
-                output_dir=os.path.dirname(output_path),
-                ph=protonation_ph,
+                output_path,
+                protonation_ph,
                 pocket_residue_keys=pocket_residue_keys,
-                output_path=output_path,
-                handle_chain_breaks=False,
             )
             print(f"  Receptor protonation pH: {protonation_ph:.1f}", file=sys.stderr)
             print(f"  PROPKA available: {'yes' if metadata.get('propka_available') else 'no'}", file=sys.stderr)
@@ -518,12 +517,7 @@ def main() -> None:
         try:
             print(f"  Adding hydrogens with Modeller variants at pH {args.ph:.1f}...", file=sys.stderr)
             os.makedirs(os.path.dirname(args.output), exist_ok=True)
-            _, metadata = unified_prepare(
-                args.pdb,
-                output_dir=os.path.dirname(args.output),
-                ph=args.ph,
-                output_path=args.output,
-            )
+            metadata = prepare_receptor_with_propka(args.pdb, args.output, args.ph, pocket_residue_keys=None)
             print(
                 f"  Prepared structure saved to {args.output} "
                 f"({len(metadata.get('applied_overrides', []))} override(s))",
