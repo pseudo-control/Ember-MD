@@ -113,13 +113,15 @@ Single core function: `receptor_protonation.py::prepare_receptor_with_propka()`.
 **Pocket refinement** (`prepare_docking_complex.py`): `createSystem` uses try/fallback — normal first, then `ignoreExternalBonds=True` + CYS/CYX resolution by atom content (HG present → CYS, absent → CYX).
 
 ## MCMM Mode
-Standalone conformer generation is exposed in the UI as **MCMM**. Internally the workflow state is still named `conform`, but user-facing docs and tabs should call this MCMM mode. Three conformer generation methods:
+Standalone conformer generation exposed as **MCMM** tab. Internally the workflow state is `conform`. Three methods:
 
-- **ETKDG**: Fast RDKit distance geometry
+- **ETKDG**: Fast RDKit distance geometry (seconds)
 - **MCMM**: Monte Carlo Multiple Minimum with Sage 2.3.0 + OBC2 implicit solvent (default: 50 max conformers, 1.0 A RMSD cutoff, 5.0 kcal/mol energy window, 1000 steps, 298 K, amide cis/trans sampling)
-- **CREST**: GFN2-xTB metadynamics via external `crest` binary (conda). Most thorough — uses biased sampling to escape local minima, ranks at semiempirical QM level with ALPB solvation
+- **CREST**: GFN2-xTB metadynamics via `crest` 2.12 binary (conda-forge). Uses `--gfn2 --alpb water --chrg <formal_charge>`. Most thorough — biased sampling escapes local minima. ~6 min for a 21-atom molecule. CREST 3.x does NOT work (tblite crash on arm64); use 2.12.
 
-Optional **xTB reranking** toggle re-ranks ETKDG/MCMM conformers by GFN2-xTB single-point energy (parallelized via ThreadPoolExecutor). CREST conformers are already xTB-ranked so this is skipped for CREST.
+Optional **xTB reranking** re-ranks ETKDG/MCMM conformers by GFN2-xTB single-point energy. Skipped for CREST (already xTB-ranked). Validated: methylcyclohexane equatorial/axial split = 1.68 kcal/mol (xTB rerank) vs 1.53 (CREST) vs ~1.8 (textbook).
+
+**Energies**: All methods output relative kcal/mol (normalized to global minimum). Displayed in results table with method label. Energies flow: Python SDF property → JSON `conformer_energies` → store → UI.
 
 ## Removed Features (recoverable from git v0.2.18)
 - **Map Mode** (GIST water map): `MapMode.tsx`, `analyze_gist.py`, `BindingSiteMapPanel.tsx`. GIST water thermodynamics via cpptraj.
@@ -127,23 +129,18 @@ Optional **xTB reranking** toggle re-ranks ETKDG/MCMM conformers by GFN2-xTB sin
 - **Viewer SCORE button**: `ScoringPanel.tsx`. Single-complex Vina + xTB scoring in the viewer.
 
 ## View Mode
-NGL viewer with queue navigation for docking poses or cluster centroids. Trajectory playback updates coordinates in place after the first frame instead of reparsing PDBs. Supports clustering, RMSD/RMSF/H-bond/contact analysis, binding-site maps, surface coloring, and multi-structure layer alignment.
-
-**Scoring panel**: "SCORE" floating button appears when both protein and ligand are loaded. Runs Vina rescore + xTB strain energy in parallel via `SCORE_COMPLEX` IPC handler. Displays results in `ScoringPanel.tsx` overlay.
+NGL viewer with queue navigation for docking poses or cluster centroids. Trajectory playback updates coordinates in place after the first frame instead of reparsing PDBs. Supports clustering, RMSD/RMSF/H-bond/contact analysis, surface coloring, and multi-structure layer alignment. Import/Recent Jobs segmented control when no structure loaded.
 
 ## xTB (GFN2-xTB)
 GFN2-xTB 6.7.1 is vendored at `vendor/xtb-env/bin/xtb` (conda env, arm64). Detected at runtime by `getQupkakeXtbPath()` in main.ts. Used for:
-- **MD cluster scoring**: xTB strain energy = E(pose) - E(free minimum) per cluster centroid
-- **Docking strain filter**: batch strain scoring of all docked poses in a single Python invocation
 - **Conformer reranking**: re-rank ETKDG/MCMM conformers by xTB single-point energy
 - **CREST**: xTB serves as the energy function for CREST metadynamics conformer search
-- **Ligand pre-optimization**: optional geometry optimization before docking
-- **Viewer scoring**: single-complex strain energy from the SCORE button
+- **MD cluster scoring**: xTB strain energy per cluster centroid
 - **QupKake pKa**: GFN2-xTB features for neural-network pKa prediction
 
-`score_xtb_strain.py` is the standalone CLI utility. Modes: `single_point`, `optimize`, `strain`, `batch_strain`. Uses ALPB water solvation. Output parsed by main.ts via `XTB_SP_ENERGY:`, `XTB_OPT_ENERGY:`, `XTB_STRAIN:`, `BATCH_STRAIN_JSON:` stdout lines.
+xTB docking strain filter and viewer SCORE button removed from UI (strain methodology unsound — uses local minimum, not CREST global minimum). `score_xtb_strain.py` still exists for future CREST-based strain.
 
-**Note**: xTB 6.4.1 (still at `vendor/xtb-6.4.1/`) has a bug where geometry optimization + ALPB solvation fails with SCF convergence errors. Always prefer the 6.7.1 binary.
+**Note**: xTB 6.4.1 (still at `vendor/xtb-6.4.1/`) has ALPB solvation bugs. Always use 6.7.1. CREST must be 2.12 (3.x crashes on arm64).
 
 ## Logging
 `~/Ember/logs/ember-<timestamp>.log` captures main-process and renderer console output. Tags commonly include `[Viewer]`, `[Dock]`, `[MD]`, `[FEP]`, `[Score]`, `[Nav]`, and `[Store]`.
