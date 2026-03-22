@@ -127,7 +127,7 @@ def _prepare_receptor_topology(receptor_pdb: str) -> Tuple[Any, Any, Dict[str, A
                 report.update(json.load(f))
             return pdb.topology, pdb.positions, report
 
-        _, prep_report = prepare_receptor(receptor_pdb, output_dir=output_dir)
+        _, prep_report = prepare_receptor(receptor_pdb, output_dir=output_dir, handle_chain_breaks=False)
         report.update(prep_report)
         pdb = PDBFile(prepared_pdb_path)
         return pdb.topology, pdb.positions, report
@@ -221,6 +221,35 @@ def _preflight_receptor_topology(prepared_topology: Any, prepared_positions: Any
         )
     except Exception as exc:
         print(f'  Preflight warning (non-fatal): {exc}', file=sys.stderr)
+
+
+def _patch_forcefield_for_chain_breaks(ff: Any) -> None:
+    """Monkey-patch ForceField.createSystem to auto-fallback with ignoreExternalBonds.
+
+    Chain-break receptors have terminal residues with bond mismatches.
+    This patches createSystem so that addSolvent, addExtraParticles fallbacks,
+    and direct createSystem calls all tolerate these mismatches.
+    """
+    original_createSystem = ff.createSystem
+
+    def _patched_createSystem(topology, **kwargs):
+        try:
+            return original_createSystem(topology, **kwargs)
+        except Exception:
+            if kwargs.get('ignoreExternalBonds'):
+                raise  # Already tried, don't loop
+            cys_templates = {}
+            for res in topology.residues():
+                if res.name in ('CYS', 'CYX', 'CYM'):
+                    atom_names = {a.name for a in res.atoms()}
+                    cys_templates[res] = 'CYS' if 'HG' in atom_names else 'CYX'
+            rt = kwargs.pop('residueTemplates', {})
+            rt.update(cys_templates)
+            return original_createSystem(
+                topology, ignoreExternalBonds=True, residueTemplates=rt, **kwargs
+            )
+
+    ff.createSystem = _patched_createSystem
 
 
 def _estimate_am1bcc_time(n_atoms: int) -> str:
@@ -628,6 +657,8 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
 
     smirnoff = SMIRNOFFTemplateGenerator(molecules=[ligand], forcefield='openff-2.3.0')
     ff.registerTemplateGenerator(smirnoff.generator)
+    # Patch createSystem to tolerate chain-break bond mismatches (e.g. terminal GLU)
+    _patch_forcefield_for_chain_breaks(ff)
     print('Ligand FF: OpenFF Sage 2.3.0', file=sys.stderr)
     print('PROGRESS:building:40', flush=True)
 
@@ -698,30 +729,14 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
     # HMR (Hydrogen Mass Repartitioning) allows 4fs timestep for faster production
     # Equilibration uses 2fs for stability, production uses 4fs
     print('Creating OpenMM system with HMR...', file=sys.stderr)
-    create_system_kwargs = dict(
+    system = ff.createSystem(
+        modeller.topology,
         nonbondedMethod=PME,
         nonbondedCutoff=1.0*nanometers,
         ewaldErrorTolerance=0.0005,  # Explicit for reproducibility
         constraints=HBonds,
         hydrogenMass=1.5*amu  # HMR for 4fs timestep in production
     )
-    try:
-        system = ff.createSystem(modeller.topology, **create_system_kwargs)
-    except Exception:
-        # Chain-break residues may have bond mismatches — fall back to
-        # ignoreExternalBonds with CYS/CYX atom-based resolution
-        print('  createSystem failed — retrying with ignoreExternalBonds=True', file=sys.stderr)
-        cys_templates = {}
-        for res in modeller.topology.residues():
-            if res.name in ('CYS', 'CYX', 'CYM'):
-                atom_names = {a.name for a in res.atoms()}
-                cys_templates[res] = 'CYS' if 'HG' in atom_names else 'CYX'
-        system = ff.createSystem(
-            modeller.topology,
-            **create_system_kwargs,
-            ignoreExternalBonds=True,
-            residueTemplates=cys_templates,
-        )
 
     print('PROGRESS:building:100', flush=True)
     print(f'System built: {atom_count} atoms, {volume_A3:.0f} A^3', file=sys.stderr)
