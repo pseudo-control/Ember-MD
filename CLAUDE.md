@@ -1,6 +1,6 @@
 # Ember
 
-Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. Primary user-facing tabs: **View** (NGL 3D viewer), **MCMM** (standalone conformer generation), **Dock** (AutoDock Vina), **Map** (GIST water map), and **Simulate** (OpenMM AMBER MD). The codebase also contains an **FEP** scoring panel, but its header tab is currently disabled.
+Desktop app for GPU-accelerated molecular dynamics on Apple Silicon. User-facing tabs: **View** (NGL 3D viewer), **MCMM** (standalone conformer generation), **Dock** (AutoDock Vina), and **Simulate** (OpenMM AMBER MD). FEP scoring and GIST water map code exist in the codebase but are removed from the UI (recoverable from git v0.2.18).
 
 **Repos**: `pseudo-control/Ember-MD` (this repo), `pseudo-control/Ember-Metal` (native Metal GPU backend, separate repo)
 **Stale docs**: `README.md` and `deps/README.md` still reference FragGen/GNINA/Linux — use this file instead.
@@ -31,11 +31,11 @@ npm run dist:mac        # Bundle .dmg via scripts/bundle-mac.sh (conda-pack → 
 ```
 /electron/main.ts          — IPC handlers, subprocess management, logging, path resolution
 /electron/preload.ts       — Context bridge (inlined channel names)
-/src/App.tsx               — Root: ViewerMode always mounted (CSS-hidden); routes View, MCMM, Dock, Map, MD, and FEP panel
+/src/App.tsx               — Root: ViewerMode always mounted (CSS-hidden); routes View, MCMM, Dock, MD
 /src/stores/workflow.ts    — SolidJS signals (WorkflowState, MDState, DockState, ViewerState, MapState, ConformState)
 /src/utils/projectPaths.ts — Project directory layout (DockingPaths, SimulationPaths, conformers path)
 /src/utils/jobName.ts      — Job name generation + folder naming
-/src/components/layout/WizardLayout.tsx — Header: View | MCMM | Dock | Map | Simulate | FEP(disabled), project+job selector, step indicators
+/src/components/layout/WizardLayout.tsx — Header: View | MCMM | Dock | Simulate, project+job selector, step indicators
 /src/components/steps/     — DockStep{Load,Configure,Progress,Results}, MDStep{Load,Configure,Progress,Results}, ConformStep{Load,Configure,Progress,Results}
 /src/components/viewer/    — ViewerMode, TrajectoryControls, ClusteringModal, AnalysisPanel, FepScoringPanel, ScoringPanel, LayerPanel, BindingSiteMapPanel
 /src/components/map/       — MapMode (GIST water map — solvation method only)
@@ -78,7 +78,7 @@ Each project lives under `~/Ember/{projectName}/`. Defined in `src/utils/project
 **Path API**: `projectPaths(baseDir, name).docking(run)` returns `{ root, inputs, inputsLigands, prep, results, resultsPoses }`. `.simulations(run)` returns `{ root, inputs, results, analysis, analysisClustering }`. `.conformers(run)` returns the standalone conformer output directory.
 
 ## Header UI
-Three-zone layout: mode tabs on the left, project name + job selector in the center, step indicators on the right. The visible tabs are `View`, `MCMM`, `Dock`, `Map`, `Simulate`, and a disabled `FEP` tab labeled "coming soon". The job selector currently groups jobs under docking and simulation.
+Three-zone layout: mode tabs on the left, project name + job selector in the center, step indicators on the right. Tabs: `View`, `MCMM`, `Dock`, `Simulate`.
 
 ## Simulate Mode
 **Equilibration**: AMBER-style restrained minimization → graduated minimization → NVT heating 5→100 K → NPT heating 100→300 K → restrained NPT → gradual restraint release → unrestrained NPT → production with HMR. Shared type metadata currently treats equilibration as roughly 270 ps.
@@ -96,34 +96,29 @@ Pipeline: receptor prep (Meeko Polymer) → ligand PDBQT prep (Meeko) → autobo
 
 **Receptor prep**: removes the docking ligand and common crystallization artifacts, keeps nearby crystallographic waters, metal ions, and relevant cofactors near the binding site. Metals are re-injected into PDBQT after Meeko processing with explicit AD4 atom types and charges.
 
-**xTB strain filter**: Optional post-docking step (`xtbConfig.strainFilter`). Computes GFN2-xTB strain energy per pose via batch mode (`score_xtb_strain.py --mode batch_strain`). Results in `results/xtb_strain.json`. Displayed as "Strain" column in DockStepResults (yellow >5 kcal/mol, red >8).
+**xTB strain filter**: Optional post-docking step (`xtbConfig.strainFilter`). Computes GFN2-xTB strain energy per pose via batch mode (`score_xtb_strain.py --mode batch_strain`). Uses per-molecule SMILES-keyed reference energies (each unique molecule gets its own optimized free minimum). Results in `results/xtb_strain.json`. Displayed as "Strain" column in DockStepResults (yellow >5 kcal/mol, red >8).
 
 **xTB pre-optimization**: Optional pre-docking step (`xtbConfig.preOptimize`). Optimizes ligand geometry with GFN2-xTB before Meeko PDBQT conversion.
 
 ## Receptor Preparation (Unified)
-`prepare_receptor.py` is the single entry point for all structural receptor preparation. Both docking (via `detect_pdb_ligands.py`) and MD (via `run_md_simulation.py`) call it to produce a fully fixed and protonated receptor.
+Single core function: `receptor_protonation.py::prepare_receptor_with_propka()`. Accepts optional `fixer=` kwarg for pre-modified PDBFixer (MD path with chain breaks).
 
-**Pipeline:**
-1. CIF → PDB conversion (if needed)
-2. Reduce side-chain flip optimization (Asn/Gln/His)
-3. PROPKA shifted-residue detection (pocket-filtered)
-4. PDBFixer: `findMissingResidues` → chain break detection/splitting → filter internal gaps → `findMissingAtoms` → `addMissingAtoms`
-5. Sanitize positions (fix PDBFixer nested-Quantity bug that caused `AssertionError` in `addHydrogens`)
-6. Build protonation variant plan (disulfides, PROPKA overrides, histidine tautomers)
-7. `Modeller.addHydrogens` with explicit variant list
-
-**CLI:** `python prepare_receptor.py --input <pdb|cif> --output_dir <dir> [--ph 7.4] [--pocket_ligand_sdf <sdf>]`
-
-**Output:** `receptor_prepared.pdb` + `receptor_prepared.prep.json` (schema_version 2, includes chain break info, protonation variants, PROPKA overrides).
-
-**Library usage:** `from prepare_receptor import prepare_receptor` — also accepts `pocket_residue_keys` (pre-computed `Set[str]`) and `output_path` (custom output filename).
+**Core pipeline** (Reduce → PROPKA → PDBFixer → protonation → write PDB):
+1. Reduce side-chain flip optimization (Asn/Gln/His)
+2. PROPKA shifted-residue detection (pocket-filtered)
+3. PDBFixer: `findMissingResidues` → `findMissingAtoms` → `addMissingAtoms`
+4. `_sanitize_positions` (only in external fixer/MD path — NOT safe to call in self-contained path as it changes Quantity representation)
+5. Build protonation variant plan (disulfides, PROPKA overrides, histidine tautomers)
+6. `Modeller.addHydrogens` with explicit variant list (internal `_sanitize_positions` as safety net)
 
 **How it's called:**
-- **Docking**: `detect_pdb_ligands.py::prepare_receptor()` strips the docking ligand, then calls `unified_prepare()` with pocket residue keys from the stripped ligand
-- **MD**: `run_md_simulation.py::_prepare_receptor_topology()` checks for existing `receptor_prepared.pdb`; if absent, calls `prepare_receptor()` inline
-- **Standalone**: CLI entry point for manual preparation
+- **Docking**: `detect_pdb_ligands.py` calls `prepare_receptor_with_propka()` directly (self-contained, no kwargs)
+- **MD**: `prepare_receptor.py::prepare_receptor()` adds CIF conversion + chain break handling, then delegates to `prepare_receptor_with_propka(fixer=...)` for protonation
+- **MD caller**: `run_md_simulation.py::_prepare_receptor_topology()` checks for existing `receptor_prepared.pdb`; if absent, calls `prepare_receptor()`
 
-**Key functions extracted from `run_md_simulation.py`:** `_detect_chain_breaks`, `_build_split_topology`, `_remap_missing_residues`, `_ensure_positive_unit_cell`, `ensure_pdb_format`. These now live in `prepare_receptor.py` and are imported by `run_md_simulation.py` (`ensure_pdb_format`).
+**Chain break helpers** (in `prepare_receptor.py`, MD-only): `_detect_chain_breaks`, `_build_split_topology`, `_remap_missing_residues`, `_ensure_positive_unit_cell`, `ensure_pdb_format`.
+
+**Pocket refinement** (`prepare_docking_complex.py`): `createSystem` uses try/fallback — normal first, then `ignoreExternalBonds=True` + CYS/CYX resolution by atom content (HG present → CYS, absent → CYX) for chain-break receptors.
 
 ## MCMM Mode
 Standalone conformer generation is exposed in the UI as **MCMM**. Internally the workflow state is still named `conform`, but user-facing docs and tabs should call this MCMM mode. Three conformer generation methods:
@@ -134,16 +129,10 @@ Standalone conformer generation is exposed in the UI as **MCMM**. Internally the
 
 Optional **xTB reranking** toggle re-ranks ETKDG/MCMM conformers by GFN2-xTB single-point energy (parallelized via ThreadPoolExecutor). CREST conformers are already xTB-ranked so this is skipped for CREST.
 
-## Map Mode
-Water thermodynamics analysis using **GIST** (Grid Inhomogeneous Solvation Theory) via cpptraj from AmberTools. Computes solute-water energy, water-water energy, and translational/orientational entropy on a 3D grid around the binding site. Decomposes into three pharmacophore channels:
-- **Hydrophobic** (green) — regions where displacing water gains free energy
-- **H-bond donor** (blue) — ligand donor binding opportunities
-- **H-bond acceptor** (red) — ligand acceptor binding opportunities
-
-Output: 3 OpenDX files + hotspot JSON with clustered expansion vectors. Requires an MD trajectory (auto-launches a short 2-5 ns simulation if none loaded). Results saved to `surfaces/pocket_map_solvation/`.
-
-## FEP Panel
-`FepScoringPanel` and `run_abfe.py` are present in the codebase, and `state().mode === 'score'` renders the panel. In the current header UI the `FEP` tab is disabled, so this is implemented but not exposed as a normal selectable tab.
+## Removed Features (recoverable from git v0.2.18)
+- **Map Mode** (GIST water map): `MapMode.tsx`, `analyze_gist.py`, `BindingSiteMapPanel.tsx`. GIST water thermodynamics via cpptraj.
+- **FEP Panel**: `FepScoringPanel.tsx`, `run_abfe.py`. ABFE free energy scoring.
+- **Viewer SCORE button**: `ScoringPanel.tsx`. Single-complex Vina + xTB scoring in the viewer.
 
 ## View Mode
 NGL viewer with queue navigation for docking poses or cluster centroids. Trajectory playback updates coordinates in place after the first frame instead of reparsing PDBs. Supports clustering, RMSD/RMSF/H-bond/contact analysis, binding-site maps, surface coloring, and multi-structure layer alignment.
@@ -204,8 +193,9 @@ Native Metal backend work lives in the separate `pseudo-control/Ember-Metal` rep
 - macOS only in practice for the current app workflow
 - App is unsigned, so launch from `/Applications` or Spotlight rather than Launchpad
 - `run_md_simulation.py` exists both at repo root and in `deps/staging/scripts/`; the staging copy is canonical for the app
-- The header `FEP` tab is disabled even though the scoring panel exists in code
 - CREST requires separate `crest` binary installation (`conda install -c conda-forge crest`)
+- `_sanitize_positions()` must NOT be called in the self-contained docking receptor prep path — it changes OpenMM Quantity representation and breaks Sage force field template matching downstream
+- `prepare_docking_complex.py` uses a try/fallback for `createSystem` to handle chain-break receptors (ignoreExternalBonds + CYS/CYX atom-based resolution)
 
 ## License
 MIT. GPL-licensed scientific tools are invoked as separate processes. Meeko and Molscrub are Apache-2.0.
