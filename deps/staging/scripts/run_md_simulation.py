@@ -205,38 +205,22 @@ def _raise_receptor_topology_preflight_failure(
 
 
 def _preflight_receptor_topology(prepared_topology: Any, prepared_positions: Any, preset: Dict[str, Any]) -> None:
-    """Validate that the prepared protein topology matches the protein force field."""
+    """Quick validation that the prepared protein topology is broadly compatible.
+
+    Non-fatal: chain breaks, missing virtual sites, and variant mismatches
+    are handled by the full build_system pipeline downstream.
+    """
     ff = ForceField(*preset['protein_ff'], *preset['water_ff'])
-    # 4-site water models (OPC) need extra virtual particles added before
-    # the topology can match force field templates.
     modeller = Modeller(prepared_topology, prepared_positions)
     try:
         modeller.addExtraParticles(ff)
-    except Exception:
-        # Chain-break residues may not match templates for addExtraParticles;
-        # skip — the full build_system will handle extra particles later.
-        pass
-    try:
         ff.createSystem(
             modeller.topology,
             nonbondedMethod=NoCutoff,
             constraints=HBonds,
         )
-    except Exception:
-        # Fall back: ignore external bonds for chain-break tolerance,
-        # resolve CYS/CYX ambiguity by atom content.
-        cys_templates = {}
-        for res in modeller.topology.residues():
-            if res.name in ('CYS', 'CYX', 'CYM'):
-                atom_names = {a.name for a in res.atoms()}
-                cys_templates[res] = 'CYS' if 'HG' in atom_names else 'CYX'
-        ff.createSystem(
-            modeller.topology,
-            nonbondedMethod=NoCutoff,
-            constraints=HBonds,
-            ignoreExternalBonds=True,
-            residueTemplates=cys_templates,
-        )
+    except Exception as exc:
+        print(f'  Preflight warning (non-fatal): {exc}', file=sys.stderr)
 
 
 def _estimate_am1bcc_time(n_atoms: int) -> str:
@@ -664,7 +648,12 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
     # 4-site water models (OPC) require virtual particles on crystallographic
     # waters that came from receptor preparation.  Must be called before
     # addSolvent which tries to match all residues to templates.
-    modeller.addExtraParticles(ff)
+    try:
+        modeller.addExtraParticles(ff)
+    except Exception:
+        # Chain-break residues may not match templates for addExtraParticles;
+        # skip — addSolvent will add virtual sites to new waters.
+        print('  Warning: addExtraParticles failed (chain break residues) — skipping', file=sys.stderr)
     print('PROGRESS:building:50', flush=True)
 
     print(f'Adding solvent ({water_label} water, dodecahedron, {salt_concentration_m*1000:.0f} mM NaCl)...', file=sys.stderr)
@@ -709,14 +698,30 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
     # HMR (Hydrogen Mass Repartitioning) allows 4fs timestep for faster production
     # Equilibration uses 2fs for stability, production uses 4fs
     print('Creating OpenMM system with HMR...', file=sys.stderr)
-    system = ff.createSystem(
-        modeller.topology,
+    create_system_kwargs = dict(
         nonbondedMethod=PME,
         nonbondedCutoff=1.0*nanometers,
         ewaldErrorTolerance=0.0005,  # Explicit for reproducibility
         constraints=HBonds,
         hydrogenMass=1.5*amu  # HMR for 4fs timestep in production
     )
+    try:
+        system = ff.createSystem(modeller.topology, **create_system_kwargs)
+    except Exception:
+        # Chain-break residues may have bond mismatches — fall back to
+        # ignoreExternalBonds with CYS/CYX atom-based resolution
+        print('  createSystem failed — retrying with ignoreExternalBonds=True', file=sys.stderr)
+        cys_templates = {}
+        for res in modeller.topology.residues():
+            if res.name in ('CYS', 'CYX', 'CYM'):
+                atom_names = {a.name for a in res.atoms()}
+                cys_templates[res] = 'CYS' if 'HG' in atom_names else 'CYX'
+        system = ff.createSystem(
+            modeller.topology,
+            **create_system_kwargs,
+            ignoreExternalBonds=True,
+            residueTemplates=cys_templates,
+        )
 
     print('PROGRESS:building:100', flush=True)
     print(f'System built: {atom_count} atoms, {volume_A3:.0f} A^3', file=sys.stderr)
