@@ -243,6 +243,7 @@ def create_complex_system(
         nonbondedMethod=omm_app.NoCutoff,
         constraints=None,
         rigidWater=False,
+        ignoreExternalBonds=True,
     )
 
     radii_nm = {
