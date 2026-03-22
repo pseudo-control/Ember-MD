@@ -408,6 +408,7 @@ def prepare_receptor(
                 ph=protonation_ph,
                 pocket_residue_keys=pocket_residue_keys,
                 output_path=output_path,
+                handle_chain_breaks=False,
             )
             print(f"  Receptor protonation pH: {protonation_ph:.1f}", file=sys.stderr)
             print(f"  PROPKA available: {'yes' if metadata.get('propka_available') else 'no'}", file=sys.stderr)

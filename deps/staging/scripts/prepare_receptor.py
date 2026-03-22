@@ -299,6 +299,7 @@ def prepare_receptor(
     pocket_ligand_sdf: Optional[str] = None,
     pocket_residue_keys: Optional[Set[str]] = None,
     output_path: Optional[str] = None,
+    handle_chain_breaks: bool = True,
 ) -> Tuple[str, Dict[str, Any]]:
     """Run the full receptor preparation pipeline.
 
@@ -376,26 +377,34 @@ def prepare_receptor(
     print('PROGRESS:prepare_receptor:35', flush=True)
 
     # 6. Chain break detection -> split topology -> remap missing residues
-    print('  Detecting chain breaks...', file=sys.stderr)
-    break_records = _detect_chain_breaks(fixer.topology, fixer.positions)
-    split_topology, split_positions, chain_segments = _build_split_topology(
-        fixer.topology, fixer.positions, break_records,
-    )
-    adjusted_missing, removed_internal, retained_terminal = _remap_missing_residues(
-        original_missing_residues, original_chain_lengths, chain_segments,
-    )
+    #    (needed for MD to prevent PDBFixer from modelling long internal loops;
+    #     skipped for docking where the Sage force field rejects split-chain terminals)
+    break_records: List[Dict[str, Any]] = []
+    removed_internal: List[Dict[str, Any]] = []
+    retained_terminal: List[Dict[str, Any]] = []
 
-    fixer.topology = split_topology
-    fixer.positions = split_positions
-    fixer.missingResidues = adjusted_missing
+    if handle_chain_breaks:
+        print('  Detecting chain breaks...', file=sys.stderr)
+        break_records = _detect_chain_breaks(fixer.topology, fixer.positions)
+        split_topology, split_positions, chain_segments = _build_split_topology(
+            fixer.topology, fixer.positions, break_records,
+        )
+        adjusted_missing, removed_internal, retained_terminal = _remap_missing_residues(
+            original_missing_residues, original_chain_lengths, chain_segments,
+        )
+
+        fixer.topology = split_topology
+        fixer.positions = split_positions
+        fixer.missingResidues = adjusted_missing
+
+        if break_records:
+            print(f'  Detected {len(break_records)} internal chain break(s)', file=sys.stderr)
+        if removed_internal:
+            print(f'  Removing {len(removed_internal)} internal gap(s) from missingResidues', file=sys.stderr)
+        if retained_terminal:
+            print(f'  Retaining {len(retained_terminal)} terminal missing-residue segment(s)', file=sys.stderr)
+
     _ensure_positive_unit_cell(fixer.topology, fixer.positions)
-
-    if break_records:
-        print(f'  Detected {len(break_records)} internal chain break(s)', file=sys.stderr)
-    if removed_internal:
-        print(f'  Removing {len(removed_internal)} internal gap(s) from missingResidues', file=sys.stderr)
-    if retained_terminal:
-        print(f'  Retaining {len(retained_terminal)} terminal missing-residue segment(s)', file=sys.stderr)
     print('PROGRESS:prepare_receptor:50', flush=True)
 
     # 7. Find and add missing atoms
