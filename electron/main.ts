@@ -3025,6 +3025,80 @@ ipcMain.handle(
   }
 );
 
+// Convert a list of SMILES strings to 3D SDF files
+ipcMain.handle(
+  IpcChannels.CONVERT_SMILES_LIST,
+  async (_event, smilesList: string[], outputDir: string): Promise<Result<Array<{
+    filename: string;
+    smiles: string;
+    qed: number;
+    saScore: number;
+    sdfPath: string;
+  }>, AppError>> => {
+    if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
+      return Err({ type: 'PYTHON_NOT_FOUND', message: 'Python not found' });
+    }
+
+    const scriptPath = path.join(fraggenRoot, 'smiles_to_3d.py');
+    if (!fs.existsSync(scriptPath)) {
+      return Err({ type: 'SCRIPT_NOT_FOUND', path: scriptPath, message: 'smiles_to_3d.py not found' });
+    }
+
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    // Write a temp CSV with smiles and name columns
+    const tmpCsv = path.join(outputDir, '_smiles_input.csv');
+    const csvLines = ['smiles,name'];
+    for (let i = 0; i < smilesList.length; i++) {
+      const smi = smilesList[i].trim();
+      if (!smi) continue;
+      // Use molecule index as name; escape commas in SMILES (rare but possible)
+      const name = `mol_${i + 1}`;
+      csvLines.push(`${smi},${name}`);
+    }
+    fs.writeFileSync(tmpCsv, csvLines.join('\n'));
+
+    return new Promise((resolve) => {
+      const python = spawn(condaPythonPath!, [
+        scriptPath, '--input_csv', tmpCsv, '--output_dir', outputDir,
+      ]);
+      childProcesses.add(python);
+
+      let stdout = '';
+      let stderr = '';
+
+      python.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+      python.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+
+      python.on('close', (code: number | null) => {
+        childProcesses.delete(python);
+        try { fs.unlinkSync(tmpCsv); } catch { /* */ }
+
+        if (code === 0) {
+          try {
+            const lines = stdout.trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            if (lastLine && (lastLine.startsWith('[') || lastLine.startsWith('{'))) {
+              resolve(Ok(JSON.parse(lastLine)));
+            } else {
+              resolve(Err({ type: 'PARSE_FAILED', message: 'No molecule data returned' }));
+            }
+          } catch (e) {
+            resolve(Err({ type: 'PARSE_FAILED', message: `Failed to parse results: ${(e as Error).message}` }));
+          }
+        } else {
+          resolve(Err({ type: 'PARSE_FAILED', message: `SMILES conversion failed: ${stderr}` }));
+        }
+      });
+
+      python.on('error', (error: Error) => {
+        childProcesses.delete(python);
+        resolve(Err({ type: 'PARSE_FAILED', message: error.message }));
+      });
+    });
+  }
+);
+
 // Convert single SMILES or MOL file to 3D SDF + thumbnail
 ipcMain.handle(
   IpcChannels.CONVERT_SINGLE_MOLECULE,

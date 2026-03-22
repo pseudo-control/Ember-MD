@@ -14,9 +14,7 @@ import type {
 import TrajectoryControls from './TrajectoryControls';
 import ClusteringModal from './ClusteringModal';
 import AnalysisPanel from './AnalysisPanel';
-import BindingSiteMapPanel from './BindingSiteMapPanel';
 import LayerPanel from './LayerPanel';
-import ScoringPanel from './ScoringPanel';
 import { projectPaths } from '../../utils/projectPaths';
 import { loadProjectJob } from '../../utils/projectJobLoader';
 import { theme } from '../../utils/theme';
@@ -3146,12 +3144,6 @@ const ViewerMode: Component = () => {
               </Show>
             </span>
           </div>
-          <Show when={state().viewer.bindingSiteMap}>
-            <BindingSiteMapPanel
-              onCompute={handleComputeBindingSiteMap}
-              onClear={clearBindingSiteVolumes}
-            />
-          </Show>
         </div>
       </Show>
 
@@ -3191,21 +3183,6 @@ const ViewerMode: Component = () => {
         <Show when={state().viewer.pdbPath || (canEstimateLigandPka() && qupkakeAvailable())}>
           <div class="absolute top-2 right-2 z-10 flex flex-col items-end gap-2">
             <div class="flex gap-1.5">
-              {/* Grow — binding site expansion map */}
-              <Show when={hasAutoDetectedLigand()}>
-                <button
-                  class="btn btn-sm btn-ghost bg-base-300/80 hover:bg-base-300"
-                  onClick={handleComputeBindingSiteMap}
-                  disabled={state().viewer.isComputingBindingSiteMap}
-                  title="Grow — show where to expand the ligand"
-                >
-                  {state().viewer.isComputingBindingSiteMap ? (
-                    <span class="loading loading-spinner loading-xs" />
-                  ) : (
-                    <span class="font-mono text-xs">MAP</span>
-                  )}
-                </button>
-              </Show>
               <Show when={canEstimateLigandPka() && qupkakeAvailable()}>
                 <button
                   class={`btn btn-sm btn-ghost px-2 ${qupkakeValidated() ? 'bg-base-300/80 hover:bg-base-300' : 'border border-warning/40 bg-warning/15 text-warning-content hover:bg-warning/25'}`}
@@ -3220,16 +3197,6 @@ const ViewerMode: Component = () => {
                   <Show when={isComputingPka()} fallback={<span class="font-semibold text-xs leading-none">pKa</span>}>
                     <span class="loading loading-spinner loading-xs" />
                   </Show>
-                </button>
-              </Show>
-              {/* Score (visible when a ligand is loaded with a structure) */}
-              <Show when={state().viewer.pdbPath && hasAnyLigand()}>
-                <button
-                  class={`btn btn-sm btn-ghost ${showScoringPanel() ? 'bg-primary text-primary-content' : 'bg-base-300/80 hover:bg-base-300'}`}
-                  onClick={() => setShowScoringPanel(!showScoringPanel())}
-                  title="Score — compute Vina, xTB strain, and CORDIAL scores"
-                >
-                  <span class="font-mono text-xs">SCORE</span>
                 </button>
               </Show>
               {/* Simulate (visible when a ligand is loaded with a structure) */}
@@ -3256,16 +3223,6 @@ const ViewerMode: Component = () => {
                 </button>
               </Show>
             </div>
-          </div>
-        </Show>
-        {/* Scoring panel overlay */}
-        <Show when={showScoringPanel() && state().viewer.pdbPath}>
-          <div class="absolute top-14 right-2 z-10 w-64">
-            <ScoringPanel
-              pdbPath={state().viewer.pdbPath!}
-              ligandSdfPath={state().viewer.ligandPath || undefined}
-              onClose={() => setShowScoringPanel(false)}
-            />
           </div>
         </Show>
         <Show when={isLoading()}>

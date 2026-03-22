@@ -156,6 +156,7 @@ export interface ElectronAPI {
   selectFolder: () => Promise<string | null>;
   scanSdfDirectory: (dirPath: string, outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
   parseSmilesCsv: (csvPath: string, outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
+  convertSmilesList: (smilesList: string[], outputDir: string) => Promise<Result<DockMolecule[], AppError>>;
   convertSingleMolecule: (input: string, outputDir: string, inputType: 'smiles' | 'mol_file') => Promise<Result<SingleMoleculeResult, AppError>>;
   extractXrayLigand: (pdbPath: string, ligandId: string, outputDir: string, smiles?: string) => Promise<Result<SingleMoleculeResult & { needsSmiles?: boolean; ligandPdb?: string }, AppError>>;
   enumerateProtonation: (

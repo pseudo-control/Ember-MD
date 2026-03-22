@@ -272,24 +272,32 @@ def batch_strain(
 ) -> dict:
     """Compute strain energy for multiple ligands in a single Python invocation.
 
-    If reference_sdf is None, optimizes the first ligand as the reference.
+    Each unique molecule (by canonical SMILES) gets its own optimized
+    free-minimum reference.  Strain = E(pose) - E(free_min) per molecule.
+
     Returns dict mapping basename → strain_kcal.
     """
-    import json
+    from rdkit import Chem
 
-    # Get or compute reference energy
-    if reference_sdf:
-        e_ref = single_point(xtb_binary, reference_sdf, solvent)
-    else:
-        # Optimize first ligand as reference
-        e_ref, _ = optimize(xtb_binary, ligand_paths[0], solvent=solvent)
+    ref_cache: dict = {}  # canonical SMILES -> e_ref (hartree)
 
     results = {}
     for i, lig_path in enumerate(ligand_paths):
         name = os.path.basename(lig_path).replace('_docked.sdf.gz', '').replace('_docked.sdf', '').replace('.sdf.gz', '').replace('.sdf', '')
         try:
+            mol = _load_sdf(lig_path)
+            if mol is None:
+                print(f"Warning: Could not load {name}, skipping", file=sys.stderr)
+                continue
+            smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+
+            if smiles not in ref_cache:
+                e_ref, _ = optimize(xtb_binary, lig_path, solvent=solvent)
+                ref_cache[smiles] = e_ref
+                print(f"  Reference for {smiles[:60]}: {e_ref:.6f} Eh", file=sys.stderr)
+
             e_pose = single_point(xtb_binary, lig_path, solvent)
-            strain_kcal = (e_pose - e_ref) * HARTREE_TO_KCAL
+            strain_kcal = (e_pose - ref_cache[smiles]) * HARTREE_TO_KCAL
             results[f"{name}_0"] = round(strain_kcal, 1)
             print(f"PROGRESS:batch_strain:{int(100 * (i + 1) / len(ligand_paths))}", flush=True)
         except Exception as e:

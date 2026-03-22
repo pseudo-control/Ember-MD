@@ -12,6 +12,7 @@ const DockStepResults: Component = () => {
   const { state, openViewerSession, setMode, setMdStep, setMdReceptorPdb, setMdLigandSdf, setMdLigandName, setMdPdbPath, setMdConfig, resetDock } = workflowStore;
   const api = window.electronAPI;
 
+  const results = () => state().dock.results;
   const cordialScored = () => state().dock.cordialScored;
   const hasStrain = createMemo(() => results().some(r => r.xtbStrainKcal != null));
   const [sortField, setSortField] = createSignal<SortField>(cordialScored() ? 'cordialPHighAffinity' : 'vinaAffinity');
@@ -20,8 +21,6 @@ const DockStepResults: Component = () => {
   const [currentPage, setCurrentPage] = createSignal(0);
   const [bestOnly, setBestOnly] = createSignal(false);
   const [thumbnailUrl, setThumbnailUrl] = createSignal<string | null>(null);
-
-  const results = () => state().dock.results;
   const dockedResults = createMemo(() => results().filter(r => !r.isReferencePose));
   const referenceCount = createMemo(() => results().filter(r => r.isReferencePose).length);
   const uniqueLigandCount = createMemo(() => new Set(dockedResults().map(r => r.ligandName)).size);
@@ -226,7 +225,7 @@ const DockStepResults: Component = () => {
         <div class="flex flex-wrap gap-2 self-start">
           <button class="btn btn-ghost btn-xs" onClick={handleOpenFolder}>Open Folder</button>
           <button class="btn btn-ghost btn-xs" onClick={handleExportCsv}>Export CSV</button>
-          <button class="btn btn-ghost btn-xs" onClick={handleNewDocking}>New Docking</button>
+          <button class="btn btn-ghost btn-xs" onClick={handleNewDocking}>New Job</button>
         </div>
         <div class="text-center">
           <h2 class="text-xl font-bold">Docking Complete</h2>

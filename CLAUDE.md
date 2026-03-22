@@ -42,11 +42,12 @@ npm run dist:mac        # Bundle .dmg via scripts/bundle-mac.sh (conda-pack → 
 /shared/types/             — md.ts, dock.ts, ipc.ts, electron-api.ts, errors.ts, result.ts
 /scripts/score_cordial.py  — CORDIAL rescoring (outside deps/staging/)
 /deps/staging/scripts/     — Canonical Python scripts called by Electron
-                             run_md_simulation.py, run_vina_docking.py, run_abfe.py,
-                             detect_pdb_ligands.py, extract_xray_ligand.py, enumerate_protonation.py,
-                             enumerate_stereoisomers.py, generate_conformers.py, cluster_trajectory.py,
+                             prepare_receptor.py, run_md_simulation.py, run_vina_docking.py,
+                             run_abfe.py, detect_pdb_ligands.py, extract_xray_ligand.py,
+                             enumerate_protonation.py, enumerate_stereoisomers.py,
+                             generate_conformers.py, cluster_trajectory.py,
                              score_cluster_centroids.py, score_xtb_strain.py, predict_ligand_pka.py,
-                             analyze_gist.py, analyze_*.py, utils.py, etc.
+                             receptor_protonation.py, analyze_gist.py, analyze_*.py, utils.py, etc.
 /vendor/xtb-env/           — GFN2-xTB 6.7.1 (conda env with ALPB solvation, arm64)
 /vendor/QupKake/           — QupKake pKa prediction (forked, repo-local)
 ```
@@ -98,6 +99,31 @@ Pipeline: receptor prep (Meeko Polymer) → ligand PDBQT prep (Meeko) → autobo
 **xTB strain filter**: Optional post-docking step (`xtbConfig.strainFilter`). Computes GFN2-xTB strain energy per pose via batch mode (`score_xtb_strain.py --mode batch_strain`). Results in `results/xtb_strain.json`. Displayed as "Strain" column in DockStepResults (yellow >5 kcal/mol, red >8).
 
 **xTB pre-optimization**: Optional pre-docking step (`xtbConfig.preOptimize`). Optimizes ligand geometry with GFN2-xTB before Meeko PDBQT conversion.
+
+## Receptor Preparation (Unified)
+`prepare_receptor.py` is the single entry point for all structural receptor preparation. Both docking (via `detect_pdb_ligands.py`) and MD (via `run_md_simulation.py`) call it to produce a fully fixed and protonated receptor.
+
+**Pipeline:**
+1. CIF → PDB conversion (if needed)
+2. Reduce side-chain flip optimization (Asn/Gln/His)
+3. PROPKA shifted-residue detection (pocket-filtered)
+4. PDBFixer: `findMissingResidues` → chain break detection/splitting → filter internal gaps → `findMissingAtoms` → `addMissingAtoms`
+5. Sanitize positions (fix PDBFixer nested-Quantity bug that caused `AssertionError` in `addHydrogens`)
+6. Build protonation variant plan (disulfides, PROPKA overrides, histidine tautomers)
+7. `Modeller.addHydrogens` with explicit variant list
+
+**CLI:** `python prepare_receptor.py --input <pdb|cif> --output_dir <dir> [--ph 7.4] [--pocket_ligand_sdf <sdf>]`
+
+**Output:** `receptor_prepared.pdb` + `receptor_prepared.prep.json` (schema_version 2, includes chain break info, protonation variants, PROPKA overrides).
+
+**Library usage:** `from prepare_receptor import prepare_receptor` — also accepts `pocket_residue_keys` (pre-computed `Set[str]`) and `output_path` (custom output filename).
+
+**How it's called:**
+- **Docking**: `detect_pdb_ligands.py::prepare_receptor()` strips the docking ligand, then calls `unified_prepare()` with pocket residue keys from the stripped ligand
+- **MD**: `run_md_simulation.py::_prepare_receptor_topology()` checks for existing `receptor_prepared.pdb`; if absent, calls `prepare_receptor()` inline
+- **Standalone**: CLI entry point for manual preparation
+
+**Key functions extracted from `run_md_simulation.py`:** `_detect_chain_breaks`, `_build_split_topology`, `_remap_missing_residues`, `_ensure_positive_unit_cell`, `ensure_pdb_format`. These now live in `prepare_receptor.py` and are imported by `run_md_simulation.py` (`ensure_pdb_format`).
 
 ## MCMM Mode
 Standalone conformer generation is exposed in the UI as **MCMM**. Internally the workflow state is still named `conform`, but user-facing docs and tabs should call this MCMM mode. Three conformer generation methods:

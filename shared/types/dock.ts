@@ -3,7 +3,7 @@
  */
 
 // Ligand source types for docking input
-export type LigandSource = 'structure_files' | 'molecule_csv';
+export type LigandSource = 'structure_files' | 'molecule_csv' | 'smiles_input';
 
 // Single molecule input result (from SMILES/MOL paste or file)
 export interface SingleMoleculeResult {

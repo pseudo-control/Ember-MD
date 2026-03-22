@@ -33,7 +33,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from receptor_protonation import load_receptor_prep_metadata, protonate_existing_prepared_receptor
+from prepare_receptor import ensure_pdb_format, prepare_receptor
 
 try:
     from openmm import *
@@ -59,27 +59,6 @@ for _pdir in [_default_plugins, _bundled_plugins]:
             Platform.loadPluginsFromDirectory(_pdir)
         except Exception:
             pass
-
-def ensure_pdb_format(file_path: str) -> str:
-    """Convert CIF to PDB if needed. Returns path to a .pdb file.
-
-    OpenMM's PDBFile class only reads PDB format, not mmCIF.
-    Uses PDBFixer (which handles CIF) to convert, preserving all residues.
-    """
-    if not file_path.lower().endswith('.cif'):
-        return file_path
-
-    pdb_path = file_path.rsplit('.', 1)[0] + '_converted.pdb'
-    if os.path.exists(pdb_path):
-        print(f'  Using cached CIF->PDB conversion: {os.path.basename(pdb_path)}', file=sys.stderr)
-        return pdb_path
-
-    print(f'  Converting CIF to PDB: {os.path.basename(file_path)}', file=sys.stderr)
-    fixer = PDBFixer(filename=file_path)
-    with open(pdb_path, 'w') as f:
-        PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
-    print(f'  Converted to: {os.path.basename(pdb_path)}', file=sys.stderr)
-    return pdb_path
 
 
 # Force field presets
@@ -124,282 +103,34 @@ class ReceptorPreparationError(RuntimeError):
         self.positions = positions
 
 
-def _safe_parse_residue_number(residue_id: str) -> Optional[int]:
-    """Parse the integer component of a PDB residue id."""
-    match = re.match(r'^\s*(-?\d+)', str(residue_id))
-    return int(match.group(1)) if match else None
-
-
-def _residue_label(residue: Any) -> str:
-    insertion = residue.insertionCode.strip() if residue.insertionCode else ''
-    return f'{residue.chain.id}:{residue.name}{residue.id}{insertion}'
-
-
-def _find_atom_by_name(residue: Any, atom_name: str) -> Optional[Any]:
-    for atom in residue.atoms():
-        if atom.name == atom_name:
-            return atom
-    return None
-
-
-def _detect_chain_breaks(topology: Any, positions: Any, threshold_nm: float = 0.2) -> List[Dict[str, Any]]:
-    """Detect physical or numbering-based chain breaks in protein chains."""
-    from openmm.unit import nanometers
-
-    break_records: List[Dict[str, Any]] = []
-    for chain_idx, chain in enumerate(topology.chains()):
-        residues = list(chain.residues())
-        for prev_index in range(len(residues) - 1):
-            next_index = prev_index + 1
-            prev_residue = residues[prev_index]
-            next_residue = residues[next_index]
-            if prev_residue.name not in STANDARD_PROTEIN_RESIDUES or next_residue.name not in STANDARD_PROTEIN_RESIDUES:
-                continue
-            reasons: List[str] = []
-            missing_backbone_atoms: List[str] = []
-
-            prev_c = _find_atom_by_name(prev_residue, 'C')
-            next_n = _find_atom_by_name(next_residue, 'N')
-            if prev_c is None:
-                missing_backbone_atoms.append(f'{_residue_label(prev_residue)} missing C')
-            if next_n is None:
-                missing_backbone_atoms.append(f'{_residue_label(next_residue)} missing N')
-            if missing_backbone_atoms:
-                reasons.append('missing_backbone')
-
-            prev_num = _safe_parse_residue_number(prev_residue.id)
-            next_num = _safe_parse_residue_number(next_residue.id)
-            residue_number_gap: Optional[int] = None
-            if prev_num is not None and next_num is not None and next_num > prev_num + 1:
-                residue_number_gap = next_num - prev_num - 1
-                reasons.append('residue_number_gap')
-
-            c_n_distance_a: Optional[float] = None
-            if prev_c is not None and next_n is not None:
-                c_pos = positions[prev_c.index].value_in_unit(nanometers)
-                n_pos = positions[next_n.index].value_in_unit(nanometers)
-                dist_nm = builtins.sum([(a - b) ** 2 for a, b in zip(c_pos, n_pos)]) ** 0.5
-                c_n_distance_a = round(dist_nm * 10.0, 3)
-                if dist_nm > threshold_nm:
-                    reasons.append('distance')
-
-            if reasons:
-                break_records.append({
-                    'original_chain_index': chain_idx,
-                    'original_chain_id': chain.id,
-                    'split_before_residue_index': next_index,
-                    'previous_residue': _residue_label(prev_residue),
-                    'next_residue': _residue_label(next_residue),
-                    'reasons': reasons,
-                    'missing_backbone_atoms': missing_backbone_atoms,
-                    'residue_number_gap': residue_number_gap,
-                    'c_n_distance_angstrom': c_n_distance_a,
-                })
-
-    return break_records
-
-
-def _build_split_topology(
-    topology: Any,
-    positions: Any,
-    break_records: List[Dict[str, Any]],
-) -> Tuple[Any, Any, List[List[Dict[str, Any]]]]:
-    """Split a topology in-memory at detected break points."""
-    from openmm.app import Topology
-
-    split_points_by_chain: Dict[int, Set[int]] = {}
-    for record in break_records:
-        split_points_by_chain.setdefault(record['original_chain_index'], set()).add(record['split_before_residue_index'])
-
-    new_top = Topology()
-    new_positions: List[Any] = []
-    atom_map: Dict[Any, Any] = {}
-    residue_to_chain_index: Dict[Any, int] = {}
-    chain_segments: List[List[Dict[str, Any]]] = []
-    next_chain_index = 0
-
-    for chain_idx, chain in enumerate(topology.chains()):
-        residues = list(chain.residues())
-        split_points = sorted(split_points_by_chain.get(chain_idx, set()))
-        segment_starts = [0] + split_points
-        segment_ends = split_points + [len(residues)]
-        segments: List[Dict[str, Any]] = []
-
-        for frag_idx, (start, end) in enumerate(zip(segment_starts, segment_ends)):
-            new_chain_id = chain.id if frag_idx == 0 else f'{chain.id}:{frag_idx+1}'
-            new_chain = new_top.addChain(new_chain_id)
-            segment = {
-                'original_chain_index': chain_idx,
-                'original_chain_id': chain.id,
-                'new_chain_index': next_chain_index,
-                'new_chain_id': new_chain_id,
-                'start_residue_index': start,
-                'end_residue_index': end,
-                'length': end - start,
-            }
-            next_chain_index += 1
-            segments.append(segment)
-
-            for res_idx in range(start, end):
-                residue = residues[res_idx]
-                new_residue = new_top.addResidue(residue.name, new_chain, residue.id, residue.insertionCode)
-                residue_to_chain_index[residue] = segment['new_chain_index']
-                for atom in residue.atoms():
-                    new_atom = new_top.addAtom(atom.name, atom.element, new_residue, atom.id)
-                    atom_map[atom] = new_atom
-                    new_positions.append(positions[atom.index])
-
-        chain_segments.append(segments)
-
-    for atom1, atom2 in topology.bonds():
-        mapped1 = atom_map.get(atom1)
-        mapped2 = atom_map.get(atom2)
-        if mapped1 is None or mapped2 is None:
-            continue
-        if residue_to_chain_index.get(atom1.residue) != residue_to_chain_index.get(atom2.residue):
-            continue
-        new_top.addBond(mapped1, mapped2)
-
-    if topology.getPeriodicBoxVectors() is not None:
-        new_top.setPeriodicBoxVectors(topology.getPeriodicBoxVectors())
-
-    return new_top, new_positions, chain_segments
-
-
-def _ensure_positive_unit_cell(topology: Any, positions: Any, padding_nm: float = 1.0) -> None:
-    """Ensure the topology has a nonzero unit cell before PDBFixer minimization."""
-    from openmm.unit import nanometers
-
-    dimensions = topology.getUnitCellDimensions()
-    if dimensions is not None:
-        dims_nm = dimensions.value_in_unit(nanometers)
-        if all(value > 0 for value in dims_nm):
-            return
-
-    coords_nm = [pos.value_in_unit(nanometers) for pos in positions]
-    if not coords_nm:
-        return
-
-    mins = [min(coord[i] for coord in coords_nm) for i in range(3)]
-    maxs = [max(coord[i] for coord in coords_nm) for i in range(3)]
-    spans = [max(maxs[i] - mins[i], 0.1) + padding_nm for i in range(3)]
-    topology.setUnitCellDimensions(Vec3(*spans) * nanometers)
-
-
-def _remap_missing_residues(
-    missing_residues: Dict[Tuple[int, int], List[str]],
-    chain_lengths: Dict[int, int],
-    chain_segments: List[List[Dict[str, Any]]],
-) -> Tuple[Dict[Tuple[int, int], List[str]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Keep only terminal missing residues and remap them to the split topology."""
-    adjusted: Dict[Tuple[int, int], List[str]] = {}
-    removed_internal: List[Dict[str, Any]] = []
-    retained_terminal: List[Dict[str, Any]] = []
-
-    for (chain_idx, insertion_idx), residue_names in missing_residues.items():
-        entry = {
-            'original_chain_index': chain_idx,
-            'original_insertion_index': insertion_idx,
-            'residues': list(residue_names),
-        }
-        chain_length = chain_lengths[chain_idx]
-        if insertion_idx not in (0, chain_length):
-            removed_internal.append(entry)
-            continue
-
-        if insertion_idx == 0:
-            target_chain = chain_segments[chain_idx][0]
-            new_key = (target_chain['new_chain_index'], 0)
-        else:
-            target_chain = chain_segments[chain_idx][-1]
-            new_key = (target_chain['new_chain_index'], target_chain['length'])
-
-        adjusted[new_key] = list(residue_names)
-        retained_terminal.append({
-            **entry,
-            'new_chain_index': new_key[0],
-            'new_insertion_index': new_key[1],
-        })
-
-    return adjusted, removed_internal, retained_terminal
-
 
 def _prepare_receptor_topology(receptor_pdb: str) -> Tuple[Any, Any, Dict[str, Any]]:
-    """Prepare a receptor topology for MD and return a structured report."""
-    prep_metadata = load_receptor_prep_metadata(receptor_pdb)
-    receptor_protonation_ph = float(prep_metadata.get('receptor_protonation_ph', 7.4)) if prep_metadata else 7.4
+    """Prepare a receptor topology for MD and return a structured report.
+
+    Checks for an existing receptor_prepared.pdb alongside the input.
+    If not found, runs the unified prepare_receptor pipeline.
+    """
+    output_dir = os.path.dirname(receptor_pdb) or '.'
+    prepared_pdb_path = os.path.join(output_dir, 'receptor_prepared.pdb')
+    prepared_json_path = os.path.join(output_dir, 'receptor_prepared.prep.json')
+
     report: Dict[str, Any] = {
         'input_receptor_pdb': receptor_pdb,
-        'receptor_prep_metadata_path': prep_metadata.get('metadata_path') if prep_metadata else None,
-        'receptor_protonation_ph': receptor_protonation_ph,
-        'detected_chain_breaks': [],
-        'removed_internal_missing_residues': [],
-        'retained_terminal_missing_residues': [],
-        'residues_with_missing_backbone_atoms': [],
         'preflight_passed': False,
     }
 
     try:
-        fixer = PDBFixer(filename=receptor_pdb)
-        original_chain_lengths = {
-            chain.index: len(list(chain.residues()))
-            for chain in fixer.topology.chains()
-        }
+        if os.path.exists(prepared_pdb_path) and os.path.exists(prepared_json_path):
+            print('  Using existing prepared receptor', file=sys.stderr)
+            pdb = PDBFile(prepared_pdb_path)
+            with open(prepared_json_path) as f:
+                report.update(json.load(f))
+            return pdb.topology, pdb.positions, report
 
-        fixer.findMissingResidues()
-        original_missing_residues = {
-            key: list(value)
-            for key, value in fixer.missingResidues.items()
-        }
-
-        break_records = _detect_chain_breaks(fixer.topology, fixer.positions)
-        split_topology, split_positions, chain_segments = _build_split_topology(
-            fixer.topology, fixer.positions, break_records
-        )
-        adjusted_missing, removed_internal, retained_terminal = _remap_missing_residues(
-            original_missing_residues,
-            original_chain_lengths,
-            chain_segments,
-        )
-
-        fixer.topology = split_topology
-        fixer.positions = split_positions
-        fixer.missingResidues = adjusted_missing
-        _ensure_positive_unit_cell(fixer.topology, fixer.positions)
-
-        report['detected_chain_breaks'] = break_records
-        report['removed_internal_missing_residues'] = removed_internal
-        report['retained_terminal_missing_residues'] = retained_terminal
-        report['residues_with_missing_backbone_atoms'] = sorted({
-            residue_label
-            for record in break_records
-            for residue_label in record['missing_backbone_atoms']
-        })
-
-        if break_records:
-            print(f'  Detected {len(break_records)} internal chain break(s)', file=sys.stderr)
-        if removed_internal:
-            print(f'  Removing {len(removed_internal)} internal gap(s) from missingResidues', file=sys.stderr)
-        if retained_terminal:
-            print(f'  Retaining {len(retained_terminal)} terminal missing-residue segment(s)', file=sys.stderr)
-
-        fixer.findMissingAtoms()
-        fixer.addMissingAtoms()
-        protonated_topology, protonated_positions, protonation_report = protonate_existing_prepared_receptor(
-            fixer.topology,
-            fixer.positions,
-            receptor_protonation_ph,
-            prep_metadata,
-        )
-        report['reused_receptor_prep_metadata'] = prep_metadata is not None
-        report['applied_protonation_overrides'] = protonation_report.get('applied_overrides', [])
-        report['resolved_variants'] = protonation_report.get('resolved_variants', {})
-        report['ignored_shifted_residues'] = protonation_report.get('ignored_shifted_residues', [])
-
-        report['prepared_chain_count'] = builtins.sum(1 for _ in protonated_topology.chains())
-        report['prepared_residue_count'] = builtins.sum(1 for _ in protonated_topology.residues())
-        report['prepared_atom_count'] = protonated_topology.getNumAtoms()
-        return protonated_topology, protonated_positions, report
+        _, prep_report = prepare_receptor(receptor_pdb, output_dir=output_dir)
+        report.update(prep_report)
+        pdb = PDBFile(prepared_pdb_path)
+        return pdb.topology, pdb.positions, report
     except Exception as exc:
         raise ReceptorPreparationError(
             f'Receptor preparation failed: {exc}',
@@ -473,11 +204,15 @@ def _raise_receptor_topology_preflight_failure(
     raise ValueError(f'Receptor topology preflight failed: {error}') from error
 
 
-def _preflight_receptor_topology(prepared_topology: Any, preset: Dict[str, Any]) -> None:
+def _preflight_receptor_topology(prepared_topology: Any, prepared_positions: Any, preset: Dict[str, Any]) -> None:
     """Validate that the prepared protein topology matches the protein force field."""
     ff = ForceField(*preset['protein_ff'], *preset['water_ff'])
+    # 4-site water models (OPC) need extra virtual particles added before
+    # the topology can match force field templates.
+    modeller = Modeller(prepared_topology, prepared_positions)
+    modeller.addExtraParticles(ff)
     ff.createSystem(
-        prepared_topology,
+        modeller.topology,
         nonbondedMethod=NoCutoff,
         constraints=HBonds,
     )
@@ -765,7 +500,7 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
     try:
         prepared_topology, prepared_positions, prep_report = _prepare_receptor_topology(receptor_pdb)
         print('  Running protein-only topology preflight...', file=sys.stderr)
-        _preflight_receptor_topology(prepared_topology, preset)
+        _preflight_receptor_topology(prepared_topology, prepared_positions, preset)
         prep_report['preflight_passed'] = True
         print('  Protein-only topology preflight passed', file=sys.stderr)
     except Exception as exc:
@@ -905,6 +640,10 @@ def build_system(receptor_pdb: str, ligand_sdf: str, output_dir: str, force_fiel
     print('PROGRESS:parameterizing:100', flush=True)
 
     modeller.add(lig_top, lig_pos)
+    # 4-site water models (OPC) require virtual particles on crystallographic
+    # waters that came from receptor preparation.  Must be called before
+    # addSolvent which tries to match all residues to templates.
+    modeller.addExtraParticles(ff)
     print('PROGRESS:building:50', flush=True)
 
     print(f'Adding solvent ({water_label} water, dodecahedron, {salt_concentration_m*1000:.0f} mM NaCl)...', file=sys.stderr)

@@ -27,6 +27,12 @@ const DockStepLoad: Component = () => {
   const [receptorThumbnail, setReceptorThumbnail] = createSignal<string | null>(null);
   const [structureFilePaths, setStructureFilePaths] = createSignal<string[]>([]);
   const [csvFilePath, setCsvFilePath] = createSignal<string | null>(null);
+  const [smilesText, setSmilesText] = createSignal('');
+
+  const detectedSmiles = createMemo(() => {
+    const lines = smilesText().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    return lines;
+  });
 
   const dock = () => state().dock;
   const receptorPdbPath = () => dock().receptorPdbPath;
@@ -135,7 +141,31 @@ const DockStepLoad: Component = () => {
     setDockLigandMolecules([]);
     setStructureFilePaths([]);
     setCsvFilePath(null);
+    setSmilesText('');
     setError(null);
+  };
+
+  const handleConvertSmiles = async () => {
+    const smiles = detectedSmiles();
+    if (smiles.length === 0) return;
+
+    setIsLoadingLigands(true);
+    setError(null);
+
+    const defaultDir = await api.getDefaultOutputDir();
+    const baseOutputDir = state().customOutputDir || defaultDir;
+    const paths = projectPaths(baseOutputDir, state().jobName);
+    const dockPaths = getDockPaths(paths);
+
+    const result = await api.convertSmilesList(smiles, dockPaths.inputsLigands);
+    setIsLoadingLigands(false);
+
+    if (result.ok) {
+      setDockLigandMolecules(result.value);
+      setDockLigandSdfPaths(result.value.map((m: DockMolecule) => m.sdfPath));
+    } else {
+      setError(result.error?.message || 'Failed to convert SMILES');
+    }
   };
 
   const handleSourceChange = (source: LigandSource) => {
@@ -312,18 +342,74 @@ const DockStepLoad: Component = () => {
 
               <div class="tabs tabs-boxed bg-base-300 mb-3 w-full">
                 <button
+                  class={`tab tab-xs flex-1 ${ligandSource() === 'smiles_input' ? 'tab-active' : ''}`}
+                  onClick={() => handleSourceChange('smiles_input')}
+                >
+                  SMILES
+                </button>
+                <button
                   class={`tab tab-xs flex-1 ${ligandSource() === 'structure_files' ? 'tab-active' : ''}`}
                   onClick={() => handleSourceChange('structure_files')}
                 >
-                  Select Structure
+                  Files
                 </button>
                 <button
                   class={`tab tab-xs flex-1 ${ligandSource() === 'molecule_csv' ? 'tab-active' : ''}`}
                   onClick={() => handleSourceChange('molecule_csv')}
                 >
-                  Select CSV
+                  CSV
                 </button>
               </div>
+
+              <Show when={ligandSource() === 'smiles_input'}>
+                <div class="flex-1 flex flex-col">
+                  <Show
+                    when={ligandMolecules().length > 0}
+                    fallback={
+                      <div class="flex-1 flex flex-col w-full">
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="text-[10px] text-base-content/70">One SMILES per line</span>
+                          <span class={`text-[10px] font-mono ${detectedSmiles().length > 0 ? 'text-success' : 'text-base-content/50'}`}>
+                            {detectedSmiles().length} molecule{detectedSmiles().length !== 1 ? 's' : ''} detected
+                          </span>
+                        </div>
+                        <textarea
+                          class="textarea textarea-bordered text-xs font-mono flex-1 w-full resize-none leading-relaxed"
+                          placeholder={"CCO\nc1ccccc1\nCC(=O)Oc1ccccc1C(=O)O"}
+                          value={smilesText()}
+                          onInput={(e) => setSmilesText(e.currentTarget.value)}
+                          rows={6}
+                        />
+                        <button
+                          class="btn btn-primary btn-sm w-full mt-2"
+                          onClick={handleConvertSmiles}
+                          disabled={isLoadingLigands() || detectedSmiles().length === 0}
+                        >
+                          {isLoadingLigands() ? <span class="loading loading-spinner loading-xs" /> : `Convert ${detectedSmiles().length} molecule${detectedSmiles().length !== 1 ? 's' : ''}`}
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div class="w-full space-y-2">
+                      <div class="flex items-center gap-2 px-3 py-1.5 bg-base-300 rounded-lg">
+                        <span class="text-xs flex-1">SMILES input</span>
+                        <span class="badge badge-success badge-xs">{ligandMolecules().length} ready</span>
+                      </div>
+                      <div class="bg-base-300/70 rounded-lg px-3 py-2 text-[10px] font-mono space-y-1 max-h-28 overflow-auto">
+                        <For each={ligandMolecules().slice(0, 6)}>
+                          {(mol) => <div class="truncate">{mol.filename}</div>}
+                        </For>
+                        <Show when={ligandMolecules().length > 6}>
+                          <div class="text-base-content/70">+ {ligandMolecules().length - 6} more</div>
+                        </Show>
+                      </div>
+                      <button class="btn btn-ghost btn-xs w-full" onClick={resetLigandInput}>
+                        Clear
+                      </button>
+                    </div>
+                  </Show>
+                </div>
+              </Show>
 
               <Show when={ligandSource() === 'structure_files'}>
                 <div class="flex-1 flex flex-col items-center justify-center">

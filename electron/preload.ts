@@ -374,6 +374,9 @@ const electronAPI = {
   parseSmilesCsv: (csvPath: string, outputDir: string) =>
     ipcRenderer.invoke(IpcChannels.PARSE_SMILES_CSV, csvPath, outputDir),
 
+  convertSmilesList: (smilesList: string[], outputDir: string) =>
+    ipcRenderer.invoke(IpcChannels.CONVERT_SMILES_LIST, smilesList, outputDir),
+
   convertSingleMolecule: (input: string, outputDir: string, inputType: 'smiles' | 'mol_file') =>
     ipcRenderer.invoke(IpcChannels.CONVERT_SINGLE_MOLECULE, input, outputDir, inputType),
 
