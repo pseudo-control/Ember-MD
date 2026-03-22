@@ -1,4 +1,4 @@
-import { Component, For, Show } from 'solid-js';
+import { Component, For, Show, createSignal } from 'solid-js';
 import type { ViewerLayer, ViewerLayerGroup } from '../../stores/workflow';
 import type { ProjectJob } from '../../../shared/types/ipc';
 
@@ -121,92 +121,93 @@ const LayerPanel: Component<LayerPanelProps> = (props) => {
     return 'Job';
   };
 
+  const [viewTab, setViewTab] = createSignal<'recent' | 'import'>('recent');
+
   return (
     <div class={`card bg-base-200 p-2 flex flex-col gap-2 ${props.fillHeight ? 'h-full' : ''}`}>
       <div class="rounded border border-base-300 bg-base-100/60 p-3 flex flex-col gap-3 min-w-0 flex-1 min-h-0">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <p class="text-xs text-base-content/75 leading-relaxed">
-              Browse structures or a trajectory, paste a SMILES string, or reopen a recent job.
-            </p>
-            <div class="text-[11px] text-base-content/55 leading-relaxed mt-1">
-              <p>Browse: `.pdb`, `.cif`, `.sdf`, `.sdf.gz`, `.mol`, `.mol2`, `.dcd`</p>
-            </div>
+        <div class="flex items-center justify-between gap-2">
+          <div class="tabs tabs-boxed tabs-xs bg-base-300">
+            <button class={`tab tab-xs ${viewTab() === 'recent' ? 'tab-active' : ''}`} onClick={() => setViewTab('recent')}>
+              Recent Jobs
+            </button>
+            <button class={`tab tab-xs ${viewTab() === 'import' ? 'tab-active' : ''}`} onClick={() => setViewTab('import')}>
+              Import
+            </button>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <Show when={props.proteinCount >= 2}>
-              <button class="btn btn-xs btn-accent" onClick={props.onAlignAll}>
-                Align
-              </button>
+              <button class="btn btn-xs btn-accent" onClick={props.onAlignAll}>Align</button>
             </Show>
             <Show when={props.canClear}>
-              <button class="btn btn-xs btn-ghost" onClick={props.onClearAll}>
-                Close
-              </button>
+              <button class="btn btn-xs btn-ghost" onClick={props.onClearAll}>Close</button>
             </Show>
-            <button
-              class="btn btn-xs btn-primary"
-              onClick={props.onBrowseFiles}
-            >
-              Browse
+          </div>
+        </div>
+
+        <Show when={viewTab() === 'import'}>
+          <div class="flex flex-col gap-3 flex-1">
+            <button class="btn btn-outline btn-sm w-full" onClick={props.onBrowseFiles}>
+              Import (.pdb, .cif, .sdf, .mol, .dcd)
             </button>
+
+            <div>
+              <span class="text-[10px] text-base-content/50 mb-1 block">or enter SMILES</span>
+              <div class="flex gap-2">
+                <input
+                  type="text"
+                  class="input input-sm input-bordered flex-1 font-mono text-xs"
+                  placeholder="Enter SMILES string"
+                  value={props.smilesInput}
+                  onInput={(e) => props.onSmilesInput(e.currentTarget.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') props.onLoadSmiles(); }}
+                />
+                <button
+                  class="btn btn-sm btn-primary"
+                  onClick={props.onLoadSmiles}
+                  disabled={!props.smilesInput.trim() || props.isLoadingSmiles}
+                >
+                  <Show when={props.isLoadingSmiles} fallback={'Add'}>
+                    <span class="loading loading-spinner loading-xs" />
+                  </Show>
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
+        </Show>
 
-        <div class="flex gap-2">
-          <input
-            type="text"
-            class="input input-sm input-bordered flex-1 font-mono text-xs"
-            placeholder="Paste SMILES..."
-            value={props.smilesInput}
-            onInput={(e) => props.onSmilesInput(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') props.onLoadSmiles(); }}
-          />
-          <button
-            class="btn btn-sm btn-accent"
-            onClick={props.onLoadSmiles}
-            disabled={!props.smilesInput.trim() || props.isLoadingSmiles}
-          >
-            <Show when={props.isLoadingSmiles} fallback={'Add'}>
-              <span class="loading loading-spinner loading-xs" />
-            </Show>
-          </button>
-        </div>
-
-        <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/55">
-          Recent Jobs
-        </div>
-
-        <Show when={!props.isLoadingRecentJobs} fallback={
-          <div class="flex-1 min-h-[12rem] flex items-center justify-center">
-            <span class="loading loading-spinner loading-sm text-primary" />
-          </div>
-        }>
-          <Show when={props.recentJobs.length > 0} fallback={
-            <div class="flex-1 min-h-[12rem] flex items-center justify-center text-xs text-base-content/55 text-center">
-              No recent jobs in this project yet.
+        <Show when={viewTab() === 'recent'}>
+          <Show when={!props.isLoadingRecentJobs} fallback={
+            <div class="flex-1 min-h-[12rem] flex items-center justify-center">
+              <span class="loading loading-spinner loading-sm text-primary" />
             </div>
           }>
-            <div class="flex-1 min-h-[12rem] overflow-y-auto rounded border border-base-300 divide-y divide-base-300">
-              <For each={props.recentJobs}>
-                {(job) => (
-                  <button
-                    class="w-full px-3 py-2.5 text-left hover:bg-base-200 disabled:opacity-70"
-                    onClick={() => props.onOpenRecentJob(job.id)}
-                    disabled={!!props.loadingRecentJobId}
-                  >
-                    <div class="flex items-center gap-2">
-                      <span class="badge badge-ghost badge-xs">{jobTypeLabel(job)}</span>
-                      <span class="text-xs font-medium truncate flex-1">{job.label}</span>
-                      <Show when={props.loadingRecentJobId === job.id}>
-                        <span class="loading loading-spinner loading-xs text-primary" />
-                      </Show>
-                    </div>
-                    <div class="text-[10px] text-base-content/55 mt-1 truncate">{job.path}</div>
-                  </button>
-                )}
-              </For>
-            </div>
+            <Show when={props.recentJobs.length > 0} fallback={
+              <div class="flex-1 min-h-[12rem] flex items-center justify-center text-xs text-base-content/55 text-center">
+                No recent jobs in this project yet.
+              </div>
+            }>
+              <div class="flex-1 min-h-[12rem] overflow-y-auto rounded border border-base-300 divide-y divide-base-300">
+                <For each={props.recentJobs}>
+                  {(job) => (
+                    <button
+                      class="w-full px-3 py-2.5 text-left hover:bg-base-200 disabled:opacity-70"
+                      onClick={() => props.onOpenRecentJob(job.id)}
+                      disabled={!!props.loadingRecentJobId}
+                    >
+                      <div class="flex items-center gap-2">
+                        <span class="badge badge-ghost badge-xs">{jobTypeLabel(job)}</span>
+                        <span class="text-xs font-medium truncate flex-1">{job.label}</span>
+                        <Show when={props.loadingRecentJobId === job.id}>
+                          <span class="loading loading-spinner loading-xs text-primary" />
+                        </Show>
+                      </div>
+                      <div class="text-[10px] text-base-content/55 mt-1 truncate">{job.path}</div>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
           </Show>
         </Show>
       </div>
