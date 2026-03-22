@@ -437,12 +437,32 @@ def build_variant_plan(
     }
 
 
+def _sanitize_positions(positions: Any) -> Any:
+    """Flatten positions to avoid nested Quantity objects that crash OpenMM's addHydrogens.
+
+    PDBFixer.addMissingAtoms() can produce positions where individual elements are
+    Quantity objects instead of Vec3, causing an AssertionError in Quantity.__getitem__.
+    """
+    from openmm import unit as u
+    try:
+        # If positions is already a flat Quantity(list-of-Vec3, unit), this is a no-op
+        test = positions[0]
+        if hasattr(test, 'unit'):
+            # Nested Quantity — flatten by extracting value_in_unit
+            flat = [pos.value_in_unit(u.nanometers) for pos in positions]
+            return u.Quantity(flat, u.nanometers)
+    except Exception:
+        pass
+    return positions
+
+
 def add_hydrogens_with_variants(
     topology: Any,
     positions: Any,
     protonation_ph: float,
     variants: Sequence[Optional[str]],
 ) -> Tuple[Any, Any, List[Optional[str]]]:
+    positions = _sanitize_positions(positions)
     modeller = Modeller(topology, positions)
     try:
         actual_variants = modeller.addHydrogens(
@@ -515,62 +535,93 @@ def prepare_receptor_with_propka(
     output_path: str,
     protonation_ph: float,
     pocket_residue_keys: Optional[Set[str]] = None,
+    *,
+    fixer: Optional[Any] = None,
+    propka_report: Optional[Dict[str, Any]] = None,
+    reduce_report: Optional[Dict[str, Any]] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    reduced_path, reduce_report = run_reduce_if_available(input_pdb)
-    try:
-        propka_report = collect_propka_shifted_residues(reduced_path, protonation_ph)
+    """Unified receptor preparation: PDBFixer + PROPKA-guided protonation.
+
+    When called with no keyword args (docking path), runs the full pipeline
+    from scratch.  When called with fixer= (MD path via prepare_receptor.py),
+    the caller has already run PDBFixer with chain-break handling.
+    """
+    reduced_path: Optional[str] = None
+
+    if fixer is None:
+        # Self-contained path: Reduce -> PROPKA -> PDBFixer from scratch
+        reduced_path, reduce_report = run_reduce_if_available(input_pdb)
+        if propka_report is None:
+            propka_report = collect_propka_shifted_residues(reduced_path, protonation_ph)
 
         fixer = PDBFixer(filename=reduced_path)
         fixer.findMissingResidues()
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
+    else:
+        # External fixer path: caller already ran PDBFixer + chain breaks
+        if reduce_report is None:
+            reduce_report = {"reduce_available": False, "reduce_applied": False}
+        if propka_report is None:
+            propka_report = {"propka_available": False, "shifted_residues": []}
 
-        variant_plan = build_variant_plan(
-            fixer.topology,
-            fixer.positions,
-            protonation_ph,
-            pocket_residue_keys=pocket_residue_keys,
-            shifted_residues=propka_report.get("shifted_residues", []),
-        )
-        protonated_topology, protonated_positions, actual_variants = add_hydrogens_with_variants(
-            fixer.topology,
-            fixer.positions,
-            protonation_ph,
-            variant_plan["variants"],
-        )
-        write_prepared_receptor_pdb(
-            protonated_topology,
-            protonated_positions,
-            output_path,
-            variant_plan["resolved_variants"],
-        )
+    # Sanitize positions (fix PDBFixer nested-Quantity bug — no-op on normal positions)
+    fixer.positions = _sanitize_positions(fixer.positions)
 
-        metadata: Dict[str, Any] = {
-            "schema_version": 1,
-            "prepared_receptor_pdb": output_path,
-            "receptor_protonation_ph": protonation_ph,
-            "pocket_filtered": True,
-            "pocket_cutoff_angstrom": POCKET_RESIDUE_CUTOFF_A,
-            "pocket_residue_keys": sorted(pocket_residue_keys or []),
-            "reduce_available": reduce_report["reduce_available"],
-            "reduce_applied": reduce_report["reduce_applied"],
-            "propka_available": propka_report.get("propka_available", False),
-            "propka_error": propka_report.get("propka_error"),
-            "propka_shifted_residues": propka_report.get("shifted_residues", []),
-            "applied_overrides": variant_plan["applied_overrides"],
-            "ignored_shifted_residues": variant_plan["ignored_shifted_residues"],
-            "resolved_variants": variant_plan["resolved_variants"],
-            "actual_variants": actual_variants,
-            "disulfide_residue_keys": variant_plan["disulfide_residue_keys"],
-        }
-        metadata["metadata_path"] = write_receptor_prep_metadata(output_path, metadata)
-        return metadata
-    finally:
-        if reduced_path != input_pdb:
-            try:
-                os.remove(reduced_path)
-            except OSError:
-                pass
+    variant_plan = build_variant_plan(
+        fixer.topology,
+        fixer.positions,
+        protonation_ph,
+        pocket_residue_keys=pocket_residue_keys,
+        shifted_residues=propka_report.get("shifted_residues", []),
+    )
+    protonated_topology, protonated_positions, actual_variants = add_hydrogens_with_variants(
+        fixer.topology,
+        fixer.positions,
+        protonation_ph,
+        variant_plan["variants"],
+    )
+    write_prepared_receptor_pdb(
+        protonated_topology,
+        protonated_positions,
+        output_path,
+        variant_plan["resolved_variants"],
+    )
+
+    metadata: Dict[str, Any] = {
+        "schema_version": 1,
+        "prepared_receptor_pdb": output_path,
+        "receptor_protonation_ph": protonation_ph,
+        "pocket_filtered": pocket_residue_keys is not None,
+        "pocket_cutoff_angstrom": POCKET_RESIDUE_CUTOFF_A,
+        "pocket_residue_keys": sorted(pocket_residue_keys or []),
+        "reduce_available": reduce_report["reduce_available"],
+        "reduce_applied": reduce_report["reduce_applied"],
+        "propka_available": propka_report.get("propka_available", False),
+        "propka_error": propka_report.get("propka_error"),
+        "propka_shifted_residues": propka_report.get("shifted_residues", []),
+        "applied_overrides": variant_plan["applied_overrides"],
+        "ignored_shifted_residues": variant_plan["ignored_shifted_residues"],
+        "resolved_variants": variant_plan["resolved_variants"],
+        "actual_variants": actual_variants,
+        "disulfide_residue_keys": variant_plan["disulfide_residue_keys"],
+        "prepared_chain_count": sum(1 for _ in protonated_topology.chains()),
+        "prepared_residue_count": sum(1 for _ in protonated_topology.residues()),
+        "prepared_atom_count": protonated_topology.getNumAtoms(),
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    metadata["metadata_path"] = write_receptor_prep_metadata(output_path, metadata)
+
+    # Clean up reduce temp file (self-contained path only)
+    if reduced_path is not None and reduced_path != input_pdb:
+        try:
+            os.remove(reduced_path)
+        except OSError:
+            pass
+
+    return metadata
 
 
 def protonate_existing_prepared_receptor(

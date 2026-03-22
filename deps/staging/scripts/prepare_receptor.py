@@ -34,13 +34,10 @@ import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from receptor_protonation import (
-    _sanitize_positions,
-    add_hydrogens_with_variants,
-    build_variant_plan,
     collect_propka_shifted_residues,
     identify_pocket_residue_keys_from_pdb,
+    prepare_receptor_with_propka,
     run_reduce_if_available,
-    write_prepared_receptor_pdb,
     write_receptor_prep_metadata,
     POCKET_RESIDUE_CUTOFF_A,
 )
@@ -414,67 +411,30 @@ def prepare_receptor(
     fixer.addMissingAtoms()
     print('PROGRESS:prepare_receptor:60', flush=True)
 
-    # 8. Sanitize positions (fix PDBFixer nested-Quantity bug that causes
-    #    AssertionError in addHydrogens)
-    positions = _sanitize_positions(fixer.positions)
-
-    # 9. Build variant plan and protonate
-    print('  Building protonation variant plan...', file=sys.stderr)
-    variant_plan = build_variant_plan(
-        fixer.topology,
-        positions,
-        ph,
-        pocket_residue_keys=pocket_residue_keys,
-        shifted_residues=propka_report.get('shifted_residues', []),
-    )
-    print('PROGRESS:prepare_receptor:70', flush=True)
-
-    print('  Adding hydrogens...', file=sys.stderr)
-    protonated_topology, protonated_positions, actual_variants = add_hydrogens_with_variants(
-        fixer.topology,
-        positions,
-        ph,
-        variant_plan['variants'],
-    )
-    print('PROGRESS:prepare_receptor:85', flush=True)
-
-    # 10. Write output
-    print('  Writing prepared receptor...', file=sys.stderr)
-    write_prepared_receptor_pdb(
-        protonated_topology,
-        protonated_positions,
-        output_pdb,
-        variant_plan['resolved_variants'],
-    )
-
-    metadata: Dict[str, Any] = {
+    # 8. Delegate to prepare_receptor_with_propka for protonation + write
+    #    (shared core function — same code path as docking)
+    print('  Protonating and writing receptor...', file=sys.stderr)
+    extra_metadata = {
         'schema_version': 2,
-        'prepared_receptor_pdb': output_pdb,
         'input_path': input_path,
-        'receptor_protonation_ph': ph,
-        'pocket_filtered': pocket_residue_keys is not None,
-        'pocket_cutoff_angstrom': POCKET_RESIDUE_CUTOFF_A,
-        'pocket_residue_keys': sorted(pocket_residue_keys) if pocket_residue_keys else [],
-        'reduce_available': reduce_report['reduce_available'],
-        'reduce_applied': reduce_report['reduce_applied'],
-        'propka_available': propka_report.get('propka_available', False),
-        'propka_error': propka_report.get('propka_error'),
-        'propka_shifted_residues': propka_report.get('shifted_residues', []),
-        'applied_overrides': variant_plan['applied_overrides'],
-        'ignored_shifted_residues': variant_plan['ignored_shifted_residues'],
-        'resolved_variants': variant_plan['resolved_variants'],
-        'actual_variants': actual_variants,
-        'disulfide_residue_keys': variant_plan['disulfide_residue_keys'],
         'detected_chain_breaks': break_records,
         'removed_internal_missing_residues': removed_internal,
         'retained_terminal_missing_residues': retained_terminal,
-        'prepared_chain_count': builtins.sum(1 for _ in protonated_topology.chains()),
-        'prepared_residue_count': builtins.sum(1 for _ in protonated_topology.residues()),
-        'prepared_atom_count': protonated_topology.getNumAtoms(),
     }
-    metadata['metadata_path'] = write_receptor_prep_metadata(output_pdb, metadata)
+
+    metadata = prepare_receptor_with_propka(
+        pdb_path,
+        output_pdb,
+        ph,
+        pocket_residue_keys=pocket_residue_keys,
+        fixer=fixer,
+        propka_report=propka_report,
+        reduce_report=reduce_report,
+        extra_metadata=extra_metadata,
+    )
+
     print('PROGRESS:prepare_receptor:100', flush=True)
-    print(f'  Receptor prepared: {protonated_topology.getNumAtoms()} atoms', file=sys.stderr)
+    print(f'  Receptor prepared: {metadata.get("prepared_atom_count", "?")} atoms', file=sys.stderr)
 
     # Clean up reduce temp file
     if reduced_path != pdb_path:
