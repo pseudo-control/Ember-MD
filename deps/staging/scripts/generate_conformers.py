@@ -1044,6 +1044,12 @@ def main() -> None:
             except Exception:
                 pass
 
+    # Normalize energies to be relative to minimum (CREST already relative,
+    # but MCMM/ETKDG store absolute — make consistent)
+    if conformer_energies:
+        min_e = min(conformer_energies.values())
+        conformer_energies = {k: round(v - min_e, 2) for k, v in conformer_energies.items()}
+
     # Output results
     print(f"\nConformer generation complete: {len(all_conformer_paths)} conformers from {len(ligand_paths)} molecules")
 
