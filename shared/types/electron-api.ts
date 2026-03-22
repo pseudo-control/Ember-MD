@@ -124,7 +124,10 @@ export interface ElectronAPI {
   cancelVinaDocking: () => Promise<void>;
   parseDockResults: (outputDir: string) => Promise<Result<DockResult[], AppError>>;
   listSdfInDirectory: (dirPath: string) => Promise<string[]>;
-  detectPdbLigands: (pdbPath: string) => Promise<Result<DetectedLigand[], AppError>>;
+  detectPdbLigands: (pdbPath: string) => Promise<Result<{
+    ligands: DetectedLigand[];
+    structureInfo?: { totalAtoms: number; hydrogenCount: number; isPrepared: boolean };
+  }, AppError>>;
   extractLigand: (pdbPath: string, ligandId: string, outputPath: string) => Promise<Result<string, AppError>>;
   prepareReceptor: (
     pdbPath: string,
@@ -178,7 +181,7 @@ export interface ElectronAPI {
     energyWindow: number,
     method?: string,
     mcmmOptions?: { steps: number; temperature: number; sampleAmides: boolean }
-  ) => Promise<Result<{ conformerPaths: string[]; parentMapping: Record<string, string> }, AppError>>;
+  ) => Promise<Result<{ conformerPaths: string[]; parentMapping: Record<string, string>; conformerEnergies: Record<string, number> }, AppError>>;
 
   // Conformer generation (standalone)
   runConformGeneration: (
@@ -189,7 +192,7 @@ export interface ElectronAPI {
     energyWindow: number,
     method: string,
     mcmmOptions?: { steps: number; temperature: number; sampleAmides: boolean }
-  ) => Promise<Result<{ conformerPaths: string[]; parentMapping: Record<string, string> }, AppError>>;
+  ) => Promise<Result<{ conformerPaths: string[]; parentMapping: Record<string, string>; conformerEnergies: Record<string, number> }, AppError>>;
   onConformOutput: (callback: (data: OutputData) => void) => () => void;
 
   // Post-dock pocket refinement
@@ -244,7 +247,8 @@ export interface ElectronAPI {
     ligandSdf: string,
     outputDir: string,
     config: MDConfig,
-    ligandOnly?: boolean
+    ligandOnly?: boolean,
+    apo?: boolean
   ) => Promise<Result<string, AppError>>;
   cancelMdBenchmark: () => Promise<void>;
   cancelMdSimulation: () => Promise<void>;

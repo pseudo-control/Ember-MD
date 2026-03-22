@@ -11,6 +11,7 @@ const ConformStepProgress: Component = () => {
     setConformStep,
     setConformOutputDir,
     setConformPaths,
+    setConformEnergies,
     setConformRunning,
     setCurrentPhase,
     setError,
@@ -70,6 +71,7 @@ const ConformStepProgress: Component = () => {
 
       if (result.ok) {
         setConformPaths(result.value.conformerPaths);
+        setConformEnergies(result.value.conformerEnergies || {});
         setCurrentPhase('complete');
         appendLog(`\n${result.value.conformerPaths.length} conformers generated\n`);
       } else {

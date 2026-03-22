@@ -42,7 +42,7 @@ import {
   IpcChannels,
   GenerationStats,
 } from '../shared/types/ipc';
-import type { ProjectJob, ProjectJobPose, LigandPkaResult, QupkakeCapabilityResult } from '../shared/types/ipc';
+import type { ClusteringResult, ProjectJob, ProjectJobPose, LigandPkaResult, QupkakeCapabilityResult, ScoredClusterResult } from '../shared/types/ipc';
 import * as os from 'os';
 import * as zlib from 'zlib';
 
@@ -539,7 +539,7 @@ function loadAndMergeCordialScores(
         cordialByName.set(entryName, {
           expectedPkd: entry.cordial_expected_pkd,
           pHighAffinity,
-          pVeryHighAffinity: entry.cordial_p_very_high_affinity || 0,
+          pVeryHighAffinity: entry.cordial_p_very_high ?? entry.cordial_p_very_high_affinity ?? 0,
         });
       }
     }
@@ -1903,61 +1903,18 @@ function scoreReferencePoseVina(
   config: VinaDockConfig
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const scriptPath = path.join(fraggenRoot, 'run_vina_docking.py');
-    const args = [
-      scriptPath,
-      '--receptor', receptor,
-      '--ligand', referenceLigand,
-      '--reference', referenceLigand,
-      '--output_dir', path.dirname(outputSdfGz),
-      '--autobox_add', String(config.autoboxAdd),
-      '--cpu', '1',
-      '--score_only',
-      '--score_only_output_sdf', outputSdfGz,
-    ];
-    if (config.seed > 0) {
-      args.push('--seed', String(config.seed));
-    }
-
-    const babelDataDir = process.env.BABEL_DATADIR || detectBabelDataDir();
-    const env = {
-      ...process.env,
-      ...(babelDataDir ? { BABEL_DATADIR: babelDataDir } : {}),
-    };
-
-    const python = spawn(condaPythonPath!, args, { env });
-    childProcesses.add(python);
-    dockingProcesses.add(python);
-    let stdout = '';
-    let stderr = '';
-
-    python.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-    python.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    python.on('close', (code: number | null) => {
-      childProcesses.delete(python);
-      dockingProcesses.delete(python);
-      if (code === 0) {
-        const match = stdout.match(/SCORE_ONLY:[^:]+:([-\d.]+)/);
-        if (match) {
-          resolve(parseFloat(match[1]));
-        } else {
-          reject(new Error(`Failed to parse Vina score_only output: ${stdout || stderr}`));
-        }
+    runVinaScoreOnly(receptor, referenceLigand, referenceLigand, {
+      outputSdfGz,
+      autoboxAdd: config.autoboxAdd,
+      cpu: 1,
+      seed: config.seed > 0 ? config.seed : undefined,
+    }).then((result) => {
+      if (result.ok) {
+        resolve(result.value);
       } else {
-        reject(new Error(stderr || 'Vina score_only failed'));
+        reject(new Error(result.error.message));
       }
-    });
-
-    python.on('error', (err: Error) => {
-      childProcesses.delete(python);
-      dockingProcesses.delete(python);
-      reject(err);
-    });
+    }).catch(reject);
   });
 }
 
@@ -2271,14 +2228,21 @@ ipcMain.handle(
 // Detect ligands in PDB file
 ipcMain.handle(
   IpcChannels.DETECT_PDB_LIGANDS,
-  async (_event, pdbPath: string): Promise<Result<Array<{
-    id: string;
-    resname: string;
-    chain: string;
-    resnum: string;
-    num_atoms: number;
-    centroid: { x: number; y: number; z: number };
-  }>, AppError>> => {
+  async (_event, pdbPath: string): Promise<Result<{
+    ligands: Array<{
+      id: string;
+      resname: string;
+      chain: string;
+      resnum: string;
+      num_atoms: number;
+      centroid: { x: number; y: number; z: number };
+    }>;
+    structureInfo?: {
+      totalAtoms: number;
+      hydrogenCount: number;
+      isPrepared: boolean;
+    };
+  }, AppError>> => {
     return new Promise((resolve) => {
       if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
         resolve(Err({
@@ -2318,8 +2282,13 @@ ipcMain.handle(
       python.on('close', (code: number | null) => {
         if (code === 0) {
           try {
-            const ligands = JSON.parse(stdout);
-            resolve(Ok(ligands));
+            const parsed = JSON.parse(stdout);
+            // Handle both old array format and new object format
+            if (Array.isArray(parsed)) {
+              resolve(Ok({ ligands: parsed }));
+            } else {
+              resolve(Ok(parsed));
+            }
           } catch (e) {
             resolve(Err({
               type: 'PARSE_FAILED',
@@ -3587,6 +3556,7 @@ ipcMain.handle(
               resolve(Ok({
                 conformerPaths: result.conformer_paths || [],
                 parentMapping: result.parent_mapping || {},
+                conformerEnergies: result.conformer_energies || {},
               }));
             } else {
               // No output - fallback to original
@@ -3602,6 +3572,7 @@ ipcMain.handle(
               resolve(Ok({
                 conformerPaths: ligandSdfPaths,
                 parentMapping,
+                conformerEnergies: {},
               }));
             }
           } catch (e) {
@@ -3752,6 +3723,7 @@ ipcMain.handle(
               resolve(Ok({
                 conformerPaths: result.conformer_paths || [],
                 parentMapping: result.parent_mapping || {},
+                conformerEnergies: result.conformer_energies || {},
               }));
             } else {
               event.sender.send('conform:output', {
@@ -3762,6 +3734,7 @@ ipcMain.handle(
               resolve(Ok({
                 conformerPaths: [ligandSdfPath],
                 parentMapping: { [name]: name },
+                conformerEnergies: {},
               }));
             }
           } catch (e) {
@@ -4206,7 +4179,8 @@ ipcMain.handle(
     ligandSdf: string,
     outputDir: string,
     config: MDConfig,
-    ligandOnly: boolean = false
+    ligandOnly: boolean = false,
+    apo: boolean = false
   ): Promise<Result<string, AppError>> => {
     return new Promise((resolve) => {
       if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
@@ -4231,7 +4205,6 @@ ipcMain.handle(
 
       const args = [
         scriptPath,
-        '--ligand', ligandSdf,
         '--output_dir', outputDir,
         '--production_ns', String(config.productionNs),
         '--force_field_preset', config.forceFieldPreset || 'ff19sb-opc',
@@ -4239,6 +4212,10 @@ ipcMain.handle(
         '--salt_concentration', String(config.saltConcentrationM || 0.15),
         '--padding', String(config.paddingNm || 1.2),
       ];
+
+      if (!apo && ligandSdf) {
+        args.push('--ligand', ligandSdf);
+      }
 
       if (config.restrainLigandNs && config.restrainLigandNs > 0) {
         args.push('--restrain_ligand_ns', String(config.restrainLigandNs));
@@ -4248,7 +4225,10 @@ ipcMain.handle(
         args.push('--seed', String(config.seed));
       }
 
-      if (ligandOnly) {
+      if (apo) {
+        args.push('--apo');
+        if (receptorPdb) args.push('--receptor', receptorPdb);
+      } else if (ligandOnly) {
         args.push('--ligand_only');
       } else if (receptorPdb) {
         args.push('--receptor', receptorPdb);
@@ -4776,6 +4756,86 @@ const extractVinaAffinity = (sdfGzPath: string): number | undefined => {
   return undefined;
 };
 
+const resolveVinaScriptPath = (): string => path.join(fraggenRoot, 'run_vina_docking.py');
+
+const runVinaScoreOnly = async (
+  receptorPath: string,
+  ligandPath: string,
+  referencePath: string,
+  options?: {
+    outputSdfGz?: string;
+    autoboxAdd?: number;
+    cpu?: number;
+    seed?: number;
+    onStdout?: (text: string) => void;
+    onStderr?: (text: string) => void;
+  },
+): Promise<Result<number, AppError>> => {
+  const vinaScript = resolveVinaScriptPath();
+  if (!fs.existsSync(vinaScript)) {
+    return Err({
+      type: 'SCRIPT_NOT_FOUND',
+      path: vinaScript,
+      message: `Vina script not found: ${vinaScript}`,
+    });
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ember_vina_score_'));
+  const outputSdfGz = options?.outputSdfGz || path.join(tmpDir, 'scored.sdf.gz');
+
+  try {
+    fs.mkdirSync(path.dirname(outputSdfGz), { recursive: true });
+    const babelDataDir = process.env.BABEL_DATADIR || detectBabelDataDir();
+    const env = {
+      ...getSpawnEnv(),
+      ...(babelDataDir ? { BABEL_DATADIR: babelDataDir } : {}),
+    };
+
+    const args = [
+      vinaScript,
+      '--receptor', receptorPath,
+      '--ligand', ligandPath,
+      '--reference', referencePath,
+      '--output_dir', path.dirname(outputSdfGz),
+      '--autobox_add', String(options?.autoboxAdd ?? 4),
+      '--cpu', String(options?.cpu ?? 1),
+      '--score_only',
+      '--score_only_output_sdf', outputSdfGz,
+    ];
+    if ((options?.seed ?? 0) > 0) {
+      args.push('--seed', String(options!.seed));
+    }
+
+    const { stdout, stderr, code } = await spawnPythonScript(args, {
+      env,
+      onStdout: options?.onStdout,
+      onStderr: options?.onStderr,
+    });
+    if (code !== 0) {
+      return Err({
+        type: 'DOCKING_FAILED',
+        message: stderr || `Vina score_only failed with exit code ${code}`,
+      });
+    }
+
+    const match = stdout.match(/SCORE_ONLY:[^:]+:([-\d.]+)/);
+    if (!match) {
+      return Err({
+        type: 'PARSE_FAILED',
+        message: `Failed to parse Vina score_only output: ${stdout || stderr}`,
+      });
+    }
+
+    return Ok(parseFloat(match[1]));
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // ignore temp cleanup failures
+    }
+  }
+};
+
 const readJsonIfExists = <T>(jsonPath: string): T | null => {
   try {
     if (!fs.existsSync(jsonPath)) return null;
@@ -4783,6 +4843,198 @@ const readJsonIfExists = <T>(jsonPath: string): T | null => {
   } catch {
     return null;
   }
+};
+
+const getCanonicalAnalysisRoot = (runPath: string) => path.join(runPath, 'analysis');
+const getCanonicalClusteringDir = (runPath: string) => path.join(getCanonicalAnalysisRoot(runPath), 'clustering');
+const getCanonicalScoredClustersDir = (runPath: string) => path.join(getCanonicalAnalysisRoot(runPath), 'scored_clusters');
+
+const getSimulationClusterArtifacts = (runPath: string): {
+  clusterDirPath?: string;
+  clusteringResultsPath?: string;
+  clusterCount: number;
+} => {
+  const clusterDirCandidates = [
+    getCanonicalClusteringDir(runPath),
+    path.join(runPath, 'results', 'analysis', 'clustering'),
+    getCanonicalScoredClustersDir(runPath),
+    path.join(runPath, 'results', 'analysis', 'scored_clusters'),
+    path.join(runPath, 'clustering'),
+  ];
+
+  for (const candidateDir of clusterDirCandidates) {
+    if (!fs.existsSync(candidateDir)) continue;
+    const clusterFiles = fs.readdirSync(candidateDir).filter((f: string) => f.match(/cluster_\d+_centroid\.pdb/));
+    if (clusterFiles.length === 0) continue;
+    const clusteringResultsPath = path.join(candidateDir, 'clustering_results.json');
+    return {
+      clusterDirPath: candidateDir,
+      clusteringResultsPath: fs.existsSync(clusteringResultsPath) ? clusteringResultsPath : undefined,
+      clusterCount: clusterFiles.length,
+    };
+  }
+
+  return { clusterCount: 0 };
+};
+
+const readClusteringResult = (directoryPath: string): ClusteringResult | null => {
+  const resultsPath = path.join(directoryPath, 'clustering_results.json');
+  return readJsonIfExists<ClusteringResult>(resultsPath);
+};
+
+const readClusterScoreRows = (directoryPath: string): ScoredClusterResult[] => {
+  const resultsPath = path.join(directoryPath, 'cluster_scores.json');
+  const scoreData = readJsonIfExists<{ clusters?: ScoredClusterResult[] }>(resultsPath);
+  return Array.isArray(scoreData?.clusters) ? scoreData!.clusters : [];
+};
+
+const writeClusterScoreRows = (directoryPath: string, clusters: ScoredClusterResult[]): void => {
+  const resultsPath = path.join(directoryPath, 'cluster_scores.json');
+  fs.writeFileSync(resultsPath, JSON.stringify({ clusters }, null, 2));
+};
+
+const mergeClusterScoresWithCanonical = (
+  clusteringResults: ClusteringResult,
+  scoreClusters: Array<Partial<ScoredClusterResult> & { clusterId: number }>,
+): ScoredClusterResult[] => {
+  const scoreMap = new Map(scoreClusters.map((cluster) => [cluster.clusterId, cluster]));
+  return clusteringResults.clusters.map((cluster) => {
+    const scored = scoreMap.get(cluster.clusterId);
+    return {
+      clusterId: cluster.clusterId,
+      frameCount: cluster.frameCount,
+      population: cluster.population,
+      centroidFrame: cluster.centroidFrame,
+      centroidPdbPath: cluster.centroidPdbPath || scored?.centroidPdbPath || '',
+      receptorPdbPath: scored?.receptorPdbPath,
+      ligandSdfPath: scored?.ligandSdfPath,
+      vinaRescore: scored?.vinaRescore,
+      cordialExpectedPkd: scored?.cordialExpectedPkd,
+      cordialPHighAffinity: scored?.cordialPHighAffinity,
+      cordialPVeryHighAffinity: scored?.cordialPVeryHighAffinity,
+    };
+  });
+};
+
+const resolveCordialScriptPath = (): string | null => {
+  let scriptPath = path.join(fraggenRoot, 'score_cordial.py');
+  if (fs.existsSync(scriptPath)) {
+    return scriptPath;
+  }
+  const projectRoot = path.resolve(__dirname, '..', '..');
+  scriptPath = path.join(projectRoot, 'scripts', 'score_cordial.py');
+  return fs.existsSync(scriptPath) ? scriptPath : null;
+};
+
+const runCordialScoringJob = async (
+  input: { dockDir?: string; pairCsv?: string },
+  outputCsv: string,
+  batchSize: number,
+  options?: {
+    cwd?: string;
+    onStdout?: (text: string) => void;
+    onStderr?: (text: string) => void;
+  },
+): Promise<Result<{ scoresFile: string; count: number }, AppError>> => {
+  const cordialRoot = getCordialRoot();
+  if (!cordialRoot) {
+    return Err({
+      type: 'CORDIAL_FAILED',
+      message: 'CORDIAL not found. Set CORDIAL_ROOT environment variable or clone to ~/Desktop/CORDIAL',
+    });
+  }
+
+  const pythonPath = getCondaPythonPath();
+  if (!pythonPath) {
+    return Err({
+      type: 'PYTHON_NOT_FOUND',
+      message: 'Conda environment not found. Make sure the openmm-metal environment is set up.',
+    });
+  }
+
+  const scriptPath = resolveCordialScriptPath();
+  if (!scriptPath) {
+    return Err({
+      type: 'SCRIPT_NOT_FOUND',
+      path: path.join(fraggenRoot, 'score_cordial.py'),
+      message: 'CORDIAL scoring script not found',
+    });
+  }
+
+  const args = [
+    scriptPath,
+    '--cordial_root', cordialRoot,
+    '--output', outputCsv,
+    '--batch_size', String(batchSize),
+  ];
+  if (input.dockDir) {
+    args.push('--dock_dir', input.dockDir);
+  } else if (input.pairCsv) {
+    args.push('--pair_csv', input.pairCsv);
+  } else {
+    return Err({ type: 'CORDIAL_FAILED', message: 'No CORDIAL input was provided' });
+  }
+
+  const proc = spawn(pythonPath, args, {
+    cwd: options?.cwd || cordialRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cordialRoot,
+      KMP_DUPLICATE_LIB_OK: 'TRUE',
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || '1',
+      MKL_NUM_THREADS: process.env.MKL_NUM_THREADS || '1',
+      OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS || '1',
+      NUMEXPR_NUM_THREADS: process.env.NUMEXPR_NUM_THREADS || '1',
+      VECLIB_MAXIMUM_THREADS: process.env.VECLIB_MAXIMUM_THREADS || '1',
+    },
+  });
+
+  childProcesses.add(proc);
+
+  return await new Promise((resolve) => {
+    let stderr = '';
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      const text = data.toString();
+      options?.onStdout?.(text);
+    });
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      options?.onStderr?.(text);
+    });
+
+    proc.on('close', (code) => {
+      childProcesses.delete(proc);
+
+      if (code === 0 && fs.existsSync(outputCsv)) {
+        try {
+          const content = fs.readFileSync(outputCsv, 'utf-8');
+          const lines = content.trim().split('\n');
+          resolve(Ok({ scoresFile: outputCsv, count: Math.max(0, lines.length - 1) }));
+        } catch (err) {
+          resolve(Err({
+            type: 'CORDIAL_FAILED',
+            message: `Error reading CORDIAL output: ${err}`,
+          }));
+        }
+      } else {
+        resolve(Err({
+          type: 'CORDIAL_FAILED',
+          message: stderr || `CORDIAL scoring failed with exit code ${code}`,
+        }));
+      }
+    });
+
+    proc.on('error', (err) => {
+      childProcesses.delete(proc);
+      resolve(Err({
+        type: 'CORDIAL_FAILED',
+        message: `Failed to start CORDIAL scoring: ${err.message}`,
+      }));
+    });
+  });
 };
 
 const getBindingSiteResultFile = (outputDir: string, projectName?: string): string | null => {
@@ -4887,6 +5139,8 @@ const findSimulationJob = (runPath: string, runName: string): ProjectJob | null 
   let finalPdbPath: string | undefined;
   if (resultsFiles.includes('final.pdb')) {
     finalPdbPath = path.join(resultsDir, 'final.pdb');
+  } else if (runFiles.includes('final.pdb')) {
+    finalPdbPath = path.join(runPath, 'final.pdb');
   } else {
     const legacyFinal = runFiles.find((f) => f.endsWith('_final.pdb'));
     if (legacyFinal) finalPdbPath = path.join(runPath, legacyFinal);
@@ -4897,6 +5151,14 @@ const findSimulationJob = (runPath: string, runName: string): ProjectJob | null 
 
   if (resultsFiles.includes('system.pdb')) systemPdbPath = path.join(resultsDir, 'system.pdb');
   if (resultsFiles.includes('trajectory.dcd')) trajectoryDcdPath = path.join(resultsDir, 'trajectory.dcd');
+
+  // Top-level unprefixed files (current MD runner writes directly to run root)
+  if (!systemPdbPath && runFiles.includes('system.pdb')) {
+    systemPdbPath = path.join(runPath, 'system.pdb');
+  }
+  if (!trajectoryDcdPath && runFiles.includes('trajectory.dcd')) {
+    trajectoryDcdPath = path.join(runPath, 'trajectory.dcd');
+  }
 
   if (!systemPdbPath) {
     const legacySys = runFiles.find((f) => f.endsWith('_system.pdb'));
@@ -4909,28 +5171,11 @@ const findSimulationJob = (runPath: string, runName: string): ProjectJob | null 
 
   if (!finalPdbPath && !(systemPdbPath && trajectoryDcdPath)) return null;
 
-  let clusterCount = 0;
-  let clusterDirPath: string | undefined;
-  const newClusterDir = path.join(runPath, 'results', 'analysis', 'scored_clusters');
-  const altClusterDir = path.join(runPath, 'results', 'analysis', 'clustering');
-  const legacyScoredDir = path.join(runPath, 'analysis', 'scored_clusters');
-  const legacyClusterDir = path.join(runPath, 'clustering');
-  const resolvedClusterDir = fs.existsSync(newClusterDir)
-    ? newClusterDir
-    : fs.existsSync(altClusterDir)
-      ? altClusterDir
-      : fs.existsSync(legacyScoredDir)
-        ? legacyScoredDir
-        : fs.existsSync(legacyClusterDir)
-          ? legacyClusterDir
-          : null;
-  if (resolvedClusterDir) {
-    const clusterFiles = fs.readdirSync(resolvedClusterDir).filter((f: string) => f.match(/cluster_\d+_centroid\.pdb/));
-    if (clusterFiles.length > 0) {
-      clusterCount = clusterFiles.length;
-      clusterDirPath = resolvedClusterDir;
-    }
-  }
+  const {
+    clusterCount,
+    clusterDirPath,
+    clusteringResultsPath,
+  } = getSimulationClusterArtifacts(runPath);
 
   const parts = [];
   if (trajectoryDcdPath) parts.push('trajectory');
@@ -4950,6 +5195,7 @@ const findSimulationJob = (runPath: string, runName: string): ProjectJob | null 
     hasTrajectory: !!trajectoryDcdPath,
     clusterCount,
     clusterDir: clusterDirPath,
+    clusteringResultsPath,
   };
 };
 
@@ -5219,19 +5465,27 @@ ipcMain.handle(
       if (legacy) trajectoryDcd = path.join(folderPath, legacy);
     }
 
-    if (systemPdb) {
-      return {
-        id: `sim:${folderName}`,
-        type: 'simulation',
-        folder: folderName,
-        label: folderName,
+	    if (systemPdb) {
+	      const {
+	        clusterCount,
+	        clusterDirPath,
+	        clusteringResultsPath,
+	      } = getSimulationClusterArtifacts(folderPath);
+	      return {
+	        id: `sim:${folderName}`,
+	        type: 'simulation',
+	        folder: folderName,
+	        label: folderName,
         path: folderPath,
         lastModified: folderStat.mtimeMs,
-        systemPdb,
-        trajectoryDcd,
-        hasTrajectory: !!trajectoryDcd,
-      };
-    }
+	        systemPdb,
+	        trajectoryDcd,
+	        hasTrajectory: !!trajectoryDcd,
+	        clusterCount,
+	        clusterDir: clusterDirPath,
+	        clusteringResultsPath,
+	      };
+	    }
 
     const conformerFiles = folderFiles
       .filter((f) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(f))
@@ -5719,24 +5973,16 @@ ipcMain.handle(
       tasks.push((async () => {
         try {
           console.log('[Score] Running Vina score_only...');
-          const tmpDir = path.join(os.tmpdir(), `ember_score_${Date.now()}`);
-          fs.mkdirSync(tmpDir, { recursive: true });
-          const tmpOut = path.join(tmpDir, 'scored.sdf.gz');
-          const { stdout, code } = await spawnPythonScript([
-            vinaScript, '--receptor', pdbPath, '--ligand', ligandSdfPath!,
-            '--reference', ligandSdfPath!, '--output_dir', tmpDir,
-            '--autobox_add', '4', '--cpu', '1', '--score_only', '--score_only_output_sdf', tmpOut,
-          ]);
-          if (code === 0) {
-            const scoreMatch = stdout.match(/SCORE_ONLY:\S+:([-\d.]+)/);
-            if (scoreMatch) {
-              result.vinaRescore = parseFloat(scoreMatch[1]);
-              console.log(`[Score] Vina rescore: ${result.vinaRescore} kcal/mol`);
-            }
+          const vinaResult = await runVinaScoreOnly(pdbPath, ligandSdfPath!, ligandSdfPath!, {
+            autoboxAdd: 4,
+            cpu: 1,
+          });
+          if (vinaResult.ok) {
+            result.vinaRescore = vinaResult.value;
+            console.log(`[Score] Vina rescore: ${result.vinaRescore} kcal/mol`);
           } else {
-            console.error(`[Score] Vina score_only failed (exit ${code})`);
+            console.error('[Score] Vina score_only failed:', vinaResult.error.message);
           }
-          try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* */ }
         } catch (e) {
           console.error('[Score] Vina score_only error:', e);
         }
@@ -5846,126 +6092,41 @@ ipcMain.handle(
     dockOutputDir: string,
     batchSize: number = 32
   ): Promise<Result<{ scoresFile: string; count: number }, AppError>> => {
-    const cordialRoot = getCordialRoot();
-    if (!cordialRoot) {
-      return Err({
-        type: 'CORDIAL_FAILED',
-        message: 'CORDIAL not found. Set CORDIAL_ROOT environment variable or clone to ~/Desktop/CORDIAL',
-      });
-    }
-
-    const pythonPath = getCondaPythonPath();
-    if (!pythonPath) {
-      return Err({
-        type: 'PYTHON_NOT_FOUND',
-        message: 'Conda environment not found. Make sure the openmm-metal environment is set up.',
-      });
-    }
-
-    let scriptPath = path.join(fraggenRoot, 'score_cordial.py');
-    if (!fs.existsSync(scriptPath)) {
-      const projectRoot = path.resolve(__dirname, '..', '..');
-      scriptPath = path.join(projectRoot, 'scripts', 'score_cordial.py');
-    }
-    if (!fs.existsSync(scriptPath)) {
-      return Err({
-        type: 'SCRIPT_NOT_FOUND',
-        path: scriptPath,
-        message: `CORDIAL scoring script not found: ${scriptPath}`,
-      });
-    }
-
-    // Write results to results/ subdir (new layout), creating it if needed
     const cordialResultsDir = path.join(dockOutputDir, 'results');
     fs.mkdirSync(cordialResultsDir, { recursive: true });
     const outputCsv = path.join(cordialResultsDir, 'cordial_scores.csv');
+    const cordialRoot = getCordialRoot() || '(missing)';
+    event.sender.send(IpcChannels.DOCK_OUTPUT, {
+      type: 'stdout',
+      data: `=== CORDIAL Rescoring ===\nCORDIAL Root: ${cordialRoot}\nDock Output: ${dockOutputDir}\nBatch Size: ${batchSize}\n\n`,
+    });
 
-    return new Promise((resolve) => {
+    const result = await runCordialScoringJob(
+      { dockDir: dockOutputDir },
+      outputCsv,
+      batchSize,
+      {
+        onStdout: (text) => {
+          event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stdout', data: text });
+        },
+        onStderr: (text) => {
+          if (!text.toLowerCase().includes('error') && !text.toLowerCase().includes('traceback')) {
+            event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stdout', data: text });
+          } else {
+            event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stderr', data: text });
+          }
+        },
+      },
+    );
+
+    if (result.ok) {
       event.sender.send(IpcChannels.DOCK_OUTPUT, {
         type: 'stdout',
-        data: `=== CORDIAL Rescoring ===\nCORDIAL Root: ${cordialRoot}\nDock Output: ${dockOutputDir}\nBatch Size: ${batchSize}\n\n`,
+        data: `\n=== CORDIAL Scoring Complete ===\nScored ${result.value.count} poses\nOutput: ${outputCsv}\n`,
       });
+    }
 
-      const args = [
-        scriptPath,
-        '--dock_dir', dockOutputDir,
-        '--cordial_root', cordialRoot,
-        '--output', outputCsv,
-        '--batch_size', String(batchSize),
-      ];
-
-      const proc = spawn(pythonPath, args, {
-        cwd: cordialRoot,
-        env: {
-          ...process.env,
-          PYTHONPATH: cordialRoot,
-          // CORDIAL pulls in PyTorch, NumPy/SciPy, and RDKit from the same
-          // environment. On macOS/conda this can trip duplicate libomp
-          // initialization; keep rescoring isolated and conservative.
-          KMP_DUPLICATE_LIB_OK: 'TRUE',
-          OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || '1',
-          MKL_NUM_THREADS: process.env.MKL_NUM_THREADS || '1',
-          OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS || '1',
-          NUMEXPR_NUM_THREADS: process.env.NUMEXPR_NUM_THREADS || '1',
-          VECLIB_MAXIMUM_THREADS: process.env.VECLIB_MAXIMUM_THREADS || '1',
-        },
-      });
-
-      childProcesses.add(proc);
-
-      proc.stdout?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stdout', data: text });
-      });
-
-      proc.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        // Don't treat warnings as errors
-        if (!text.toLowerCase().includes('error') && !text.toLowerCase().includes('traceback')) {
-          event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stdout', data: text });
-        } else {
-          event.sender.send(IpcChannels.DOCK_OUTPUT, { type: 'stderr', data: text });
-        }
-      });
-
-      proc.on('close', (code) => {
-        childProcesses.delete(proc);
-
-        if (code === 0 && fs.existsSync(outputCsv)) {
-          // Count results
-          try {
-            const content = fs.readFileSync(outputCsv, 'utf-8');
-            const lines = content.trim().split('\n');
-            const count = Math.max(0, lines.length - 1); // Subtract header
-
-            event.sender.send(IpcChannels.DOCK_OUTPUT, {
-              type: 'stdout',
-              data: `\n=== CORDIAL Scoring Complete ===\nScored ${count} poses\nOutput: ${outputCsv}\n`,
-            });
-
-            resolve(Ok({ scoresFile: outputCsv, count }));
-          } catch (err) {
-            resolve(Err({
-              type: 'CORDIAL_FAILED',
-              message: `Error reading CORDIAL output: ${err}`,
-            }));
-          }
-        } else {
-          resolve(Err({
-            type: 'CORDIAL_FAILED',
-            message: `CORDIAL scoring failed with exit code ${code}`,
-          }));
-        }
-      });
-
-      proc.on('error', (err) => {
-        childProcesses.delete(proc);
-        resolve(Err({
-          type: 'CORDIAL_FAILED',
-          message: `Failed to start CORDIAL scoring: ${err.message}`,
-        }));
-      });
-    });
+    return result;
   }
 );
 
@@ -6418,17 +6579,7 @@ ipcMain.handle(
       stripWaters: boolean;
       outputDir: string;
     }
-  ): Promise<Result<{
-    clusters: Array<{
-      clusterId: number;
-      frameCount: number;
-      population: number;
-      centroidFrame: number;
-      centroidPdbPath?: string;
-    }>;
-    frameAssignments: number[];
-    outputDir: string;
-  }, AppError>> => {
+  ): Promise<Result<ClusteringResult, AppError>> => {
     if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
       return Err({
         type: 'PYTHON_NOT_FOUND',
@@ -6477,6 +6628,11 @@ ipcMain.handle(
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
+        const match = text.match(/Calculated (\d+)\/(\d+)/);
+        if (match) {
+          const pct = Math.round(100 * parseInt(match[1], 10) / parseInt(match[2], 10));
+          try { event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: `PROGRESS:clustering:${pct}\n` }); } catch {}
+        }
         try { event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text }); } catch {}
       });
 
@@ -6498,6 +6654,8 @@ ipcMain.handle(
               clusters: result.clusters,
               frameAssignments: result.frameAssignments,
               outputDir: options.outputDir,
+              requestedClusters: result.requestedClusters,
+              actualClusters: result.actualClusters,
             }));
           } catch (err) {
             resolve(Err({
@@ -7069,7 +7227,7 @@ ipcMain.handle(
   }
 );
 
-// Score MD cluster centroids with xTB strain + Vina rescore (+ CORDIAL via separate call)
+// Score holo MD cluster centroids with shared Vina score_only + CORDIAL rescoring
 ipcMain.handle(
   IpcChannels.SCORE_MD_CLUSTERS,
   async (
@@ -7082,23 +7240,12 @@ ipcMain.handle(
       inputReceptorPdb?: string;
       numClusters: number;
       enableVina: boolean;
-      enableXtb: boolean;
       enableCordial: boolean;
     }
   ): Promise<Result<{
-    clusters: Array<{
-      clusterId: number;
-      frameCount: number;
-      population: number;
-      centroidFrame: number;
-      centroidPdbPath: string;
-      vinaRescore?: number;
-      xtbStrainKcal?: number;
-      cordialExpectedPkd?: number;
-      cordialPHighAffinity?: number;
-      cordialPVeryHighAffinity?: number;
-    }>;
+    clusters: ScoredClusterResult[];
     outputDir: string;
+    clusteringResults: ClusteringResult;
   }, AppError>> => {
     if (!condaPythonPath || !fs.existsSync(condaPythonPath)) {
       return Err({
@@ -7107,119 +7254,122 @@ ipcMain.handle(
       });
     }
 
-    const scoredClustersDir = path.join(options.outputDir, 'scored_clusters');
+    const analysisDir = options.outputDir;
+    const clusteringDir = path.join(analysisDir, 'clustering');
+    const scoredClustersDir = path.join(analysisDir, 'scored_clusters');
+    fs.mkdirSync(clusteringDir, { recursive: true });
     fs.mkdirSync(scoredClustersDir, { recursive: true });
 
-    // --- Step 1: Cluster trajectory ---
-    const clusterScript = path.join(fraggenRoot, 'cluster_trajectory.py');
-    if (!fs.existsSync(clusterScript)) {
+    // --- Step 1: Create or reuse canonical clustering output ---
+    let clusteringResults = readClusteringResult(clusteringDir);
+    if (!clusteringResults || clusteringResults.clusters.length === 0) {
+      const clusterScript = path.join(fraggenRoot, 'cluster_trajectory.py');
+      if (!fs.existsSync(clusterScript)) {
+        return Err({
+          type: 'SCRIPT_NOT_FOUND',
+          path: clusterScript,
+          message: `Clustering script not found: ${clusterScript}`,
+        });
+      }
+
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: `=== Clustering into ${options.numClusters} centroids ===\n`,
+      });
+
+      const clusterResult = await new Promise<Result<void, AppError>>((resolve) => {
+        const args = [
+          clusterScript,
+          '--topology', options.topologyPath,
+          '--trajectory', options.trajectoryPath,
+          '--n_clusters', String(options.numClusters),
+          '--method', 'kmeans',
+          '--selection', 'ligand',
+          '--strip_waters',
+          '--output_dir', clusteringDir,
+        ];
+
+        const proc = spawn(condaPythonPath!, args, { env: getSpawnEnv() });
+        childProcesses.add(proc);
+
+        proc.stdout?.on('data', (data: Buffer) => {
+          const text = data.toString();
+          event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
+          const match = text.match(/Calculated (\d+)\/(\d+)/);
+          if (match) {
+            const pct = Math.round(100 * parseInt(match[1], 10) / parseInt(match[2], 10));
+            event.sender.send(IpcChannels.MD_OUTPUT, {
+              type: 'stdout', data: `PROGRESS:clustering:${pct}\n`,
+            });
+          }
+        });
+
+        proc.stderr?.on('data', (data: Buffer) => {
+          event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: data.toString() });
+        });
+
+        proc.on('close', (code: number | null) => {
+          childProcesses.delete(proc);
+          if (code === 0) {
+            resolve(Ok(undefined));
+          } else {
+            resolve(Err({ type: 'CLUSTERING_FAILED', message: `Clustering failed with exit code ${code}` }));
+          }
+        });
+
+        proc.on('error', (err: Error) => {
+          childProcesses.delete(proc);
+          resolve(Err({ type: 'CLUSTERING_FAILED', message: err.message }));
+        });
+      });
+
+      if (!clusterResult.ok) {
+        return Err(clusterResult.error);
+      }
+
+      clusteringResults = readClusteringResult(clusteringDir);
+    } else {
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: `=== Reusing existing clustering (${clusteringResults.clusters.length} centroids) ===\nPROGRESS:clustering:100\n`,
+      });
+    }
+
+    if (!clusteringResults || clusteringResults.clusters.length === 0) {
       return Err({
-        type: 'SCRIPT_NOT_FOUND',
-        path: clusterScript,
-        message: `Clustering script not found: ${clusterScript}`,
+        type: 'CLUSTERING_FAILED',
+        message: 'Canonical clustering results were not found after clustering completed',
       });
     }
 
-    event.sender.send(IpcChannels.MD_OUTPUT, {
-      type: 'stdout',
-      data: `=== Clustering into ${options.numClusters} centroids ===\n`,
-    });
-
-    const clusterResult = await new Promise<Result<void, AppError>>((resolve) => {
-      const args = [
-        clusterScript,
-        '--topology', options.topologyPath,
-        '--trajectory', options.trajectoryPath,
-        '--n_clusters', String(options.numClusters),
-        '--method', 'kmeans',
-        '--selection', 'ligand',
-        '--strip_waters',
-        '--output_dir', scoredClustersDir,
-      ];
-
-      const proc = spawn(condaPythonPath!, args, { env: getSpawnEnv() });
-      childProcesses.add(proc);
-
-      proc.stdout?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
-        // Parse clustering progress
-        const match = text.match(/Calculated (\d+)\/(\d+)/);
-        if (match) {
-          const pct = Math.round(100 * parseInt(match[1]) / parseInt(match[2]));
-          event.sender.send(IpcChannels.MD_OUTPUT, {
-            type: 'stdout', data: `PROGRESS:clustering:${pct}\n`,
-          });
-        }
-      });
-
-      proc.stderr?.on('data', (data: Buffer) => {
-        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: data.toString() });
-      });
-
-      proc.on('close', (code: number | null) => {
-        childProcesses.delete(proc);
-        if (code === 0) {
-          resolve(Ok(undefined));
-        } else {
-          resolve(Err({ type: 'CLUSTERING_FAILED', message: `Clustering failed with exit code ${code}` }));
-        }
-      });
-
-      proc.on('error', (err: Error) => {
-        childProcesses.delete(proc);
-        resolve(Err({ type: 'CLUSTERING_FAILED', message: err.message }));
-      });
-    });
-
-    if (!clusterResult.ok) {
-      return Err(clusterResult.error);
-    }
-
-    // --- Step 2: Score centroids (xTB + Vina) ---
+    // --- Step 2: Prepare centroid receptor/ligand pairs ---
     const scoreScript = path.join(fraggenRoot, 'score_cluster_centroids.py');
     if (!fs.existsSync(scoreScript)) {
       return Err({
         type: 'SCRIPT_NOT_FOUND',
         path: scoreScript,
-        message: `Scoring script not found: ${scoreScript}`,
+        message: `Cluster preparation script not found: ${scoreScript}`,
       });
     }
 
     event.sender.send(IpcChannels.MD_OUTPUT, {
       type: 'stdout',
-      data: `=== Scoring cluster centroids ===\n`,
+      data: '=== Preparing cluster centroids for rescoring ===\n',
     });
 
-    const scoreResult = await new Promise<Result<void, AppError>>((resolve) => {
+    const prepareResult = await new Promise<Result<void, AppError>>((resolve) => {
       const args = [
         scoreScript,
-        '--clustering_dir', scoredClustersDir,
+        '--clustering_dir', clusteringDir,
         '--input_ligand_sdf', options.inputLigandSdf,
         '--output_dir', scoredClustersDir,
       ];
-
-      if (options.inputReceptorPdb) {
-        args.push('--input_receptor_pdb', options.inputReceptorPdb);
-      }
-
-      const xtbPath = getQupkakeXtbPath();
-      if (options.enableXtb && xtbPath) {
-        args.push('--xtb_binary', xtbPath);
-      } else {
-        args.push('--skip_xtb');
-      }
-
-      if (!options.enableVina || !options.inputReceptorPdb) {
-        args.push('--skip_vina');
-      }
 
       const proc = spawn(condaPythonPath!, args, { env: getSpawnEnv() });
       childProcesses.add(proc);
 
       proc.stdout?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
+        event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: data.toString() });
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
@@ -7233,7 +7383,7 @@ ipcMain.handle(
         } else {
           resolve(Err({
             type: 'CLUSTER_SCORING_FAILED',
-            message: `Cluster scoring failed with exit code ${code}`,
+            message: `Cluster preparation failed with exit code ${code}`,
           }));
         }
       });
@@ -7244,146 +7394,186 @@ ipcMain.handle(
       });
     });
 
-    if (!scoreResult.ok) {
-      return Err(scoreResult.error);
+    if (!prepareResult.ok) {
+      return Err(prepareResult.error);
     }
 
-    // --- Step 3: CORDIAL scoring (if enabled and available) ---
-    if (options.enableCordial && options.inputReceptorPdb) {
-      const cordialRoot = getCordialRoot();
-      if (cordialRoot) {
+    let scoredClusters = readClusterScoreRows(scoredClustersDir);
+    if (scoredClusters.length !== clusteringResults.clusters.length) {
+      return Err({
+        type: 'CLUSTER_SCORING_FAILED',
+        message: `Expected ${clusteringResults.clusters.length} prepared clusters, found ${scoredClusters.length}`,
+      });
+    }
+
+    for (const cluster of scoredClusters) {
+      if (!cluster.receptorPdbPath || !cluster.ligandSdfPath) {
+        return Err({
+          type: 'CLUSTER_SCORING_FAILED',
+          message: `Cluster ${cluster.clusterId + 1} is missing prepared receptor/ligand files`,
+        });
+      }
+    }
+
+    // --- Step 3: Vina fixed-pose rescoring ---
+    if (options.enableVina) {
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: '=== Vina rescoring cluster centroids ===\n',
+      });
+
+      for (let i = 0; i < scoredClusters.length; i++) {
+        const cluster = scoredClusters[i];
+        const vinaResult = await runVinaScoreOnly(
+          cluster.receptorPdbPath!,
+          cluster.ligandSdfPath!,
+          cluster.ligandSdfPath!,
+          {
+            autoboxAdd: 4,
+            cpu: 1,
+            onStdout: (text) => {
+              event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
+            },
+            onStderr: (text) => {
+              event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: text });
+            },
+          },
+        );
+        if (!vinaResult.ok) {
+          return Err({
+            type: 'CLUSTER_SCORING_FAILED',
+            message: `Vina rescoring failed for cluster ${cluster.clusterId + 1}: ${vinaResult.error.message}`,
+          });
+        }
+        cluster.vinaRescore = Math.round(vinaResult.value * 100) / 100;
+        const pct = Math.round(100 * (i + 1) / scoredClusters.length);
         event.sender.send(IpcChannels.MD_OUTPUT, {
           type: 'stdout',
-          data: `=== CORDIAL rescoring cluster centroids ===\n`,
+          data: `PROGRESS:scoring_vina:${pct}\n`,
         });
-
-        let cordialScript = path.join(fraggenRoot, 'score_cordial.py');
-        if (!fs.existsSync(cordialScript)) {
-          const projectRoot = path.resolve(__dirname, '..', '..');
-          cordialScript = path.join(projectRoot, 'scripts', 'score_cordial.py');
-        }
-
-        if (fs.existsSync(cordialScript)) {
-          // Create a temporary directory with the layout CORDIAL expects:
-          // inputs/receptor.pdb, results/poses/*.sdf (as uncompressed individual files)
-          const cordialTmpDir = path.join(scoredClustersDir, 'cordial_input');
-          const cordialInputsDir = path.join(cordialTmpDir, 'inputs');
-          const cordialPosesDir = path.join(cordialTmpDir, 'results', 'poses');
-          fs.mkdirSync(cordialInputsDir, { recursive: true });
-          fs.mkdirSync(cordialPosesDir, { recursive: true });
-
-          // Copy receptor
-          const cordialReceptor = path.join(cordialInputsDir, 'receptor.pdb');
-          // Use the first split receptor PDB (they're all from the same protein)
-          const clusterFiles = fs.readdirSync(scoredClustersDir)
-            .filter((f: string) => f.match(/^cluster_\d+_receptor\.pdb$/));
-          if (clusterFiles.length > 0) {
-            fs.copyFileSync(path.join(scoredClustersDir, clusterFiles[0]), cordialReceptor);
-          }
-
-          // Copy each cluster ligand SDF as a "docked" file
-          const ligandFiles = fs.readdirSync(scoredClustersDir)
-            .filter((f: string) => f.match(/^cluster_\d+_ligand\.sdf$/));
-          for (const lf of ligandFiles) {
-            const dockName = lf.replace('_ligand.sdf', '_docked.sdf');
-            fs.copyFileSync(path.join(scoredClustersDir, lf), path.join(cordialPosesDir, dockName));
-          }
-
-          await new Promise<void>((resolve) => {
-            const args = [
-              cordialScript,
-              '--dock_dir', cordialTmpDir,
-              '--cordial_root', cordialRoot,
-              '--output', path.join(scoredClustersDir, 'cordial_scores.csv'),
-              '--batch_size', '32',
-            ];
-
-            const proc = spawn(condaPythonPath!, args, {
-              cwd: cordialRoot,
-              env: {
-                ...getSpawnEnv(),
-                PYTHONPATH: cordialRoot,
-                KMP_DUPLICATE_LIB_OK: 'TRUE',
-              },
-            });
-            childProcesses.add(proc);
-
-            proc.stdout?.on('data', (data: Buffer) => {
-              const text = data.toString();
-              event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
-            });
-
-            proc.stderr?.on('data', (data: Buffer) => {
-              event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: data.toString() });
-            });
-
-            proc.on('close', () => {
-              childProcesses.delete(proc);
-              resolve();
-            });
-
-            proc.on('error', () => {
-              childProcesses.delete(proc);
-              resolve();
-            });
-          });
-        }
       }
-    }
-
-    // --- Step 4: Read and merge all results ---
-    const clusterScoresFile = path.join(scoredClustersDir, 'cluster_scores.json');
-    if (!fs.existsSync(clusterScoresFile)) {
+      writeClusterScoreRows(scoredClustersDir, scoredClusters);
+    } else {
       return Err({
         type: 'CLUSTER_SCORING_FAILED',
-        message: 'Cluster scores JSON not found after scoring',
+        message: 'Holo MD rescoring requires Vina, but Vina rescoring is disabled',
       });
     }
 
-    let scoredClusters;
-    try {
-      const scoreData = JSON.parse(fs.readFileSync(clusterScoresFile, 'utf-8'));
-      scoredClusters = scoreData.clusters;
-    } catch (e) {
+    // --- Step 4: CORDIAL rescoring ---
+    if (options.enableCordial) {
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: '=== CORDIAL rescoring cluster centroids ===\n',
+      });
+
+      const pairCsvPath = path.join(scoredClustersDir, 'pairs.csv');
+      const csvCell = (value: string) => `"${value.replace(/"/g, '""')}"`;
+      const pairCsvRows = [
+        'source_name,ligand_sdf,receptor_pdb,pose_index',
+        ...scoredClusters.map((cluster) => [
+          csvCell(`cluster_${cluster.clusterId}`),
+          csvCell(cluster.ligandSdfPath!),
+          csvCell(cluster.receptorPdbPath!),
+          csvCell('0'),
+        ].join(',')),
+      ];
+      fs.writeFileSync(pairCsvPath, `${pairCsvRows.join('\n')}\n`);
+
+      const cordialResult = await runCordialScoringJob(
+        { pairCsv: pairCsvPath },
+        path.join(scoredClustersDir, 'cordial_scores.csv'),
+        32,
+        {
+          onStdout: (text) => {
+            event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stdout', data: text });
+          },
+          onStderr: (text) => {
+            event.sender.send(IpcChannels.MD_OUTPUT, { type: 'stderr', data: text });
+          },
+        },
+      );
+      if (!cordialResult.ok) {
+        return Err({
+          type: 'CORDIAL_FAILED',
+          message: cordialResult.error.message,
+        });
+      }
+
+      event.sender.send(IpcChannels.MD_OUTPUT, {
+        type: 'stdout',
+        data: 'PROGRESS:scoring_cordial:100\n',
+      });
+    } else {
       return Err({
-        type: 'CLUSTER_SCORING_FAILED',
-        message: `Failed to parse cluster scores: ${e}`,
+        type: 'CORDIAL_FAILED',
+        message: 'Holo MD rescoring requires CORDIAL, but CORDIAL rescoring is disabled',
       });
     }
 
-    // Merge CORDIAL scores if available
+    // --- Step 5: Read and validate all results ---
     const cordialJsonPath = path.join(scoredClustersDir, 'cordial_scores.json');
-    if (fs.existsSync(cordialJsonPath)) {
-      try {
-        const cordialData = JSON.parse(fs.readFileSync(cordialJsonPath, 'utf-8'));
-        const cordialByName = new Map<string, {
-          expectedPkd: number;
-          pHighAffinity: number;
-          pVeryHighAffinity: number;
-        }>();
+    if (!fs.existsSync(cordialJsonPath)) {
+      return Err({
+        type: 'CORDIAL_FAILED',
+        message: `CORDIAL output JSON not found: ${cordialJsonPath}`,
+      });
+    }
 
-        for (const entry of cordialData) {
-          const name = entry.source_name;
-          cordialByName.set(name, {
-            expectedPkd: entry.cordial_expected_pkd,
-            pHighAffinity: entry.cordial_p_high_affinity,
-            pVeryHighAffinity: entry.cordial_p_very_high_affinity || 0,
+    try {
+      const cordialData = JSON.parse(fs.readFileSync(cordialJsonPath, 'utf-8'));
+      const cordialByName = new Map<string, {
+        expectedPkd: number;
+        pHighAffinity: number;
+        pVeryHighAffinity: number;
+      }>();
+
+      for (const entry of cordialData) {
+        const name = entry.source_name;
+        cordialByName.set(name, {
+          expectedPkd: entry.cordial_expected_pkd,
+          pHighAffinity: entry.cordial_p_high_affinity,
+          pVeryHighAffinity: entry.cordial_p_very_high ?? entry.cordial_p_very_high_affinity ?? 0,
+        });
+      }
+
+      for (const cluster of scoredClusters) {
+        const cordialKey = `cluster_${cluster.clusterId}`;
+        const scores = cordialByName.get(cordialKey);
+        if (!scores) {
+          return Err({
+            type: 'CORDIAL_FAILED',
+            message: `Missing CORDIAL scores for cluster ${cluster.clusterId + 1}`,
           });
         }
+        cluster.cordialExpectedPkd = scores.expectedPkd;
+        cluster.cordialPHighAffinity = scores.pHighAffinity;
+        cluster.cordialPVeryHighAffinity = scores.pVeryHighAffinity;
+      }
+    } catch (err) {
+      return Err({
+        type: 'CORDIAL_FAILED',
+        message: `Failed to parse CORDIAL output: ${err}`,
+      });
+    }
 
-        for (const cluster of scoredClusters) {
-          const cordialKey = `cluster_${cluster.clusterId}`;
-          const scores = cordialByName.get(cordialKey);
-          if (scores) {
-            cluster.cordialExpectedPkd = scores.expectedPkd;
-            cluster.cordialPHighAffinity = scores.pHighAffinity;
-            cluster.cordialPVeryHighAffinity = scores.pVeryHighAffinity;
-          }
-        }
-      } catch {
-        // Non-fatal — CORDIAL scores are optional
+    for (const cluster of scoredClusters) {
+      if (
+        !cluster.receptorPdbPath ||
+        !cluster.ligandSdfPath ||
+        cluster.vinaRescore == null ||
+        cluster.cordialExpectedPkd == null ||
+        cluster.cordialPHighAffinity == null ||
+        cluster.cordialPVeryHighAffinity == null
+      ) {
+        return Err({
+          type: 'CLUSTER_SCORING_FAILED',
+          message: `Cluster ${cluster.clusterId + 1} is missing required rescoring fields`,
+        });
       }
     }
+
+    writeClusterScoreRows(scoredClustersDir, scoredClusters);
 
     event.sender.send(IpcChannels.MD_OUTPUT, {
       type: 'stdout',
@@ -7391,8 +7581,9 @@ ipcMain.handle(
     });
 
     return Ok({
-      clusters: scoredClusters,
-      outputDir: scoredClustersDir,
+      clusters: mergeClusterScoresWithCanonical(clusteringResults, scoredClusters),
+      outputDir: analysisDir,
+      clusteringResults,
     });
   }
 );

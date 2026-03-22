@@ -38,7 +38,7 @@ export type ConformStep = 'conform-load' | 'conform-configure' | 'conform-progre
 export type MapStep = 'map-load' | 'map-configure' | 'map-progress' | 'map-results';
 
 // Map mode types — mirrors PocketMapMethod in shared/types/ipc.ts
-import type { PocketMapMethod, ScoredClusterResult } from '../../shared/types/ipc';
+import type { ClusteringResult as IpcClusteringResult, PocketMapMethod, ScoredClusterResult } from '../../shared/types/ipc';
 export type MapMethod = PocketMapMethod;
 
 // Viewer state types
@@ -73,6 +73,8 @@ export interface ClusterResult {
 export interface ClusteringResults {
   clusters: ClusterResult[];
   frameAssignments: number[];
+  requestedClusters?: number;
+  actualClusters?: number;
 }
 
 export interface LoadedCluster {
@@ -219,6 +221,7 @@ export interface ConformState {
   config: ConformerConfig;
   outputDir: string | null;
   conformerPaths: string[];
+  conformerEnergies: Record<string, number>;
   isRunning: boolean;
 }
 
@@ -227,7 +230,7 @@ export interface PdbFile {
   name: string;
 }
 
-export type MDInputMode = 'protein_ligand' | 'ligand_only';
+export type MDInputMode = 'holo' | 'ligand_only' | 'apo';
 
 export interface DockState {
   receptorPdbPath: string | null;
@@ -274,6 +277,7 @@ export interface MDState {
   systemInfo: MDSystemInfo | null;
   benchmarkResult: MDBenchmarkResult | null;
   isBenchmarking: boolean;
+  clusteringResults: ClusteringResults | null;
   clusterScores: ScoredClusterResult[];
 }
 
@@ -324,7 +328,7 @@ const defaultDockState: DockState = {
 };
 
 const defaultMDState: MDState = {
-  inputMode: 'protein_ligand',
+  inputMode: 'holo',
   dockOutputDir: null,
   loadedLigands: [],
   selectedLigandIndex: null,
@@ -343,6 +347,7 @@ const defaultMDState: MDState = {
   systemInfo: null,
   benchmarkResult: null,
   isBenchmarking: false,
+  clusteringResults: null,
   clusterScores: [],
 };
 
@@ -369,6 +374,7 @@ const defaultConformState: ConformState = {
   config: { ...DEFAULT_CONFORMER_CONFIG },
   outputDir: null,
   conformerPaths: [],
+  conformerEnergies: {},
   isRunning: false,
 };
 
@@ -635,8 +641,19 @@ function createWorkflowStore() {
   const setMdIsBenchmarking = (isBenchmarking: boolean) =>
     setState((s) => ({ ...s, md: { ...s.md, isBenchmarking } }));
 
+  const setMdClusteringResults = (clusteringResults: ClusteringResults | null) =>
+    setState((s) => ({ ...s, md: { ...s.md, clusteringResults } }));
+
   const setMdClusterScores = (clusterScores: ScoredClusterResult[]) =>
     setState((s) => ({ ...s, md: { ...s.md, clusterScores } }));
+
+  const setMdClusteringResultsFromIpc = (clusteringResults: IpcClusteringResult | null) =>
+    setMdClusteringResults(clusteringResults ? {
+      clusters: clusteringResults.clusters,
+      frameAssignments: clusteringResults.frameAssignments,
+      requestedClusters: clusteringResults.requestedClusters,
+      actualClusters: clusteringResults.actualClusters,
+    } : null);
 
   // Viewer state setters
   const setViewerPdbPath = (pdbPath: string | null) =>
@@ -945,6 +962,9 @@ function createWorkflowStore() {
   const setConformPaths = (conformerPaths: string[]) =>
     setState((s) => ({ ...s, conform: { ...s.conform, conformerPaths } }));
 
+  const setConformEnergies = (conformerEnergies: Record<string, number>) =>
+    setState((s) => ({ ...s, conform: { ...s.conform, conformerEnergies } }));
+
   const setConformRunning = (isRunning: boolean) =>
     setState((s) => ({ ...s, conform: { ...s.conform, isRunning } }));
 
@@ -1090,6 +1110,8 @@ function createWorkflowStore() {
     setMdSystemInfo,
     setMdBenchmarkResult,
     setMdIsBenchmarking,
+    setMdClusteringResults,
+    setMdClusteringResultsFromIpc,
     setMdClusterScores,
     // Viewer state
     setViewerPdbPath,
@@ -1161,6 +1183,7 @@ function createWorkflowStore() {
     setConformConfig,
     setConformOutputDir,
     setConformPaths,
+    setConformEnergies,
     setConformRunning,
     resetConform,
     clearViewerSession,

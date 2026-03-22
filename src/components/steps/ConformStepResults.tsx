@@ -1,4 +1,4 @@
-import { Component, For, Show } from 'solid-js';
+import { Component, For, Show, createMemo } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { buildConformerViewerQueue } from '../../utils/viewerQueue';
 
@@ -7,17 +7,30 @@ const ConformStepResults: Component = () => {
     state,
     setConformStep,
     openViewerSession,
+    resetConform,
   } = workflowStore;
   const api = window.electronAPI;
 
   const conformers = () => state().conform.conformerPaths;
+  const energies = () => state().conform.conformerEnergies;
+  const method = () => state().conform.config.method;
+
+  const hasEnergies = createMemo(() => Object.keys(energies()).length > 0);
+
+  const energyForPath = (sdfPath: string): number | null => {
+    const e = energies();
+    // Try exact path match first, then basename match
+    if (sdfPath in e) return e[sdfPath];
+    for (const key of Object.keys(e)) {
+      if (key.endsWith('/' + sdfPath.split('/').pop())) return e[key];
+    }
+    return null;
+  };
 
   const handleView3D = () => {
     const paths = conformers();
     if (paths.length === 0) return;
-
     const queue = buildConformerViewerQueue(paths);
-
     openViewerSession({
       pdbPath: queue[0].pdbPath,
       pdbQueue: queue,
@@ -30,12 +43,19 @@ const ConformStepResults: Component = () => {
     if (dir) api.openFolder(dir);
   };
 
+  const methodLabel = () => {
+    const m = method();
+    if (m === 'crest') return 'CREST (GFN2-xTB)';
+    if (m === 'mcmm') return 'MCMM (Sage 2.3.0)';
+    return 'ETKDG';
+  };
+
   return (
     <div class="h-full flex flex-col">
       <div class="text-center mb-3">
         <h2 class="text-xl font-bold">Conformer Results</h2>
         <p class="text-sm text-base-content/90">
-          {conformers().length} conformers — {state().conform.outputName || state().conform.ligandName}
+          {conformers().length} conformer{conformers().length !== 1 ? 's' : ''} via {methodLabel()} — {state().conform.outputName || state().conform.ligandName}
         </p>
       </div>
 
@@ -46,19 +66,10 @@ const ConformStepResults: Component = () => {
               <h3 class="text-sm font-semibold">Generated Conformers</h3>
               <div class="flex gap-2">
                 <button class="btn btn-xs btn-ghost" onClick={handleOpenFolder} title="Open folder">
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
-                  </svg>
+                  Open Folder
                 </button>
               </div>
             </div>
-
-            <Show when={state().conform.outputDir}>
-              <div class="mb-3 rounded-lg bg-base-300 px-3 py-2">
-                <p class="text-[10px] uppercase tracking-wider text-base-content/60">Saved Run</p>
-                <p class="text-xs font-mono break-all">{state().conform.outputDir}</p>
-              </div>
-            </Show>
 
             <div class="overflow-x-auto">
               <table class="table table-xs table-zebra w-full">
@@ -66,39 +77,57 @@ const ConformStepResults: Component = () => {
                   <tr>
                     <th class="w-12">#</th>
                     <th>File</th>
+                    <Show when={hasEnergies()}>
+                      <th class="text-right w-28">Energy (kcal/mol)</th>
+                    </Show>
                   </tr>
                 </thead>
                 <tbody>
                   <For each={conformers()}>
-                    {(sdfPath, i) => (
-                      <tr>
-                        <td class="font-mono text-xs">{i() + 1}</td>
-                        <td class="font-mono text-[10px] break-all">{sdfPath.split('/').pop()}</td>
-                      </tr>
-                    )}
+                    {(sdfPath, i) => {
+                      const energy = energyForPath(sdfPath);
+                      return (
+                        <tr>
+                          <td class="font-mono text-xs">{i() + 1}</td>
+                          <td class="font-mono text-[10px] break-all">{sdfPath.split('/').pop()}</td>
+                          <Show when={hasEnergies()}>
+                            <td class="text-right font-mono text-xs">
+                              {energy != null ? (
+                                i() === 0 && energy === 0 ? (
+                                  <span class="text-success">0.0 (min)</span>
+                                ) : (
+                                  <span class={energy > 5 ? 'text-warning' : ''}>{energy.toFixed(2)}</span>
+                                )
+                              ) : '-'}
+                            </td>
+                          </Show>
+                        </tr>
+                      );
+                    }}
                   </For>
                 </tbody>
               </table>
             </div>
+
+            <Show when={hasEnergies()}>
+              <p class="text-[10px] text-base-content/50 mt-2">
+                Energies are relative to the lowest-energy conformer (kcal/mol).
+                {method() === 'crest' ? ' Computed at GFN2-xTB level with ALPB water solvation.' : ''}
+                {method() === 'mcmm' ? ' Computed with Sage 2.3.0 + OBC2 implicit solvent.' : ''}
+              </p>
+            </Show>
           </div>
         </div>
       </div>
 
       {/* Navigation */}
       <div class="flex justify-between mt-3 flex-shrink-0">
-        <button class="btn btn-ghost btn-sm" onClick={() => setConformStep('conform-progress')}>
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 17l-5-5m0 0l5-5m-5 5h12" />
-          </svg>
-          Back
+        <button class="btn btn-ghost btn-sm" onClick={() => resetConform()}>
+          New Job
         </button>
         <Show when={conformers().length > 0}>
           <button class="btn btn-primary" onClick={handleView3D}>
             View 3D
-            <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-            </svg>
           </button>
         </Show>
       </div>

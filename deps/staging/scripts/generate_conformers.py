@@ -30,6 +30,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
+from utils import add_gbsa_obc2_force
+
 try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, Descriptors, rdMolTransforms
@@ -60,16 +62,6 @@ class GBSAMinimizer:
     Falls back to MMFF94s vacuum if OpenFF/OpenMM unavailable.
     """
 
-    # mbondi3 Born radii (nm) and OBC2 screening factors by element
-    _RADII_NM: dict = {
-        'H': 0.12, 'C': 0.17, 'N': 0.155, 'O': 0.15, 'F': 0.15,
-        'S': 0.18, 'P': 0.185, 'Cl': 0.17, 'Br': 0.185, 'I': 0.198,
-    }
-    _SCREEN: dict = {
-        'H': 0.85, 'C': 0.72, 'N': 0.79, 'O': 0.85, 'F': 0.88,
-        'S': 0.96, 'P': 0.86, 'Cl': 0.80, 'Br': 0.80, 'I': 0.80,
-    }
-
     def __init__(self, rdmol: Any, conf_id: int) -> None:
         self.ready = False
         self.n_atoms = rdmol.GetNumAtoms()
@@ -88,11 +80,9 @@ class GBSAMinimizer:
         from openff.toolkit import Molecule as OFFMolecule
         from openff.toolkit import ForceField as OFFForceField
 
-        # Convert RDKit mol to OpenFF
         off_mol = OFFMolecule.from_rdkit(rdmol, allow_undefined_stereo=True)
         off_mol.assign_partial_charges('gasteiger')
 
-        # Sage 2.3.0 parameterization (fall back to 2.0.0)
         sage_version = None
         for ver in ['openff-2.3.0.offxml', 'openff-2.0.0.offxml']:
             try:
@@ -104,49 +94,17 @@ class GBSAMinimizer:
         if sage is None:
             raise RuntimeError("No OpenFF Sage force field available")
 
-        system = sage.create_openmm_system(
-            off_mol.to_topology(), charge_from_molecules=[off_mol]
-        )
+        off_top = off_mol.to_topology()
+        system = sage.create_openmm_system(off_top, charge_from_molecules=[off_mol])
 
-        # Verify particle count
         if system.getNumParticles() != self.n_atoms:
             raise RuntimeError(
                 f"Atom count mismatch: RDKit={self.n_atoms}, "
                 f"OpenMM={system.getNumParticles()}"
             )
 
-        # Extract charges from NonbondedForce
-        nb_force = None
-        for f in system.getForces():
-            if isinstance(f, openmm.NonbondedForce):
-                nb_force = f
-                break
-        if nb_force is None:
-            raise RuntimeError("No NonbondedForce in OpenFF system")
+        add_gbsa_obc2_force(system, off_top.to_openmm(), rdmol=rdmol)
 
-        # Add OBC2 implicit solvent force
-        gbsa = openmm.GBSAOBCForce()
-        gbsa.setSolventDielectric(78.5)
-        gbsa.setSoluteDielectric(1.0)
-        gbsa.setNonbondedMethod(openmm.GBSAOBCForce.NoCutoff)
-
-        for i in range(self.n_atoms):
-            charge, sigma, epsilon = nb_force.getParticleParameters(i)
-            q = charge.value_in_unit(omm_unit.elementary_charge)
-            element = rdmol.GetAtomWithIdx(i).GetSymbol()
-            radius = self._RADII_NM.get(element, 0.15)
-            screen = self._SCREEN.get(element, 0.80)
-            # mbondi3: H bonded to N gets larger radius
-            if element == 'H':
-                for nbr in rdmol.GetAtomWithIdx(i).GetNeighbors():
-                    if nbr.GetSymbol() == 'N':
-                        radius = 0.13
-                        break
-            gbsa.addParticle(q, radius, screen)
-
-        system.addForce(gbsa)
-
-        # Create context on CPU (fast for small molecules, avoids Metal kernel compilation)
         integrator = openmm.VerletIntegrator(0.001 * omm_unit.picoseconds)
         platform = openmm.Platform.getPlatformByName('CPU')
         self.context = openmm.Context(system, integrator, platform)
@@ -806,11 +764,15 @@ def generate_conformers_crest(
         # CREST needs xTB on PATH
         env['PATH'] = str(Path(xtb_binary).parent) + ':' + env.get('PATH', '')
 
+        # Compute formal charge from input molecule
+        formal_charge = Chem.GetFormalCharge(mol_h)
+
         # Run CREST
         cmd = [
             crest_binary, input_xyz,
             '--gfn2',
             '--alpb', 'water',
+            '--chrg', str(formal_charge),
             '--ewin', str(energy_window),
             '--rthr', str(rmsd_cutoff),
             '--T', str(threads),
@@ -1053,6 +1015,7 @@ def main() -> None:
     # Process each ligand
     all_conformer_paths = []
     parent_mapping = {}
+    conformer_energies = {}
 
     for i, sdf_path in enumerate(ligand_paths):
         print(f"Processing {i+1}/{len(ligand_paths)}: {os.path.basename(sdf_path)}")
@@ -1073,6 +1036,13 @@ def main() -> None:
             all_conformer_paths.append(output_path)
             variant_name = Path(output_path).stem
             parent_mapping[variant_name] = parent_name
+            # Read back energy from SDF property
+            try:
+                m = Chem.SDMolSupplier(output_path)[0]
+                if m and m.HasProp('conformer_energy'):
+                    conformer_energies[output_path] = float(m.GetProp('conformer_energy'))
+            except Exception:
+                pass
 
     # Output results
     print(f"\nConformer generation complete: {len(all_conformer_paths)} conformers from {len(ligand_paths)} molecules")
@@ -1080,7 +1050,8 @@ def main() -> None:
     # Print JSON result for parsing
     print(json.dumps({
         "conformer_paths": all_conformer_paths,
-        "parent_mapping": parent_mapping
+        "parent_mapping": parent_mapping,
+        "conformer_energies": conformer_energies,
     }))
 
 
