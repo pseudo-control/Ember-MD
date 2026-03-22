@@ -912,8 +912,9 @@ def process_ligand(sdf_path: str, output_dir: str, max_conformers: int, rmsd_cut
             mol, max_conformers, rmsd_cutoff, energy_window
         )
 
-    # Optional xTB reranking (for ETKDG/MCMM — CREST already uses xTB)
-    if xtb_rerank and xtb_binary and method != 'crest' and selected_conformers:
+    # xTB reranking (for ETKDG/MCMM — CREST already uses xTB).
+    # Always runs when xTB is available; gives real QM energies vs force field.
+    if xtb_binary and method != 'crest' and selected_conformers:
         selected_conformers = xtb_rerank_conformers(
             mol_with_confs, selected_conformers, xtb_binary, energy_window
         )
