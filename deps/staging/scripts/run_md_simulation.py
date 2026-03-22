@@ -127,7 +127,7 @@ def _prepare_receptor_topology(receptor_pdb: str) -> Tuple[Any, Any, Dict[str, A
                 report.update(json.load(f))
             return pdb.topology, pdb.positions, report
 
-        _, prep_report = prepare_receptor(receptor_pdb, output_dir=output_dir, handle_chain_breaks=False)
+        _, prep_report = prepare_receptor(receptor_pdb, output_dir=output_dir)
         report.update(prep_report)
         pdb = PDBFile(prepared_pdb_path)
         return pdb.topology, pdb.positions, report

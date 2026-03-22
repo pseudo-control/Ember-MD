@@ -101,24 +101,16 @@ Pipeline: receptor prep (Meeko Polymer) → ligand PDBQT prep (Meeko) → autobo
 **xTB pre-optimization**: Optional pre-docking step (`xtbConfig.preOptimize`). Optimizes ligand geometry with GFN2-xTB before Meeko PDBQT conversion.
 
 ## Receptor Preparation (Unified)
-Single core function: `receptor_protonation.py::prepare_receptor_with_propka()`. Accepts optional `fixer=` kwarg for pre-modified PDBFixer (MD path with chain breaks).
+Single core function: `receptor_protonation.py::prepare_receptor_with_propka()`. Accepts optional `fixer=` kwarg for pre-modified PDBFixer.
 
-**Core pipeline** (Reduce → PROPKA → PDBFixer → protonation → write PDB):
-1. Reduce side-chain flip optimization (Asn/Gln/His)
-2. PROPKA shifted-residue detection (pocket-filtered)
-3. PDBFixer: `findMissingResidues` → `findMissingAtoms` → `addMissingAtoms`
-4. `_sanitize_positions` (only in external fixer/MD path — NOT safe to call in self-contained path as it changes Quantity representation)
-5. Build protonation variant plan (disulfides, PROPKA overrides, histidine tautomers)
-6. `Modeller.addHydrogens` with explicit variant list (internal `_sanitize_positions` as safety net)
+**Pipeline:** Reduce → PROPKA → PDBFixer (`findMissingResidues` → `findMissingAtoms` → `addMissingAtoms`, models missing loops) → variant plan (disulfides, PROPKA, HIS tautomers) → `addHydrogens` → write PDB + metadata.
 
 **How it's called:**
-- **Docking**: `detect_pdb_ligands.py` calls `prepare_receptor_with_propka()` directly (self-contained, no kwargs)
-- **MD**: `prepare_receptor.py::prepare_receptor()` adds CIF conversion + chain break handling, then delegates to `prepare_receptor_with_propka(fixer=...)` for protonation
+- **Docking**: `detect_pdb_ligands.py` calls `prepare_receptor_with_propka()` directly (self-contained)
+- **MD**: `prepare_receptor.py::prepare_receptor()` adds CIF conversion, then delegates to `prepare_receptor_with_propka(fixer=...)`
 - **MD caller**: `run_md_simulation.py::_prepare_receptor_topology()` checks for existing `receptor_prepared.pdb`; if absent, calls `prepare_receptor()`
 
-**Chain break helpers** (in `prepare_receptor.py`, MD-only): `_detect_chain_breaks`, `_build_split_topology`, `_remap_missing_residues`, `_ensure_positive_unit_cell`, `ensure_pdb_format`.
-
-**Pocket refinement** (`prepare_docking_complex.py`): `createSystem` uses try/fallback — normal first, then `ignoreExternalBonds=True` + CYS/CYX resolution by atom content (HG present → CYS, absent → CYX) for chain-break receptors.
+**Pocket refinement** (`prepare_docking_complex.py`): `createSystem` uses try/fallback — normal first, then `ignoreExternalBonds=True` + CYS/CYX resolution by atom content (HG present → CYS, absent → CYX).
 
 ## MCMM Mode
 Standalone conformer generation is exposed in the UI as **MCMM**. Internally the workflow state is still named `conform`, but user-facing docs and tabs should call this MCMM mode. Three conformer generation methods:
@@ -194,8 +186,7 @@ Native Metal backend work lives in the separate `pseudo-control/Ember-Metal` rep
 - App is unsigned, so launch from `/Applications` or Spotlight rather than Launchpad
 - `run_md_simulation.py` exists both at repo root and in `deps/staging/scripts/`; the staging copy is canonical for the app
 - CREST requires separate `crest` binary installation (`conda install -c conda-forge crest`)
-- `_sanitize_positions()` must NOT be called in the self-contained docking receptor prep path — it changes OpenMM Quantity representation and breaks Sage force field template matching downstream
-- `prepare_docking_complex.py` uses a try/fallback for `createSystem` to handle chain-break receptors (ignoreExternalBonds + CYS/CYX atom-based resolution)
+- `prepare_docking_complex.py` uses a try/fallback for `createSystem` (ignoreExternalBonds + CYS/CYX atom-based resolution) for structures with unusual bond patterns
 
 ## License
 MIT. GPL-licensed scientific tools are invoked as separate processes. Meeko and Molscrub are Apache-2.0.
