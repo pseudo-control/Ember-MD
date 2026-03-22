@@ -238,9 +238,11 @@ def create_complex_system(
         lig_positions.append(openmm.Vec3(pos.x * 0.1, pos.y * 0.1, pos.z * 0.1) * omm_unit.nanometers)
     modeller.add(lig_top, lig_positions)
 
-    # Map each residue to its named template to resolve ambiguities
-    # (e.g. CYS vs CYM vs CYX) when ignoreExternalBonds is True.
-    residue_templates = {res: res.name for res in modeller.topology.residues()}
+    # Only resolve CYS-family ambiguity (CYS/CYM/CYX all match with
+    # ignoreExternalBonds); let OpenMM auto-detect terminal variants
+    # (NTHR, CALA, etc.) for everything else.
+    ambiguous = {'CYS', 'CYX', 'CYM'}
+    residue_templates = {res: res.name for res in modeller.topology.residues() if res.name in ambiguous}
     system = forcefield.createSystem(
         modeller.topology,
         nonbondedMethod=omm_app.NoCutoff,
