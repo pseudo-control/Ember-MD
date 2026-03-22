@@ -3231,8 +3231,10 @@ const ViewerMode: Component = () => {
           </div>
         </Show>
         <Show when={!hasViewerSession() && !isLoading()}>
-          <div class="absolute inset-0 p-4 overflow-auto">
-            {viewerLoadPanel(true)}
+          <div class="absolute inset-0 flex items-center justify-center overflow-auto">
+            <div class="w-full max-w-md">
+              {viewerLoadPanel(false)}
+            </div>
           </div>
         </Show>
       </div>
