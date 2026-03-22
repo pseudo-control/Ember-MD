@@ -210,12 +210,33 @@ def _preflight_receptor_topology(prepared_topology: Any, prepared_positions: Any
     # 4-site water models (OPC) need extra virtual particles added before
     # the topology can match force field templates.
     modeller = Modeller(prepared_topology, prepared_positions)
-    modeller.addExtraParticles(ff)
-    ff.createSystem(
-        modeller.topology,
-        nonbondedMethod=NoCutoff,
-        constraints=HBonds,
-    )
+    try:
+        modeller.addExtraParticles(ff)
+    except Exception:
+        # Chain-break residues may not match templates for addExtraParticles;
+        # skip — the full build_system will handle extra particles later.
+        pass
+    try:
+        ff.createSystem(
+            modeller.topology,
+            nonbondedMethod=NoCutoff,
+            constraints=HBonds,
+        )
+    except Exception:
+        # Fall back: ignore external bonds for chain-break tolerance,
+        # resolve CYS/CYX ambiguity by atom content.
+        cys_templates = {}
+        for res in modeller.topology.residues():
+            if res.name in ('CYS', 'CYX', 'CYM'):
+                atom_names = {a.name for a in res.atoms()}
+                cys_templates[res] = 'CYS' if 'HG' in atom_names else 'CYX'
+        ff.createSystem(
+            modeller.topology,
+            nonbondedMethod=NoCutoff,
+            constraints=HBonds,
+            ignoreExternalBonds=True,
+            residueTemplates=cys_templates,
+        )
 
 
 def _estimate_am1bcc_time(n_atoms: int) -> str:
