@@ -560,14 +560,14 @@ def prepare_receptor_with_propka(
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
     else:
-        # External fixer path: caller already ran PDBFixer + chain breaks
+        # External fixer path: caller already ran PDBFixer + chain breaks.
+        # Sanitize positions here — chain break splitting can produce nested
+        # Quantity objects that crash addHydrogens.
+        fixer.positions = _sanitize_positions(fixer.positions)
         if reduce_report is None:
             reduce_report = {"reduce_available": False, "reduce_applied": False}
         if propka_report is None:
             propka_report = {"propka_available": False, "shifted_residues": []}
-
-    # Sanitize positions (fix PDBFixer nested-Quantity bug — no-op on normal positions)
-    fixer.positions = _sanitize_positions(fixer.positions)
 
     variant_plan = build_variant_plan(
         fixer.topology,
