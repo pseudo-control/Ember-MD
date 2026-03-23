@@ -486,6 +486,10 @@ const ViewerMode: Component = () => {
       };
       window.addEventListener('resize', handleResize);
       setStageReady(true);
+      // Expose stage for E2E test assertions (NGL state queries, not screenshots)
+      if ((window as any).__EMBER_TEST__) {
+        (window as any).__nglStage = stage;
+      }
       console.log('[Viewer] NGL Stage created');
 
       onCleanup(() => {

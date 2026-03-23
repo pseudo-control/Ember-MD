@@ -103,6 +103,8 @@ const IpcChannels = {
   GET_PROJECT_FILE_COUNT: 'get-project-file-count',
   SCAN_PROJECT_ARTIFACTS: 'scan-project-artifacts',
   SELECT_EMBER_JOB_FOLDER: 'select-ember-job-folder',
+  // PDB ID fetch
+  FETCH_PDB: 'fetch-pdb',
   // Image reading channel
   READ_IMAGE_AS_DATA_URL: 'read-image-as-data-url',
   // Send channels
@@ -626,6 +628,10 @@ const electronAPI = {
 
   cancelFepScoring: () => ipcRenderer.invoke(IpcChannels.CANCEL_FEP_SCORING),
 
+  // Fetch structure from RCSB PDB by ID
+  fetchPdb: (pdbId: string, projectDir: string) =>
+    ipcRenderer.invoke(IpcChannels.FETCH_PDB, pdbId, projectDir),
+
   // Image reading
   readImageAsDataUrl: (imagePath: string) =>
     ipcRenderer.invoke(IpcChannels.READ_IMAGE_AS_DATA_URL, imagePath),
@@ -666,3 +672,8 @@ const electronAPI = {
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
+
+// Expose test flag so renderer can conditionally expose NGL stage
+if (process.env.NODE_ENV === 'test') {
+  contextBridge.exposeInMainWorld('__EMBER_TEST__', true);
+}

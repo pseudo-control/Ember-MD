@@ -1219,3 +1219,8 @@ function createWorkflowStore() {
 }
 
 export const workflowStore = createRoot(createWorkflowStore);
+
+// Expose store for E2E test assertions and state manipulation
+if ((window as any).__EMBER_TEST__) {
+  (window as any).__emberStore = workflowStore;
+}
