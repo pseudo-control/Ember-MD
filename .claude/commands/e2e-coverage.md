@@ -42,7 +42,7 @@ Test via SMILES input (no file dialogs):
 - [x] Results: table shows conformers with energy column (kcal/mol)
 - [x] Results: energies are numeric, min energy row shows 0.0
 - [x] Results: "View 3D" button transitions to viewer with conformer queue
-- [ ] Run MCMM: completes, results appear with energies
+- [x] Run MCMM: completes, results appear with energies
 - [ ] Viewer after MCMM: conformer queue navigation works (prev/next)
 - [ ] Viewer after MCMM: individual conformer selection and inspection
 

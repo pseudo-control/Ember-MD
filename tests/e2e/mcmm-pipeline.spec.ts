@@ -122,6 +122,44 @@ test.describe('MCMM pipeline', () => {
     await expect(window.locator('.btn.btn-primary', { hasText: /View 3D/i })).toBeVisible();
   });
 
+  test('run MCMM method: completes with energies', async ({ window }) => {
+    test.setTimeout(180_000);
+
+    // Use benzene (small, fast MCMM)
+    await window.locator('textarea').fill('c1ccccc1');
+    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.waitForTimeout(500);
+
+    // Select MCMM method
+    await methodDropdown(window).selectOption('mcmm');
+    await window.waitForTimeout(300);
+
+    // Reduce steps for speed (find Search steps input)
+    const stepsInput = window.locator('input[type="number"]').nth(2); // 3rd number input = steps
+    await stepsInput.fill('100');
+    await window.waitForTimeout(200);
+
+    // Start search
+    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+
+    // Wait for completion
+    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    await expect(viewResultsBtn).toBeVisible({ timeout: 120_000 });
+    await viewResultsBtn.click();
+    await window.waitForTimeout(500);
+
+    // Verify results
+    await expect(window.locator('text=Conformer Results')).toBeVisible({ timeout: 5_000 });
+    const table = window.locator('table');
+    await expect(table).toBeVisible();
+    expect(await table.locator('tbody tr').count()).toBeGreaterThan(0);
+
+    // Should show MCMM method label
+    await expect(window.locator('text=/MCMM.*Sage/i')).toBeVisible();
+  });
+
   test('View 3D transitions to viewer with conformer queue', async ({ window }) => {
     test.setTimeout(120_000);
     await loadAndConfigure(window);
