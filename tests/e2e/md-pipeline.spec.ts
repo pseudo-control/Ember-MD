@@ -172,6 +172,54 @@ test.describe('MD simulation pipeline', () => {
     expect(restored).toBe(300);
   });
 
+  test('run simulation (0.01 ns ligand-only ibuprofen): progress → completion', async ({ window }) => {
+    // Uses ligand-only mode to avoid _patched_createSystem ArgTracker bug
+    // (build_ligand_only_system does NOT call _patch_forcefield_for_chain_breaks)
+    // Ibuprofen (33 atoms) instead of benzene (12 atoms) — benzene solvation box
+    // is too small for the 1.0 nm nonbonded cutoff with dodecahedron geometry
+    test.setTimeout(300_000);
+
+    // Ligand-only via SMILES — ibuprofen
+    const textarea = window.locator('textarea');
+    await expect(textarea).toBeVisible();
+    await textarea.fill('CC(C)Cc1ccc(cc1)C(C)C(=O)O');
+    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('text=/Ligand Only/i').first()).toBeVisible({ timeout: 15_000 });
+
+    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.waitForTimeout(1_000);
+    await expect(window.locator('main').locator('text=/Configure/i').first()).toBeVisible({ timeout: 5_000 });
+
+    // Set minimal duration (0.01 ns) and increase padding (1.5 nm) so the
+    // dodecahedron box is large enough for the 1.0 nm nonbonded cutoff
+    await window.evaluate(() => {
+      const store = (window as any).__emberStore;
+      store.setMdConfig({ productionNs: 0.01, paddingNm: 1.5 });
+    });
+    await window.waitForTimeout(300);
+
+    // Start simulation
+    await window.locator('.btn.btn-primary', { hasText: /Start Simulation/i }).click();
+    await window.waitForTimeout(1_000);
+
+    // Progress page should be visible
+    await expect(window.locator('text=/Running MD Simulation/i')).toBeVisible({ timeout: 10_000 });
+
+    // Wait for completion — "View Results" appears
+    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    await expect(viewResultsBtn).toBeVisible({ timeout: 250_000 });
+
+    // Verify completion state, no error
+    await expect(window.locator('text=/Simulation Complete/i')).toBeVisible();
+    await expect(window.locator('.alert.alert-error')).not.toBeVisible();
+
+    // Store: phase should be 'complete'
+    const phase = await window.evaluate(() => {
+      return (window as any).__emberStore.state().currentPhase;
+    });
+    expect(phase).toBe('complete');
+  });
+
   test('configure: Estimate Runtime button is visible and clickable', async ({ window }) => {
     // NOTE: Full benchmark test is blocked by a Python bug in run_md_simulation.py:
     // _patched_createSystem conflicts with OpenMM ArgTracker — flexibleConstraints

@@ -62,17 +62,17 @@ Test with 8TCE via PDB ID fetch + SMILES for ligand:
 - [ ] Results: xTB strain column appears (if xTB available)
 - [x] Results: sorting by Vina column works
 - [x] Results: "View 3D" loads pose in viewer
-- [ ] Results: "Simulate" navigates to MD configure with docked pose
+- [x] Results: "Simulate" navigates to MD configure with docked pose
 
 ### 4. MD Simulation Pipeline (tests/e2e/md-pipeline.spec.ts)
 Test with 8TCE receptor via PDB ID fetch + SMILES for ligand:
 - [x] Load PDB via PDB ID fetch → ligand detected → mode shows "Protein + Ligand"
 - [x] Load via SMILES: mode shows "Ligand Only"
 - [x] Configure: force field preset dropdown works (ff19sb-opc default)
-- [ ] Configure: production duration dial adjusts value
-- [ ] Configure: temperature input works
-- [ ] Configure: "Estimate Runtime" runs benchmark, shows ns/day
-- [ ] Run simulation (0.01 ns = 10 ps, minimal): progress bar updates
+- [x] Configure: production duration dial adjusts value
+- [x] Configure: temperature input works
+- [!] Configure: "Estimate Runtime" runs benchmark, shows ns/day — BLOCKED: _patched_createSystem + OpenMM ArgTracker bug (flexibleConstraints default triggers "never used" ValueError). In run_md_simulation.py, do not fix staging script.
+- [x] Run simulation (0.01 ns = 10 ps, minimal): progress bar updates
 - [ ] Results: clustering table shows population percentages
 - [ ] Results: xTB strain + Vina rescore columns appear (if protein+ligand)
 - [ ] Results: "Play Trajectory" loads trajectory in viewer
