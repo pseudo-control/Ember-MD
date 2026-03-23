@@ -237,6 +237,31 @@ test.describe('Docking pipeline', () => {
     // View 3D button should be visible
     await expect(window.locator('.btn', { hasText: /View 3D/i })).toBeVisible();
 
+    // --- Output file verification ---
+    const dockOutputCheck = await window.evaluate(async () => {
+      const s = (window as any).__emberStore.state();
+      const outputDir = s.dock.dockingOutputDir;
+      if (!outputDir) return null;
+      const api = (window as any).electronAPI;
+      return {
+        outputDir,
+        allDockedExists: await api.fileExists(`${outputDir}/results/all_docked.sdf`) ||
+                         await api.fileExists(`${outputDir}/results/all_docked.sdf.gz`),
+      };
+    });
+    expect(dockOutputCheck).not.toBeNull();
+    expect(dockOutputCheck!.allDockedExists).toBe(true);
+
+    // Vina score should be in expected range (-12 to +2 kcal/mol)
+    const vinaScore = parseFloat((firstRowText || '').match(/-?\d+\.\d/)?.[0] || '0');
+    expect(vinaScore).toBeGreaterThanOrEqual(-12);
+    expect(vinaScore).toBeLessThanOrEqual(2);
+
+    // With poses=1, should have a small number of results (1 per input conformer)
+    const resultCount = await rows.count();
+    expect(resultCount).toBeGreaterThan(0);
+    expect(resultCount).toBeLessThanOrEqual(5);
+
     // --- Sorting: click Vina column header to sort ---
     const vinaHeader = table.locator('th', { hasText: /Vina/i });
     await vinaHeader.click();
