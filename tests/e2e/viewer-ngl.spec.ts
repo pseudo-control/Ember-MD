@@ -164,6 +164,65 @@ test.describe('Viewer NGL state', () => {
     expect(await getCompCount(window)).toBe(0);
   });
 
+  test('load MD cluster centroid → compList reflects centroid PDB', async ({ window }) => {
+    test.setTimeout(30_000);
+
+    // Load centroid via openViewerSession (simulates MDStepResults "View 3D")
+    await window.evaluate(async (pdb: string) => {
+      const store = (window as any).__emberStore;
+      store.openViewerSession({
+        pdbPath: pdb,
+        pdbQueue: [
+          { pdbPath: pdb, label: 'Cluster 1 (100%)' },
+        ],
+        pdbQueueIndex: 0,
+      });
+    }, ALANINE_PDB); // Use alanine_dipeptide as stand-in for centroid PDB
+    await window.waitForTimeout(3_000);
+
+    const compCount = await getCompCount(window);
+    expect(compCount).toBeGreaterThan(0);
+
+    // Queue should have 1 item
+    const queueLen = await window.evaluate(() => {
+      return (window as any).__emberStore.state().viewer.pdbQueue.length;
+    });
+    expect(queueLen).toBe(1);
+  });
+
+  test('auto-view: camera position changes after loading structure', async ({ window }) => {
+    test.setTimeout(30_000);
+
+    // Get camera position before loading
+    const posBefore = await window.evaluate(() => {
+      const stage = (window as any).__nglStage;
+      if (!stage) return null;
+      const p = stage.viewerControls.position;
+      return { x: p.x, y: p.y, z: p.z };
+    });
+
+    // Load a structure
+    await loadStructureInViewer(window, RECEPTOR_CIF);
+    await window.waitForTimeout(5_000);
+
+    // Camera position should have changed (auto-view centers on structure)
+    const posAfter = await window.evaluate(() => {
+      const stage = (window as any).__nglStage;
+      if (!stage) return null;
+      const p = stage.viewerControls.position;
+      return { x: p.x, y: p.y, z: p.z };
+    });
+
+    expect(posAfter).not.toBeNull();
+    // At least one coordinate should differ (camera moved to center on structure)
+    if (posBefore && posAfter) {
+      const moved = posBefore.x !== posAfter.x ||
+                    posBefore.y !== posAfter.y ||
+                    posBefore.z !== posAfter.z;
+      expect(moved).toBe(true);
+    }
+  });
+
   test('import second structure → layer count increases', async ({ window }) => {
     test.setTimeout(60_000);
 
