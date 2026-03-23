@@ -43,8 +43,8 @@ Test via SMILES input (no file dialogs):
 - [x] Results: energies are numeric, min energy row shows 0.0
 - [x] Results: "View 3D" button transitions to viewer with conformer queue
 - [x] Run MCMM: completes, results appear with energies
-- [ ] Viewer after MCMM: conformer queue navigation works (prev/next)
-- [ ] Viewer after MCMM: individual conformer selection and inspection
+- [x] Viewer after MCMM: conformer queue navigation works (prev/next)
+- [x] Viewer after MCMM: individual conformer selection and inspection
 
 ### 3. Docking Pipeline (tests/e2e/docking-pipeline.spec.ts)
 Test with 8TCE via PDB ID fetch + SMILES for ligand:

@@ -182,6 +182,78 @@ test.describe('MCMM pipeline', () => {
     await expect(viewTab).toHaveClass(/tab-active/, { timeout: 5_000 });
   });
 
+  test('viewer: jump to specific conformer by index', async ({ window }) => {
+    test.setTimeout(120_000);
+
+    // Use 2-phenylethanol — diverse conformers
+    await window.locator('textarea').fill('OCCc1ccccc1');
+    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.waitForTimeout(500);
+
+    // ETKDG with low RMSD cutoff to ensure multiple conformers
+    await methodDropdown(window).selectOption('etkdg');
+    await window.waitForTimeout(200);
+    const rmsdInput = window.locator('input[type="number"]').nth(1);
+    await rmsdInput.fill('0.3');
+    await window.waitForTimeout(200);
+
+    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    await expect(viewResultsBtn).toBeVisible({ timeout: 60_000 });
+    await viewResultsBtn.click();
+    await window.waitForTimeout(500);
+
+    await window.locator('.btn.btn-primary', { hasText: /View 3D/i }).click();
+    await window.waitForTimeout(1500);
+
+    // Get queue length
+    const queueLen = await window.evaluate(() => {
+      const store = (window as any).__emberStore;
+      return store.state().viewer.pdbQueue.length;
+    });
+    expect(queueLen).toBeGreaterThan(2);
+
+    // Jump directly to last conformer via store API
+    const lastIdx = queueLen - 1;
+    await window.evaluate((idx: number) => {
+      const store = (window as any).__emberStore;
+      store.setViewerPdbQueueIndex(idx);
+    }, lastIdx);
+    await window.waitForTimeout(800);
+
+    // Verify store index updated
+    const newIdx = await window.evaluate(() => {
+      const store = (window as any).__emberStore;
+      return store.state().viewer.pdbQueueIndex;
+    });
+    expect(newIdx).toBe(lastIdx);
+
+    // Counter shows correct position (last/total)
+    const counterText = await window.locator('button[title="Previous"]').locator('..').locator('..').textContent();
+    expect(counterText).toContain(`${lastIdx + 1}/${queueLen}`);
+
+    // Next button should be disabled at last conformer
+    const nextBtn = window.locator('button[title="Next"]');
+    await expect(nextBtn).toBeDisabled();
+
+    // Prev button should be enabled
+    const prevBtn = window.locator('button[title="Previous"]');
+    await expect(prevBtn).toBeEnabled();
+
+    // Verify the conformer label changes — should not be "Conformer 1"
+    const labelText = counterText ?? '';
+    expect(labelText).not.toContain(`1/${queueLen}`);
+
+    // NGL still has a component loaded
+    const nglCount = await window.evaluate(() => {
+      const stage = (window as any).__nglStage;
+      return stage?.compList?.length ?? 0;
+    });
+    expect(nglCount).toBeGreaterThan(0);
+  });
+
   test('conformer queue navigation: prev/next buttons and index', async ({ window }) => {
     test.setTimeout(120_000);
 
