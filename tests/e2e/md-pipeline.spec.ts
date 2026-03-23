@@ -238,6 +238,10 @@ test.describe('MD simulation pipeline', () => {
         finalPdb: await api.fileExists(`${runRoot}/final.pdb`),
         clusteringDir: await api.fileExists(`${runRoot}/analysis/clustering`),
         reportPdf: await api.fileExists(`${runRoot}/analysis/full_report.pdf`),
+        rmsdDir: await api.fileExists(`${runRoot}/analysis/rmsd`),
+        rmsfDir: await api.fileExists(`${runRoot}/analysis/rmsf`),
+        hbondsDir: await api.fileExists(`${runRoot}/analysis/hbonds`),
+        contactsDir: await api.fileExists(`${runRoot}/analysis/contacts`),
       };
     });
     expect(outputFiles).not.toBeNull();
@@ -248,6 +252,10 @@ test.describe('MD simulation pipeline', () => {
     expect(outputFiles!.finalPdb).toBe(true);
     expect(outputFiles!.clusteringDir).toBe(true);
     expect(outputFiles!.reportPdf).toBe(true);
+    expect(outputFiles!.rmsdDir).toBe(true);
+    expect(outputFiles!.rmsfDir).toBe(true);
+    expect(outputFiles!.hbondsDir).toBe(true);
+    expect(outputFiles!.contactsDir).toBe(true);
 
     // Navigate to results page
     await viewResultsBtn.click();
