@@ -236,5 +236,28 @@ test.describe('Docking pipeline', () => {
 
     // View 3D button should be visible
     await expect(window.locator('.btn', { hasText: /View 3D/i })).toBeVisible();
+
+    // --- Sorting: click Vina column header to sort ---
+    const vinaHeader = table.locator('th', { hasText: /Vina/i });
+    await vinaHeader.click();
+    await window.waitForTimeout(500);
+    // Sort indicator should appear (▲ or ▼)
+    const headerAfterSort = await vinaHeader.textContent();
+    expect(headerAfterSort).toMatch(/[▲▼]/);
+
+    // --- View 3D: click → viewer loads with NGL component ---
+    await window.locator('.btn', { hasText: /View 3D/i }).click();
+    await window.waitForTimeout(2_000);
+
+    // Should switch to viewer mode
+    const viewTab = window.locator('.tab.tab-sm', { hasText: 'View' });
+    await expect(viewTab).toHaveClass(/tab-active/, { timeout: 5_000 });
+
+    // NGL stage should have loaded a component
+    const compCount = await window.evaluate(() => {
+      const stage = (window as any).__nglStage;
+      return stage ? stage.compList.length : 0;
+    });
+    expect(compCount).toBeGreaterThan(0);
   });
 });

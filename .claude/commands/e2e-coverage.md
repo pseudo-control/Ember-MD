@@ -60,8 +60,8 @@ Test with 8TCE via PDB ID fetch + SMILES for ligand:
 - [x] Run docking (exhaustiveness=1, poses=1): progress, completion
 - [x] Results: table shows Vina affinity column
 - [ ] Results: xTB strain column appears (if xTB available)
-- [ ] Results: sorting by Vina column works
-- [ ] Results: "View 3D" loads pose in viewer
+- [x] Results: sorting by Vina column works
+- [x] Results: "View 3D" loads pose in viewer
 - [ ] Results: "Simulate" navigates to MD configure with docked pose
 
 ### 4. MD Simulation Pipeline (tests/e2e/md-pipeline.spec.ts)
