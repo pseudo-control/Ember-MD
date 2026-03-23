@@ -381,6 +381,11 @@ const findMapJob = (projectDir: string, runPath: string, runName: string): Proje
 // ---------------------------------------------------------------------------
 
 export function register(): void {
+  // Return the default output directory (~/Ember)
+  ipcMain.handle('get-default-output-dir', async () => {
+    return path.join(app.getPath('home'), 'Ember');
+  });
+
   // Ensure a project directory exists with a .ember-project ID file
   ipcMain.handle(
     IpcChannels.ENSURE_PROJECT,
@@ -429,6 +434,40 @@ export function register(): void {
           type: 'IMPORT_FAILED',
           message: `Failed to import structure: ${(error as Error).message}`,
         });
+      }
+    }
+  );
+
+  // Fetch a structure from RCSB PDB by ID (e.g. "8TCE") → save to project structures/
+  ipcMain.handle(
+    IpcChannels.FETCH_PDB,
+    async (_event, pdbId: string, projectDir: string): Promise<Result<string, AppError>> => {
+      try {
+        const id = pdbId.trim().toUpperCase();
+        if (!/^[A-Z0-9]{4}$/.test(id)) {
+          return Err({ type: 'VALIDATION_FAILED', message: `Invalid PDB ID: "${pdbId}". Must be 4 alphanumeric characters.` });
+        }
+
+        const structuresDir = path.join(projectDir, 'structures');
+        fs.mkdirSync(structuresDir, { recursive: true });
+        const destPath = path.join(structuresDir, `${id}.cif`);
+
+        // Skip download if already fetched
+        if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) {
+          return Ok(destPath);
+        }
+
+        const url = `https://files.rcsb.org/download/${id}.cif`;
+        const response = await fetch(url);
+        if (!response.ok) {
+          return Err({ type: 'DOWNLOAD_FAILED', message: `RCSB returned ${response.status} for PDB ID "${id}". Check the ID and try again.` });
+        }
+        const text = await response.text();
+        fs.writeFileSync(destPath, text);
+        console.log(`[Project] Fetched ${id}.cif from RCSB (${(text.length / 1024).toFixed(0)} KB)`);
+        return Ok(destPath);
+      } catch (err: any) {
+        return Err({ type: 'DOWNLOAD_FAILED', message: `Failed to fetch PDB: ${err.message}` });
       }
     }
   );
