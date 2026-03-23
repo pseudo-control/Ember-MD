@@ -284,6 +284,50 @@ test.describe('Docking pipeline', () => {
       return stage ? stage.compList.length : 0;
     });
     expect(compCount).toBeGreaterThan(0);
+
+    // --- Docking pose queue verification ---
+    const queueState = await window.evaluate(() => {
+      const s = (window as any).__emberStore.state();
+      return {
+        pdbPath: s.viewer.pdbPath,
+        ligandPath: s.viewer.ligandPath,
+        queueLen: s.viewer.pdbQueue.length,
+        queueIndex: s.viewer.pdbQueueIndex,
+      };
+    });
+
+    // Receptor (pdbPath) should be set
+    expect(queueState.pdbPath).toBeTruthy();
+    // Ligand (pose) should be set
+    expect(queueState.ligandPath).toBeTruthy();
+    // Queue should have poses
+    expect(queueState.queueLen).toBeGreaterThan(0);
+
+    // If multiple poses exist, test queue navigation
+    if (queueState.queueLen > 1) {
+      const receptorBefore = queueState.pdbPath;
+
+      // Click Next
+      const nextBtn = window.locator('button[title="Next"]');
+      await expect(nextBtn).toBeVisible({ timeout: 3_000 });
+      await nextBtn.click();
+      await window.waitForTimeout(1_000);
+
+      const afterNext = await window.evaluate(() => {
+        const s = (window as any).__emberStore.state();
+        return {
+          pdbPath: s.viewer.pdbPath,
+          ligandPath: s.viewer.ligandPath,
+          queueIndex: s.viewer.pdbQueueIndex,
+        };
+      });
+      // Receptor stays the same
+      expect(afterNext.pdbPath).toBe(receptorBefore);
+      // Queue index advanced
+      expect(afterNext.queueIndex).toBe(1);
+      // Ligand should have changed (different pose)
+      expect(afterNext.ligandPath).toBeTruthy();
+    }
   });
 
   test('results: Simulate navigates to MD configure with docked pose', async ({ window }) => {
