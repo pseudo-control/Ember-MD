@@ -178,4 +178,63 @@ test.describe('Docking pipeline', () => {
       expect(await refinementCheckbox.isChecked()).toBe(true);
     }
   });
+
+  test('run docking (exhaust=1, poses=1): progress → results with Vina affinity', async ({ window }) => {
+    test.setTimeout(180_000);
+    await navigateToConfigure(window);
+
+    // Set minimal parameters for speed — use store directly for reliability
+    await window.evaluate(() => {
+      const store = (window as any).__emberStore;
+      if (store) {
+        store.setDockConfig({ exhaustiveness: 1, poses: 1 });
+      }
+    });
+    await window.waitForTimeout(300);
+
+    // Disable pocket refinement for speed
+    const refinementCheckbox = window.locator('label', { hasText: /Pocket refinement/i }).locator('input[type="checkbox"]');
+    if (await refinementCheckbox.isChecked()) {
+      await refinementCheckbox.uncheck();
+    }
+
+    // Disable CORDIAL for speed
+    const cordialCheckbox = window.locator('label', { hasText: /CORDIAL/i }).locator('input[type="checkbox"]');
+    if (await cordialCheckbox.isVisible() && await cordialCheckbox.isChecked()) {
+      await cordialCheckbox.uncheck();
+    }
+
+    // Use Simple conformer method (fastest)
+    const conformerSelect = window.locator('select').filter({
+      has: window.locator('option', { hasText: 'Simple' }),
+    });
+    await conformerSelect.selectOption({ label: 'Simple' });
+
+    // Start docking
+    await window.locator('.btn.btn-primary', { hasText: /Start Docking/i }).click();
+
+    // Wait for docking to complete (progress page shows "View Results")
+    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    await expect(viewResultsBtn).toBeVisible({ timeout: 120_000 });
+    await viewResultsBtn.click();
+    await window.waitForTimeout(1_000);
+
+    // Now on results page — verify table with Vina column
+    const table = window.locator('table');
+    await expect(table).toBeVisible({ timeout: 5_000 });
+
+    const headerText = await table.locator('thead').textContent();
+    expect(headerText?.toLowerCase()).toContain('vina');
+
+    // At least one result row
+    const rows = table.locator('tbody tr');
+    expect(await rows.count()).toBeGreaterThan(0);
+
+    // First row should have a numeric Vina score (negative kcal/mol typically)
+    const firstRowText = await rows.first().textContent();
+    expect(firstRowText).toMatch(/-?\d+\.\d/); // e.g., -6.3
+
+    // View 3D button should be visible
+    await expect(window.locator('.btn', { hasText: /View 3D/i })).toBeVisible();
+  });
 });

@@ -57,8 +57,8 @@ Test with 8TCE via PDB ID fetch + SMILES for ligand:
 - [x] Configure: stereoisomer toggle works
 - [x] Configure: conformer method dropdown works
 - [x] Configure: pocket refinement toggle works
-- [ ] Run docking (exhaustiveness=1, poses=1): progress, completion
-- [ ] Results: table shows Vina affinity column
+- [x] Run docking (exhaustiveness=1, poses=1): progress, completion
+- [x] Results: table shows Vina affinity column
 - [ ] Results: xTB strain column appears (if xTB available)
 - [ ] Results: sorting by Vina column works
 - [ ] Results: "View 3D" loads pose in viewer
