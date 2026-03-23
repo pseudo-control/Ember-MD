@@ -163,4 +163,26 @@ test.describe('Viewer NGL state', () => {
 
     expect(await getCompCount(window)).toBe(0);
   });
+
+  test('import second structure → layer count increases', async ({ window }) => {
+    test.setTimeout(60_000);
+
+    // Load first structure
+    await loadStructureInViewer(window, ALANINE_PDB);
+    await window.waitForTimeout(3_000);
+    const countAfterFirst = await getCompCount(window);
+    expect(countAfterFirst).toBeGreaterThan(0);
+
+    // Load second structure directly via NGL stage (simulates layer import)
+    await window.evaluate(async (sdfPath: string) => {
+      const stage = (window as any).__nglStage;
+      if (stage) {
+        await stage.loadFile(sdfPath);
+      }
+    }, BENZENE_SDF);
+    await window.waitForTimeout(2_000);
+
+    const countAfterSecond = await getCompCount(window);
+    expect(countAfterSecond).toBeGreaterThan(countAfterFirst);
+  });
 });
