@@ -9,10 +9,10 @@ import * as path from 'path';
 /** Helper: load via SMILES, configure ETKDG, run, wait for completion */
 async function runEtkdg(window: Page, smiles: string): Promise<void> {
   // Enter SMILES
-  await window.locator('textarea').fill(smiles);
-  await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-  await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
-  await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+  await window.locator('textarea:visible').fill(smiles);
+  await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+  await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+  await window.locator('.btn.btn-primary:visible', { hasText: /Continue/i }).click();
   await window.waitForTimeout(500);
 
   // Select ETKDG
@@ -92,6 +92,59 @@ test.describe('Receptor preparation verification', () => {
     if (result.structureInfo) {
       expect(result.structureInfo.totalAtoms).toBeGreaterThan(0);
     }
+  });
+
+  test('prepareReceptor adds hydrogens and writes receptor prep metadata json', async ({ window }) => {
+    test.setTimeout(120_000);
+
+    const RECEPTOR_CIF = path.resolve(__dirname, '../../ember-test-protein/8tce.cif');
+    await createTestProject(window, '__e2e_output_receptor_prep__');
+
+    const prepResult = await window.evaluate(async (cifPath: string) => {
+      const api = (window as any).electronAPI;
+      const projResult = await api.ensureProject('__e2e_output_receptor_prep__');
+      if (!projResult.ok) return { ok: false, error: 'project failed' };
+      const projDir = projResult.value;
+
+      const detected = await api.detectPdbLigands(cifPath);
+      if (!detected.ok || detected.value.ligands.length === 0) {
+        return { ok: false, error: detected.error?.message || 'no ligands detected' };
+      }
+
+      const ligandId = detected.value.ligands[0].id;
+      const preparedPath = `${projDir}/prepared/receptor_prepared.pdb`;
+      const prepared = await api.prepareReceptor(cifPath, ligandId, preparedPath);
+      if (!prepared.ok) {
+        return { ok: false, error: prepared.error?.message || 'prepare failed' };
+      }
+
+      const preparedInfo = await api.detectPdbLigands(prepared.value);
+      const metadataPath = prepared.value.replace(/\.pdb$/i, '.prep.json');
+      const metadata = await api.readJsonFile(metadataPath) as Record<string, unknown> | null;
+      const metadataExists = await api.fileExists(metadataPath);
+
+      return {
+        ok: true,
+        raw: detected.value.structureInfo,
+        prepared: preparedInfo.ok ? preparedInfo.value.structureInfo : null,
+        preparedPath: prepared.value,
+        metadataPath,
+        metadataExists,
+        metadata,
+      };
+    }, RECEPTOR_CIF);
+
+    expect(prepResult.ok).toBe(true);
+    expect(prepResult.preparedPath).toBeTruthy();
+    expect(prepResult.metadataExists).toBe(true);
+    expect(prepResult.raw?.totalAtoms ?? 0).toBeGreaterThan(0);
+    expect(prepResult.prepared?.totalAtoms ?? 0).toBeGreaterThan(prepResult.raw?.totalAtoms ?? 0);
+    expect(prepResult.prepared?.hydrogenCount ?? 0).toBeGreaterThan(prepResult.raw?.hydrogenCount ?? 0);
+    expect(prepResult.prepared?.isPrepared).toBe(true);
+    expect(prepResult.metadata?.['prepared_receptor_pdb']).toBe(prepResult.preparedPath);
+    expect(Array.isArray(prepResult.metadata?.['applied_overrides'])).toBe(true);
+    expect(Array.isArray(prepResult.metadata?.['ignored_shifted_residues'])).toBe(true);
+    expect(typeof prepResult.metadata?.['resolved_variants']).toBe('object');
   });
 });
 
