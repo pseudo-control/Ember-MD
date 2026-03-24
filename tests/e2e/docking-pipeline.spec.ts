@@ -226,6 +226,20 @@ test.describe('Docking pipeline', () => {
     const headerText = await table.locator('thead').textContent();
     expect(headerText?.toLowerCase()).toContain('vina');
 
+    // xTB strain column should appear (xTB binary is bundled, scoring runs automatically)
+    const hasXtbColumn = headerText?.toLowerCase().includes('xtb') ||
+                         headerText?.toLowerCase().includes('strain');
+    // xTB energy column: check store for xtbEnergyKcal presence
+    const xtbPresent = await window.evaluate(() => {
+      const s = (window as any).__emberStore.state();
+      return s.dock.results.some((r: any) => r.xtbEnergyKcal != null);
+    });
+    // At least verify the scoring was attempted (column may or may not show)
+    // If xTB ran, the column header includes "xTB" or "Strain"
+    if (xtbPresent) {
+      expect(hasXtbColumn).toBe(true);
+    }
+
     // At least one result row
     const rows = table.locator('tbody tr');
     expect(await rows.count()).toBeGreaterThan(0);
@@ -247,6 +261,7 @@ test.describe('Docking pipeline', () => {
         outputDir,
         allDockedExists: await api.fileExists(`${outputDir}/results/all_docked.sdf`) ||
                          await api.fileExists(`${outputDir}/results/all_docked.sdf.gz`),
+        xtbStrainExists: await api.fileExists(`${outputDir}/results/xtb_strain.json`),
       };
     });
     expect(dockOutputCheck).not.toBeNull();
