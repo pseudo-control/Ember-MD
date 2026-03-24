@@ -7,10 +7,10 @@ import type { Page } from '@playwright/test';
 
 /** Load aspirin via SMILES and navigate to configure page */
 async function loadAndConfigure(window: Page): Promise<void> {
-  await window.locator('textarea').fill('CC(=O)Oc1ccccc1C(=O)O');
-  await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-  await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
-  await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+  await window.locator('textarea:visible').fill('CC(=O)Oc1ccccc1C(=O)O');
+  await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+  await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+  await window.locator('.btn.btn-primary:visible', { hasText: /Continue/i }).click();
   await window.waitForTimeout(500);
 }
 
@@ -29,9 +29,9 @@ test.describe('MCMM pipeline', () => {
   test('load ligand via SMILES', async ({ window }) => {
     test.setTimeout(30_000);
 
-    await window.locator('textarea').fill('CC(=O)Oc1ccccc1C(=O)O');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('textarea:visible').fill('CC(=O)Oc1ccccc1C(=O)O');
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
   });
 
   test('configure shows method dropdown with ETKDG, MCMM, CREST', async ({ window }) => {
@@ -92,10 +92,10 @@ test.describe('MCMM pipeline', () => {
     await window.waitForTimeout(200);
 
     // Start search
-    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start/i }).click();
 
     // Wait for completion, then navigate to results
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 60_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(500);
@@ -119,17 +119,17 @@ test.describe('MCMM pipeline', () => {
     expect(firstRowEnergy).toContain('0.0');
 
     // View 3D button visible
-    await expect(window.locator('.btn.btn-primary', { hasText: /View 3D/i })).toBeVisible();
+    await expect(window.locator('.btn.btn-primary:visible', { hasText: /View 3D/i })).toBeVisible();
   });
 
   test('run MCMM method: completes with energies', async ({ window }) => {
     test.setTimeout(180_000);
 
     // Use benzene (small, fast MCMM)
-    await window.locator('textarea').fill('c1ccccc1');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
-    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.locator('textarea:visible').fill('c1ccccc1');
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('.btn.btn-primary:visible', { hasText: /Continue/i }).click();
     await window.waitForTimeout(500);
 
     // Select MCMM method
@@ -142,10 +142,10 @@ test.describe('MCMM pipeline', () => {
     await window.waitForTimeout(200);
 
     // Start search
-    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start/i }).click();
 
     // Wait for completion
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 120_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(500);
@@ -166,30 +166,33 @@ test.describe('MCMM pipeline', () => {
 
     await methodDropdown(window).selectOption('etkdg');
     await window.waitForTimeout(200);
-    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start/i }).click();
 
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 60_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(500);
 
     // Click View 3D
-    await window.locator('.btn.btn-primary', { hasText: /View 3D/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /View 3D/i }).click();
     await window.waitForTimeout(1000);
 
     // Should switch to View mode — check that the View tab is active
     const viewTab = window.locator('.tab.tab-sm', { hasText: 'View' });
     await expect(viewTab).toHaveClass(/tab-active/, { timeout: 5_000 });
+    await expect(window.locator('[data-testid^="project-family-"]')).toBeVisible();
+    await expect(window.locator('[data-testid^="project-row-"]', { hasText: /Input molecule/i })).toBeVisible();
+    await expect(window.locator('[data-testid^="project-row-"]', { hasText: /Conformer 1/i })).toBeVisible();
   });
 
   test('viewer: jump to specific conformer by index', async ({ window }) => {
     test.setTimeout(120_000);
 
     // Use 2-phenylethanol — diverse conformers
-    await window.locator('textarea').fill('OCCc1ccccc1');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
-    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.locator('textarea:visible').fill('OCCc1ccccc1');
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('.btn.btn-primary:visible', { hasText: /Continue/i }).click();
     await window.waitForTimeout(500);
 
     // ETKDG with low RMSD cutoff to ensure multiple conformers
@@ -199,13 +202,13 @@ test.describe('MCMM pipeline', () => {
     await rmsdInput.fill('0.3');
     await window.waitForTimeout(200);
 
-    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start/i }).click();
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 60_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(500);
 
-    await window.locator('.btn.btn-primary', { hasText: /View 3D/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /View 3D/i }).click();
     await window.waitForTimeout(1500);
 
     // Get queue length
@@ -258,10 +261,10 @@ test.describe('MCMM pipeline', () => {
     test.setTimeout(120_000);
 
     // Use 2-phenylethanol — phenyl ring + flexible chain → diverse conformers
-    await window.locator('textarea').fill('OCCc1ccccc1');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
-    await expect(window.locator('.btn.btn-primary', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
-    await window.locator('.btn.btn-primary', { hasText: /Continue/i }).click();
+    await window.locator('textarea:visible').fill('OCCc1ccccc1');
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
+    await expect(window.locator('.btn.btn-primary:visible', { hasText: /Continue/i })).toBeEnabled({ timeout: 15_000 });
+    await window.locator('.btn.btn-primary:visible', { hasText: /Continue/i }).click();
     await window.waitForTimeout(500);
 
     // Select ETKDG and lower RMSD cutoff to ensure multiple conformers survive
@@ -273,15 +276,15 @@ test.describe('MCMM pipeline', () => {
     await rmsdInput.fill('0.3');
     await window.waitForTimeout(200);
 
-    await window.locator('.btn.btn-primary', { hasText: /Start/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start/i }).click();
 
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 60_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(500);
 
     // Click View 3D
-    await window.locator('.btn.btn-primary', { hasText: /View 3D/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /View 3D/i }).click();
     await window.waitForTimeout(1500);
 
     // Verify queue was populated in store

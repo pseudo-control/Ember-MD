@@ -15,8 +15,8 @@ test.describe('Error paths', () => {
     await window.waitForTimeout(500);
 
     // Enter invalid SMILES
-    await window.locator('textarea').fill('NOT_A_VALID_SMILES!!!');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await window.locator('textarea:visible').fill('NOT_A_VALID_SMILES!!!');
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
     await window.waitForTimeout(5_000);
 
     // Should show error alert or Continue should stay disabled
@@ -38,10 +38,10 @@ test.describe('Error paths', () => {
     await window.locator('.tab.tab-sm', { hasText: 'Dock' }).click();
     await window.waitForTimeout(500);
 
-    const textarea = window.locator('textarea');
+    const textarea = window.locator('textarea:visible');
     await expect(textarea).toBeVisible();
     await textarea.fill('INVALID_SMILES_STRING');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
     await window.waitForTimeout(5_000);
 
     // Error should appear or ligand count should not increase
@@ -57,10 +57,10 @@ test.describe('Error paths', () => {
     await window.locator('.tab.tab-sm', { hasText: 'Simulate' }).click();
     await window.waitForTimeout(500);
 
-    const textarea = window.locator('textarea');
+    const textarea = window.locator('textarea:visible');
     await expect(textarea).toBeVisible();
     await textarea.fill('BOGUS_MOLECULE_XYZ');
-    await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+    await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
     await window.waitForTimeout(5_000);
 
     // App should not crash
@@ -73,7 +73,7 @@ test.describe('Error paths', () => {
     await window.waitForTimeout(500);
 
     // Enter SMILES button should be disabled with empty input
-    const enterBtn = window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i });
+    const enterBtn = window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i });
     await expect(enterBtn).toBeDisabled();
   });
 

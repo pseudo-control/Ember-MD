@@ -7,9 +7,9 @@ import type { Page } from '@playwright/test';
 
 /** Fetch receptor via PDB ID and wait for ligand detection */
 async function fetchReceptor(window: Page): Promise<void> {
-  const pdbInput = window.locator('input[placeholder*="8TCE"]');
+  const pdbInput = window.locator('input[placeholder*="8TCE"]:visible');
   await pdbInput.fill('8TCE');
-  await window.locator('.btn.btn-primary.btn-sm', { hasText: 'Fetch' }).click();
+  await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: 'Fetch' }).click();
 
   // Wait for receptor to load — status text changes from "Fetching..."
   // and "No project selected" error should NOT appear
@@ -41,12 +41,12 @@ async function navigateToConfigure(window: Page): Promise<void> {
     await window.waitForTimeout(3_000);
   }
 
-  const textarea = window.locator('textarea');
+  const textarea = window.locator('textarea:visible');
   await textarea.fill('CC(=O)Oc1ccccc1C(=O)O');
-  await window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i }).click();
+  await window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i }).click();
   await window.waitForTimeout(5_000);
 
-  const continueBtn = window.locator('.btn.btn-primary', { hasText: /Continue/i });
+  const continueBtn = window.locator('.btn.btn-primary:visible', { hasText: /Continue/i });
   await expect(continueBtn).toBeEnabled({ timeout: 10_000 });
   await continueBtn.click();
   await window.waitForTimeout(1_000);
@@ -77,11 +77,11 @@ test.describe('Docking pipeline', () => {
     test.setTimeout(30_000);
 
     // Enter SMILES for a docking ligand (aspirin)
-    const textarea = window.locator('textarea');
+    const textarea = window.locator('textarea:visible');
     await expect(textarea).toBeVisible();
     await textarea.fill('CC(=O)Oc1ccccc1C(=O)O');
 
-    const enterBtn = window.locator('.btn.btn-primary.btn-sm', { hasText: /Enter SMILES/i });
+    const enterBtn = window.locator('.btn.btn-primary.btn-sm:visible', { hasText: /Enter SMILES/i });
     await expect(enterBtn).toBeVisible();
     await enterBtn.click();
 
@@ -211,10 +211,10 @@ test.describe('Docking pipeline', () => {
     await conformerSelect.selectOption({ label: 'Simple' });
 
     // Start docking
-    await window.locator('.btn.btn-primary', { hasText: /Start Docking/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start Docking/i }).click();
 
     // Wait for docking to complete (progress page shows "View Results")
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 120_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(1_000);
@@ -284,6 +284,9 @@ test.describe('Docking pipeline', () => {
       return stage ? stage.compList.length : 0;
     });
     expect(compCount).toBeGreaterThan(0);
+    await expect(window.locator('[data-testid^="project-family-"]')).toBeVisible();
+    await expect(window.locator('[data-testid^="project-row-"]', { hasText: /Apo receptor/i })).toBeVisible();
+    await expect(window.locator('[data-testid^="project-row-"]', { hasText: /Prepared ligand/i })).toBeVisible();
 
     // --- Docking pose queue verification ---
     const queueState = await window.evaluate(() => {
@@ -350,9 +353,9 @@ test.describe('Docking pipeline', () => {
     const conformerSelect = window.locator('select').filter({ has: window.locator('option', { hasText: 'Simple' }) });
     await conformerSelect.selectOption({ label: 'Simple' });
 
-    await window.locator('.btn.btn-primary', { hasText: /Start Docking/i }).click();
+    await window.locator('.btn.btn-primary:visible', { hasText: /Start Docking/i }).click();
 
-    const viewResultsBtn = window.locator('.btn.btn-primary', { hasText: /View Results/i });
+    const viewResultsBtn = window.locator('.btn.btn-primary:visible', { hasText: /View Results/i });
     await expect(viewResultsBtn).toBeVisible({ timeout: 120_000 });
     await viewResultsBtn.click();
     await window.waitForTimeout(1_000);
