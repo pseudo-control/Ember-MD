@@ -2363,10 +2363,12 @@ const ViewerMode: Component = () => {
         });
       }
 
+      const normalizedLigandPaths: string[] = [];
       for (const filePath of ligandInputs) {
         const id = nextLayerId();
         const label = labelFor(filePath);
         const normalizedLigandPath = await normalizeLigandPathForViewer(filePath);
+        normalizedLigandPaths.push(normalizedLigandPath);
 
         if (stage) {
           const comp = await stage.loadFile(normalizedLigandPath, { defaultRepresentation: false, firstModelOnly: true }) as NGL.Component || null;
@@ -2404,11 +2406,11 @@ const ViewerMode: Component = () => {
       }
 
       // Build project table family for imported structures
-      const allImported = [...preparedProteins, ...ligandInputs];
+      const allImported = [...preparedProteins, ...normalizedLigandPaths];
       if (allImported.length > 0) {
         const fileTypes = [
           ...preparedProteins.map(() => 'protein' as const),
-          ...ligandInputs.map(() => 'ligand' as const),
+          ...normalizedLigandPaths.map(() => 'ligand' as const),
         ];
         const { family, rows } = buildImportFamily({ filePaths: allImported, fileTypes });
         addViewerProjectFamily(family, rows);
@@ -2442,6 +2444,7 @@ const ViewerMode: Component = () => {
     const importResult = structureFiles.length > 0
       ? await loadImportedStructures(structureFiles)
       : { lastPreparedProtein: null };
+    setShowImportOverlay(false);
 
     const dcdPath = trajectoryFiles[0];
     if (!dcdPath) return;
@@ -2482,6 +2485,7 @@ const ViewerMode: Component = () => {
 
       setViewerPdbIdInput('');
       await loadImportedStructures([result.value]);
+      setShowImportOverlay(false);
     } catch (err) {
       setError(`PDB fetch error: ${(err as Error).message}`);
     } finally {
@@ -2496,6 +2500,7 @@ const ViewerMode: Component = () => {
     setLoadingRecentJobId(jobId);
     try {
       await loadProjectJob(job, api);
+      setShowImportOverlay(false);
     } finally {
       setLoadingRecentJobId(null);
     }
@@ -2622,6 +2627,7 @@ const ViewerMode: Component = () => {
       // Add to project table
       const { family, rows } = buildImportFamily({ filePaths: [sdfPath], fileTypes: ['ligand'] });
       addViewerProjectFamily(family, rows);
+      setShowImportOverlay(false);
 
       setSmilesInput('');
     } catch (err) {
@@ -3266,8 +3272,14 @@ const ViewerMode: Component = () => {
 
   const handleTransferSimulate = () => handleSimulate();
 
+  const [showImportOverlay, setShowImportOverlay] = createSignal(false);
+
   const handleProjectTableImport = () => {
-    void handleImportFiles();
+    setShowImportOverlay(true);
+  };
+
+  const handleImportOverlayBack = () => {
+    setShowImportOverlay(false);
   };
 
   const viewerLoadPanel = (fillHeight: boolean) => (
@@ -3395,6 +3407,26 @@ const ViewerMode: Component = () => {
             <div class="absolute inset-0 flex items-center justify-center overflow-auto">
               <div class="w-full max-w-md">
                 {viewerLoadPanel(false)}
+              </div>
+            </div>
+          </Show>
+          <Show when={showImportOverlay() && hasViewerSession()}>
+            <div class="absolute inset-0 z-10 bg-base-100/95 flex flex-col overflow-auto">
+              <div class="px-3 py-2">
+                <button
+                  class="btn btn-ghost btn-sm gap-1"
+                  onClick={handleImportOverlayBack}
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                  </svg>
+                  Back to viewer
+                </button>
+              </div>
+              <div class="flex-1 flex items-center justify-center">
+                <div class="w-full max-w-md">
+                  {viewerLoadPanel(false)}
+                </div>
               </div>
             </div>
           </Show>
