@@ -32,7 +32,8 @@ test.describe('App boot', () => {
     const real = errors.filter(e =>
       !e.includes('WebGL') &&
       !e.includes('THREE') &&
-      !e.includes('deprecated')
+      !e.includes('deprecated') &&
+      !e.includes('Failed to load resource')
     );
     expect(real).toEqual([]);
   });

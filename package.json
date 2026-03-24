@@ -1,6 +1,6 @@
 {
   "name": "ember-md",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "Ember - Molecular Dynamics on Apple Silicon",
   "main": "electron-dist/electron/main.js",
   "type": "commonjs",

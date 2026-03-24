@@ -265,8 +265,10 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   };
 
   const handleViewerHome = () => {
-    if (!state().projectReady || state().isRunning) return;
+    if (state().isRunning) return;
     clearViewerSession();
+    setProjectReady(false);
+    setProjectDir(null);
     setMode('viewer');
   };
 
@@ -284,7 +286,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
             <button
               class="btn btn-ghost btn-sm btn-square join-item"
               onClick={handleViewerHome}
-              disabled={!state().projectReady || state().isRunning}
+              disabled={state().isRunning}
               title="Viewer Home"
             >
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
