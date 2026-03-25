@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from utils import add_gbsa_obc2_force
+from utils import add_gbsa_obc2_force, get_openmm_platform
 
 try:
     from rdkit import Chem
@@ -107,8 +107,8 @@ class GBSAMinimizer:
         add_gbsa_obc2_force(system, off_top.to_openmm(), rdmol=rdmol)
 
         integrator = openmm.VerletIntegrator(0.001 * omm_unit.picoseconds)
-        platform = openmm.Platform.getPlatformByName('CPU')
-        self.context = openmm.Context(system, integrator, platform)
+        platform = get_openmm_platform()
+        self.context = openmm.Context(system, integrator, platform) if platform else openmm.Context(system, integrator)
         self.ready = True
 
         label = sage_version.replace('.offxml', '').replace('openff-', 'Sage ')

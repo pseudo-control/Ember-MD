@@ -17,7 +17,7 @@ import sys
 import time
 from typing import Any, Tuple
 
-from utils import add_gbsa_obc2_force, load_sdf
+from utils import add_gbsa_obc2_force, get_openmm_platform, load_sdf
 
 try:
     from rdkit import Chem
@@ -284,7 +284,8 @@ def create_complex_system(
     system.addForce(restraint)
 
     integrator = openmm.VerletIntegrator(0.001 * omm_unit.picoseconds)
-    context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName("CPU"))
+    platform = get_openmm_platform()
+    context = openmm.Context(system, integrator, platform) if platform else openmm.Context(system, integrator)
     context.setPositions(positions)
     return context, receptor_topology, n_receptor_atoms, ligand_mol.GetNumAtoms()
 

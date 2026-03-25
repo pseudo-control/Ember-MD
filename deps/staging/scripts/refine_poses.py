@@ -199,10 +199,11 @@ def create_complex_system(
 
     system.addForce(restraint)
 
-    # Create context on CPU
+    # Create context — prefer CPU, fall back to whatever is available
+    from utils import get_openmm_platform
     integrator = openmm.VerletIntegrator(0.001 * omm_unit.picoseconds)
-    platform = openmm.Platform.getPlatformByName('CPU')
-    context = openmm.Context(system, integrator, platform)
+    platform = get_openmm_platform()
+    context = openmm.Context(system, integrator, platform) if platform else openmm.Context(system, integrator)
     context.setPositions(positions)
 
     return context, modeller.topology, n_receptor_atoms, n_ligand_atoms
