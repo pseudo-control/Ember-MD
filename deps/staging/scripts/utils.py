@@ -520,6 +520,22 @@ def add_gbsa_obc2_force(
     system.addForce(gbsa)
 
 
+def get_openmm_platform() -> Any:
+    """Return an OpenMM platform suitable for minimization tasks.
+
+    Prefers CPU (deterministic, no GPU contention), but falls back to
+    whatever platform is available in the bundled environment.
+    """
+    import openmm
+    for name in ('CPU', 'Reference', 'OpenCL', 'Metal'):
+        try:
+            return openmm.Platform.getPlatformByName(name)
+        except Exception:
+            continue
+    # Last resort: let OpenMM pick
+    return None
+
+
 def calculate_sa_score(mol: Any, default: float = 3.0) -> float:
     """Calculate synthetic accessibility score using RDKit's SA_Score contrib.
 

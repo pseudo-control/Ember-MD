@@ -243,9 +243,10 @@ def _minimize_hydrogens(
         system.addForce(restraint)
 
         # --- Minimise ---
+        from utils import get_openmm_platform
         integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
-        platform = openmm.Platform.getPlatformByName("CPU")
-        context = openmm.Context(system, integrator, platform)
+        platform = get_openmm_platform()
+        context = openmm.Context(system, integrator, platform) if platform else openmm.Context(system, integrator)
         context.setPositions(positions)
 
         energy_before = (context.getState(getEnergy=True)
