@@ -49,7 +49,7 @@ const MDStepProgress: Component = () => {
   } = workflowStore;
 
   const [hasStarted, setHasStarted] = createSignal(false);
-  const [productionNs, setProductionNs] = createSignal<{ current: number; total: number } | null>(null);
+  const [productionNs, setProductionNs] = createSignal<{ current: number; total: number; nsPerDay?: number; etaSeconds?: number } | null>(null);
   const [chargeEstimate, setChargeEstimate] = createSignal<string | null>(null);
   const [showPrepHint, setShowPrepHint] = createSignal(false);
 
@@ -90,9 +90,12 @@ const MDStepProgress: Component = () => {
       }
 
       if (stage === 'production' && value.includes('/')) {
-        // Parse ns format: current/total
-        const [current, total] = value.split('/').map(parseFloat);
-        setProductionNs({ current, total });
+        // Parse ns format: current/total or current/total:nsPerDay:etaSeconds
+        const parts = value.split(':');
+        const [current, total] = parts[0].split('/').map(parseFloat);
+        const nsPerDay = parts.length > 1 ? parseFloat(parts[1]) : undefined;
+        const etaSeconds = parts.length > 2 ? parseFloat(parts[2]) : undefined;
+        setProductionNs({ current, total, nsPerDay, etaSeconds });
         // Convert to percentage for progress bar
         setMdStageProgress(total > 0 ? (current / total) * 100 : 0);
       } else if (stage === 'parameterizing' && value.includes(':')) {
@@ -404,7 +407,7 @@ const MDStepProgress: Component = () => {
             {state().currentPhase === 'complete'
               ? `${state().md.config.productionNs} ns simulation finished`
               : state().md.currentStage === 'production' && productionNs()
-                ? `Production: ${productionNs()!.current.toFixed(1)} / ${productionNs()!.total.toFixed(1)} ns`
+                ? `Production: ${productionNs()!.current.toFixed(1)} / ${productionNs()!.total.toFixed(1)} ns${productionNs()!.nsPerDay ? ` (${productionNs()!.nsPerDay!.toFixed(1)} ns/day)` : ''}`
                 : state().md.currentStage === 'parameterizing' && chargeEstimate()
                   ? `Computing AM1-BCC charges (${chargeEstimate()})`
                   : state().md.currentStage
@@ -556,6 +559,23 @@ const MDStepProgress: Component = () => {
             <span>{productionNs()!.total.toFixed(1)} ns</span>
           </Show>
         </div>
+        <Show when={state().md.currentStage === 'production' && productionNs()?.nsPerDay}>
+          <div class="flex justify-between text-[10px] text-base-content/50 mt-0.5">
+            <span>{productionNs()!.nsPerDay!.toFixed(1)} ns/day</span>
+            <Show when={productionNs()!.etaSeconds! > 0}>
+              <span>
+                {(() => {
+                  const s = productionNs()!.etaSeconds!;
+                  if (s < 60) return `~${Math.round(s)}s remaining`;
+                  if (s < 3600) return `~${Math.round(s / 60)}m remaining`;
+                  const h = Math.floor(s / 3600);
+                  const m = Math.round((s % 3600) / 60);
+                  return `~${h}h ${m}m remaining`;
+                })()}
+              </span>
+            </Show>
+          </div>
+        </Show>
       </div>
 
       {/* Error message */}
