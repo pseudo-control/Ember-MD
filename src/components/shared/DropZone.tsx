@@ -12,6 +12,8 @@ interface DropZoneProps {
   hoverLabel?: string;
   /** Whether drop zone is disabled */
   disabled?: boolean;
+  /** Extra CSS classes for the wrapper div */
+  class?: string;
   children: JSXElement;
 }
 
@@ -75,7 +77,7 @@ const DropZone: Component<DropZoneProps> = (props) => {
 
   return (
     <div
-      class="relative"
+      class={`relative ${props.class || ''}`}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

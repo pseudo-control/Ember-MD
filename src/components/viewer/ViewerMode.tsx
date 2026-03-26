@@ -3631,6 +3631,7 @@ const ViewerMode: Component = () => {
               accept={['.pdb', '.cif', '.sdf', '.mol', '.mol2', '.dcd', '.sdf.gz']}
               onFiles={handleDroppedFiles}
               hoverLabel="Drop structures (.pdb, .cif, .sdf, .dcd)"
+              class="absolute inset-0"
             >
             <div class="absolute inset-0 flex items-center justify-center overflow-auto">
               <div class="w-full max-w-md">
@@ -3644,6 +3645,7 @@ const ViewerMode: Component = () => {
               accept={['.pdb', '.cif', '.sdf', '.mol', '.mol2', '.dcd', '.sdf.gz']}
               onFiles={handleDroppedFiles}
               hoverLabel="Drop structures (.pdb, .cif, .sdf, .dcd)"
+              class="absolute inset-0 z-10"
             >
             <div class="absolute inset-0 z-10 bg-base-100/95 flex flex-col overflow-auto">
               <div class="px-3 py-2">
