@@ -1,135 +1,273 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, createEffect, createSignal } from 'solid-js';
-import { workflowStore } from '../../stores/workflow';
+import { Component, Show, For, createSignal } from 'solid-js';
+import { workflowStore, ScoreComplexEntry } from '../../stores/workflow';
 import DropZone from '../shared/DropZone';
 
 const ScoreStepLoad: Component = () => {
   const {
     state,
-    setScoreInputDir,
-    setScoreOutputDir,
-    setScorePdfPaths,
-    setScoreLastResult,
+    addScoreEntries,
+    removeScoreEntry,
+    setScoreEntries,
     setScoreStep,
     setError,
   } = workflowStore;
   const api = window.electronAPI;
   const [isScanning, setIsScanning] = createSignal(false);
-  const [scanSummary, setScanSummary] = createSignal<{
-    pdbCount: number;
-    mtzCount: number;
-    pairedCount: number;
-    unpairedPdbCount: number;
-  } | null>(null);
+  const [pdbIdInput, setPdbIdInput] = createSignal('');
+  const [isFetching, setIsFetching] = createSignal(false);
 
-  createEffect(async () => {
-    const dirPath = state().score.inputDir;
-    if (!dirPath || scanSummary() || isScanning()) return;
-    setIsScanning(true);
-    try {
-      const result = await api.scanXrayDirectory(dirPath);
-      if (result.ok) {
-        setScanSummary(result.value);
-      }
-    } finally {
-      setIsScanning(false);
-    }
-  });
+  const scanFile = async (filePath: string) => {
+    const parts = filePath.split('/');
+    const name = (parts[parts.length - 1] || '').replace(/\.(pdb|cif)$/i, '');
+    // Skip if already loaded
+    if (state().score.entries.some((e) => e.pdbPath === filePath)) return;
 
-  const loadFolderFromPath = async (dirPath: string) => {
-    setIsScanning(true);
-    setScanSummary(null);
-    setScoreInputDir(dirPath);
-    setScoreOutputDir(null);
-    setScorePdfPaths([]);
-    setScoreLastResult(null);
-    setError(null);
+    const entry: ScoreComplexEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      pdbPath: filePath,
+      name,
+      detectedLigands: [],
+      selectedLigandId: null,
+      isPrepared: false,
+      preparedReceptorPath: null,
+      extractedLigandSdfPath: null,
+      vinaScore: null,
+      cordialExpectedPkd: null,
+      cordialPHighAffinity: null,
+      qed: null,
+      status: 'detecting',
+      errorMessage: null,
+    };
+
+    addScoreEntries([entry]);
+
     try {
-      const result = await api.scanXrayDirectory(dirPath);
+      const result = await api.detectPdbLigands(filePath);
       if (result.ok) {
-        setScanSummary(result.value);
+        const ligands = result.value.ligands || [];
+        const isPrepared = result.value.structureInfo?.isPrepared ?? false;
+        const bestLigand = [...ligands].sort((a, b) => (b.num_atoms || 0) - (a.num_atoms || 0))[0];
+
+        workflowStore.updateScoreEntry(entry.id, {
+          detectedLigands: ligands,
+          selectedLigandId: bestLigand?.id || null,
+          isPrepared,
+          status: ligands.length > 0 ? 'pending' : 'error',
+          errorMessage: ligands.length === 0 ? 'No ligand detected' : null,
+        });
       } else {
-        setError(result.error.message);
+        workflowStore.updateScoreEntry(entry.id, {
+          status: 'error',
+          errorMessage: result.error.message,
+        });
       }
-    } finally {
-      setIsScanning(false);
+    } catch (err) {
+      workflowStore.updateScoreEntry(entry.id, {
+        status: 'error',
+        errorMessage: (err as Error).message,
+      });
+    }
+  };
+
+  const handleFileDrop = async (paths: string[]) => {
+    setIsScanning(true);
+    setError(null);
+
+    for (const p of paths) {
+      const basename = p.substring(p.lastIndexOf('/') + 1);
+      const isFile = /\.(pdb|cif)$/i.test(basename);
+
+      if (isFile) {
+        await scanFile(p);
+      } else {
+        // Assume directory — list PDB files
+        try {
+          const pdbFiles = await api.listPdbInDirectory(p);
+          for (const pdbPath of pdbFiles) {
+            await scanFile(pdbPath);
+          }
+        } catch (err) {
+          setError(`Failed to scan directory: ${(err as Error).message}`);
+        }
+      }
+    }
+    setIsScanning(false);
+  };
+
+  const handleSelectFiles = async () => {
+    const paths = await api.selectStructureFilesMulti();
+    if (paths && paths.length > 0) {
+      handleFileDrop(paths);
     }
   };
 
   const handleSelectFolder = async () => {
     const dirPath = await api.selectFolder();
-    if (!dirPath) return;
-    loadFolderFromPath(dirPath);
+    if (dirPath) {
+      handleFileDrop([dirPath]);
+    }
   };
 
-  const handleClear = () => {
-    setScoreInputDir(null);
-    setScoreOutputDir(null);
-    setScorePdfPaths([]);
-    setScoreLastResult(null);
-    setScanSummary(null);
+  const handleFetchPdb = async () => {
+    const pdbId = pdbIdInput().trim().toUpperCase();
+    if (pdbId.length !== 4) return;
+    setIsFetching(true);
+    setError(null);
+    try {
+      const projectDir = state().projectDir || await api.getDefaultOutputDir();
+      const result = await api.fetchPdb(pdbId, projectDir);
+      if (result.ok) {
+        await scanFile(result.value);
+      } else {
+        setError(result.error.message);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+    setIsFetching(false);
+  };
+
+  const handleClearAll = () => {
+    setScoreEntries([]);
     setError(null);
   };
+
+  const validEntries = () => state().score.entries.filter((e) => e.status !== 'error' && e.selectedLigandId);
+  const hasEntries = () => state().score.entries.length > 0;
 
   return (
     <div class="h-full flex flex-col">
       <div class="text-center mb-3">
-        <h2 class="text-xl font-bold">Analyze X-ray Pose</h2>
+        <h2 class="text-xl font-bold">Score Protein-Ligand Complexes</h2>
         <p class="text-sm text-base-content/90">
-          Compare the reported ligand pose in the PDB against the MTZ electron density map.
+          Import PDB files containing protein-ligand complexes to score with Vina, CORDIAL, and QED.
         </p>
       </div>
 
       <div class="flex-1 min-h-0 overflow-auto flex flex-col items-center gap-4">
         <DropZone
-          accept={['.pdb', '.cif', '.mtz']}
+          accept={['.pdb', '.cif']}
           acceptFolders
-          onFiles={(paths) => {
-            const first = paths[0];
-            const basename = first.substring(first.lastIndexOf('/') + 1);
-            const hasExtension = /\.\w+$/.test(basename);
-            loadFolderFromPath(hasExtension ? first.substring(0, first.lastIndexOf('/')) : first);
-          }}
-          hoverLabel="Drop folder with PDB + MTZ files"
+          onFiles={handleFileDrop}
+          hoverLabel="Drop PDB/CIF files or a folder"
         >
         <div class="card bg-base-200 shadow-lg w-full max-w-lg">
           <div class="card-body p-4">
             <Show
-              when={!state().score.inputDir}
+              when={!hasEntries()}
               fallback={
                 <div class="space-y-3">
-                  <div class="p-3 bg-base-300 rounded-lg">
-                    <p class="text-xs font-semibold">{state().score.inputDir?.split('/').pop() || 'Selected folder'}</p>
-                    <p class="text-[10px] font-mono text-base-content/70 break-all">{state().score.inputDir}</p>
+                  <div class="flex items-center justify-between">
+                    <p class="text-xs font-semibold">
+                      {state().score.entries.length} complex{state().score.entries.length === 1 ? '' : 'es'} loaded
+                    </p>
+                    <div class="flex gap-1">
+                      <button class="btn btn-ghost btn-xs" onClick={handleSelectFiles}>+ Files</button>
+                      <button class="btn btn-ghost btn-xs" onClick={handleSelectFolder}>+ Folder</button>
+                      <button class="btn btn-ghost btn-xs text-error" onClick={handleClearAll}>Clear</button>
+                    </div>
                   </div>
+
                   <Show when={isScanning()}>
                     <div class="text-xs text-base-content/60 flex items-center gap-2">
                       <span class="loading loading-spinner loading-xs" />
-                      Scanning PDB/MTZ pairs...
+                      Scanning for ligands...
                     </div>
                   </Show>
-                  <Show when={!isScanning() && scanSummary()}>
-                    <div class="rounded-lg bg-base-300/70 p-3 space-y-1">
-                      <p class="text-xs font-semibold">
-                        {scanSummary()!.pairedCount} PDB/MTZ pair{scanSummary()!.pairedCount === 1 ? '' : 's'} matched
-                      </p>
-                      <p class="text-[10px] text-base-content/70">
-                        {scanSummary()!.pdbCount} structure{scanSummary()!.pdbCount === 1 ? '' : 's'} and {scanSummary()!.mtzCount} MTZ file{scanSummary()!.mtzCount === 1 ? '' : 's'} found
-                        {scanSummary()!.unpairedPdbCount > 0 ? `, ${scanSummary()!.unpairedPdbCount} PDB-only` : ''}
-                      </p>
-                    </div>
-                  </Show>
-                  <button class="btn btn-ghost btn-xs w-full" onClick={handleClear}>Clear</button>
+
+                  <div class="overflow-x-auto max-h-60 overflow-y-auto">
+                    <table class="table table-xs table-zebra w-full">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Name</th>
+                          <th>Ligand</th>
+                          <th>Atoms</th>
+                          <th>Prepared</th>
+                          <th class="w-8"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={state().score.entries}>{(entry, i) => {
+                          const ligand = () => entry.detectedLigands.find((l) => l.id === entry.selectedLigandId);
+                          return (
+                            <tr class={entry.status === 'error' ? 'opacity-60' : ''}>
+                              <td class="font-mono text-xs">{i() + 1}</td>
+                              <td class="text-xs font-medium">{entry.name}</td>
+                              <td class="text-xs">
+                                <Show when={entry.status === 'detecting'}>
+                                  <span class="loading loading-spinner loading-xs" />
+                                </Show>
+                                <Show when={entry.status === 'error'}>
+                                  <span class="badge badge-error badge-xs">None</span>
+                                </Show>
+                                <Show when={entry.status !== 'detecting' && entry.status !== 'error'}>
+                                  {ligand()?.resname || entry.selectedLigandId || '?'}
+                                </Show>
+                              </td>
+                              <td class="text-xs font-mono">{ligand()?.num_atoms ?? '--'}</td>
+                              <td class="text-xs">
+                                <Show when={entry.isPrepared}>
+                                  <span class="badge badge-success badge-xs">Yes</span>
+                                </Show>
+                                <Show when={!entry.isPrepared && entry.status !== 'error'}>
+                                  <span class="badge badge-warning badge-xs">No</span>
+                                </Show>
+                              </td>
+                              <td>
+                                <button
+                                  class="btn btn-ghost btn-xs btn-square"
+                                  onClick={() => removeScoreEntry(entry.id)}
+                                  title="Remove"
+                                >
+                                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                  </svg>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        }}</For>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               }
             >
               <div class="space-y-3">
-                <button class="btn btn-outline btn-sm w-full" onClick={handleSelectFolder}>
-                  Import Folder
-                </button>
+                <div class="flex gap-2">
+                  <button class="btn btn-outline btn-sm flex-1" onClick={handleSelectFiles}>
+                    Import PDB Files
+                  </button>
+                  <button class="btn btn-outline btn-sm flex-1" onClick={handleSelectFolder}>
+                    Import Folder
+                  </button>
+                </div>
+
+                <div class="divider my-0 text-[10px]">OR</div>
+
+                <div class="flex gap-2 items-center">
+                  <input
+                    class="input input-bordered input-sm flex-1 font-mono uppercase"
+                    type="text"
+                    placeholder="PDB ID (e.g. 8TCE)"
+                    maxLength={4}
+                    value={pdbIdInput()}
+                    onInput={(e) => setPdbIdInput(e.currentTarget.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleFetchPdb(); }}
+                  />
+                  <button
+                    class="btn btn-sm btn-outline"
+                    onClick={handleFetchPdb}
+                    disabled={pdbIdInput().trim().length !== 4 || isFetching()}
+                  >
+                    {isFetching() ? <span class="loading loading-spinner loading-xs" /> : 'Fetch'}
+                  </button>
+                </div>
 
                 <p class="text-[10px] text-base-content/60 leading-relaxed">
-                  Select a folder containing matching `*.pdb` and `*.mtz` files. PDFs will be written into the current Ember project under `xray/`.
+                  Import PDB or CIF files containing protein-ligand complexes, or fetch by PDB ID from the RCSB.
                 </p>
               </div>
             </Show>
@@ -150,15 +288,15 @@ const ScoreStepLoad: Component = () => {
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <span>
-            Electron density maps (.mtz) and structure files (.pdb) are analyzed algorithmically for alignment.
+            Unprepared structures are automatically protonated before scoring. Preparation adds ~30s per structure.
           </span>
         </div>
         <button
           class="btn btn-primary"
           onClick={() => setScoreStep('score-progress')}
-          disabled={!state().score.inputDir}
+          disabled={validEntries().length === 0 || isScanning()}
         >
-          Continue
+          Score {validEntries().length > 0 ? `(${validEntries().length})` : ''}
           <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
           </svg>
