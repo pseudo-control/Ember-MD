@@ -1,9 +1,10 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import type { ProjectJobPose } from '../../shared/types/ipc';
+import type { ProjectJobPose, ProjectJob } from '../../shared/types/ipc';
 import type { DockResult } from '../../shared/types/dock';
 import type {
   ViewerProjectColumn,
   ViewerProjectFamily,
+  ViewerProjectJobType,
   ViewerProjectRow,
   ViewerProjectTableState,
   ViewerQueueItem,
@@ -38,10 +39,6 @@ const percent = (value: number | null | undefined): string | number | null =>
 export function buildDockingProjectTable(options: {
   familyId: string;
   title: string;
-  receptorPdb: string;
-  holoPdb?: string | null;
-  preparedLigandPath?: string | null;
-  referenceLigandPath?: string | null;
   poses: DockResult[];
   poseQueue: ViewerQueueItem[];
   selectedQueueIndex: number;
@@ -49,54 +46,12 @@ export function buildDockingProjectTable(options: {
   const {
     familyId,
     title,
-    receptorPdb,
-    holoPdb,
-    preparedLigandPath,
-    referenceLigandPath,
     poses,
     poseQueue,
     selectedQueueIndex,
   } = options;
-  const rows: ViewerProjectRow[] = [
-    {
-      id: `${familyId}:apo`,
-      familyId,
-      label: 'Apo receptor',
-      rowKind: 'apo',
-      jobType: 'docking',
-      item: { pdbPath: receptorPdb, label: 'Apo receptor' },
-      loadKind: 'structure',
-      metrics: {},
-    },
-  ];
 
-  if (holoPdb) {
-    rows.push({
-      id: `${familyId}:holo`,
-      familyId,
-      label: 'Holo reference complex',
-      rowKind: 'holo',
-      jobType: 'docking',
-      item: { pdbPath: holoPdb, label: 'Holo reference complex' },
-      loadKind: 'structure',
-      metrics: {},
-    });
-  }
-
-  if (preparedLigandPath) {
-    rows.push({
-      id: `${familyId}:prepared-ligand`,
-      familyId,
-      label: 'Prepared dock ligand',
-      rowKind: 'prepared-ligand',
-      jobType: 'docking',
-      item: { pdbPath: preparedLigandPath, label: 'Prepared dock ligand', type: 'ligand' },
-      loadKind: 'standalone-ligand',
-      metrics: {},
-    });
-  }
-
-  const poseRows = poses.map<ViewerProjectRow>((pose, index) => ({
+  const rows = poses.map<ViewerProjectRow>((pose, index) => ({
     id: `${familyId}:pose:${index}`,
     familyId,
     label: formatDockingQueueLabel({
@@ -116,19 +71,17 @@ export function buildDockingProjectTable(options: {
     },
   }));
 
-  rows.push(...poseRows);
-
   const columns: ViewerProjectColumn[] = [];
-  if (poseRows.some((row) => row.metrics.vinaAffinity != null)) {
+  if (rows.some((row) => row.metrics.vinaAffinity != null)) {
     columns.push({ key: 'vinaAffinity', label: 'Vina', kind: 'number', priority: 0, minPanelWidth: 0 });
   }
-  if (poseRows.some((row) => row.metrics.cordialPHighAffinity != null)) {
+  if (rows.some((row) => row.metrics.cordialPHighAffinity != null)) {
     columns.push({ key: 'cordialPHighAffinity', label: 'P(<1uM)', kind: 'percent', priority: 1, minPanelWidth: 360 });
   }
-  if (poseRows.some((row) => row.metrics.qed != null)) {
+  if (rows.some((row) => row.metrics.qed != null)) {
     columns.push({ key: 'qed', label: 'QED', kind: 'number', priority: 2, minPanelWidth: 420 });
   }
-  if (poseRows.some((row) => row.metrics.xtbEnergyKcal != null)) {
+  if (rows.some((row) => row.metrics.xtbEnergyKcal != null)) {
     columns.push({ key: 'xtbEnergyKcal', label: 'xTB', kind: 'number', priority: 3, minPanelWidth: 500 });
   }
 
@@ -137,53 +90,37 @@ export function buildDockingProjectTable(options: {
       id: familyId,
       title,
       jobType: 'docking',
-      collapsed: false,
+      collapsed: true,
       rowIds: rows.map((row) => row.id),
       columns,
-      sortKey: poseRows.some((row) => row.metrics.cordialPHighAffinity != null) ? 'cordialPHighAffinity' : 'vinaAffinity',
-      sortDirection: poseRows.some((row) => row.metrics.cordialPHighAffinity != null) ? 'desc' : 'asc',
+      sortKey: rows.some((row) => row.metrics.cordialPHighAffinity != null) ? 'cordialPHighAffinity' : 'vinaAffinity',
+      sortDirection: rows.some((row) => row.metrics.cordialPHighAffinity != null) ? 'desc' : 'asc',
     },
   ];
 
   return {
     families,
     rows,
-    activeRowId: poseRows[selectedQueueIndex]?.id ?? rows[0]?.id ?? null,
-    selectedRowIds: [poseRows[selectedQueueIndex]?.id ?? rows[0]?.id].filter(Boolean) as string[],
+    activeRowId: rows[selectedQueueIndex]?.id ?? rows[0]?.id ?? null,
+    selectedRowIds: [rows[selectedQueueIndex]?.id ?? rows[0]?.id].filter(Boolean) as string[],
+    hiddenFamilyIds: [],
+    hiddenRowIds: [],
   };
 }
 
 export function buildConformerProjectTable(options: {
   familyId: string;
   title: string;
-  inputPath?: string | null;
   conformerPaths: string[];
   conformerEnergies: Record<string, number>;
 }): ViewerProjectTableState {
-  const { familyId, title, inputPath, conformerPaths, conformerEnergies } = options;
+  const { familyId, title, conformerPaths, conformerEnergies } = options;
   const rows: ViewerProjectRow[] = [];
 
-  if (inputPath) {
-    rows.push({
-      id: `${familyId}:input`,
-      familyId,
-      label: 'Input molecule',
-      rowKind: 'input',
-      jobType: 'conformer',
-      item: { pdbPath: inputPath, label: 'Input molecule', type: 'ligand' },
-      loadKind: 'standalone-ligand',
-      metrics: {},
-    });
-  }
-
   const conformerRows = conformerPaths.map<ViewerProjectRow>((sdfPath, index) => {
-    let energy: number | null = null;
-    if (sdfPath in conformerEnergies) {
-      energy = conformerEnergies[sdfPath];
-    } else {
-      const match = Object.entries(conformerEnergies).find(([key]) => key.endsWith(`/${sdfPath.split('/').pop()}`));
-      energy = match ? match[1] : null;
-    }
+    const energy = sdfPath in conformerEnergies
+      ? conformerEnergies[sdfPath]
+      : (Object.entries(conformerEnergies).find(([key]) => key.endsWith(`/${sdfPath.split('/').pop()}`))?.[1] ?? null);
 
     return {
       id: `${familyId}:conformer:${index}`,
@@ -191,8 +128,8 @@ export function buildConformerProjectTable(options: {
       label: `Conformer ${index + 1}`,
       rowKind: 'conformer',
       jobType: 'conformer',
-      item: { pdbPath: sdfPath, label: `Conformer ${index + 1}`, type: 'ligand' },
-      loadKind: 'standalone-ligand',
+      item: { pdbPath: sdfPath, label: `Conformer ${index + 1}`, type: 'conformer' },
+      loadKind: 'queue',
       queueIndex: index,
       metrics: {
         relativeEnergy: energy,
@@ -207,7 +144,7 @@ export function buildConformerProjectTable(options: {
       id: familyId,
       title,
       jobType: 'conformer',
-      collapsed: false,
+      collapsed: true,
       rowIds: rows.map((row) => row.id),
       columns: [{ key: 'relativeEnergy', label: 'Rel E', kind: 'number', priority: 0, minPanelWidth: 0 }],
       sortKey: 'relativeEnergy',
@@ -216,13 +153,14 @@ export function buildConformerProjectTable(options: {
     rows,
     activeRowId: conformerRows[0]?.id ?? rows[0]?.id ?? null,
     selectedRowIds: [conformerRows[0]?.id ?? rows[0]?.id].filter(Boolean) as string[],
+    hiddenFamilyIds: [],
+    hiddenRowIds: [],
   };
 }
 
 export function buildMdProjectTable(options: {
   familyId: string;
   title: string;
-  systemPdb: string;
   trajectoryPath?: string | null;
   queueBackedClusters?: boolean;
   clusters: Array<{
@@ -233,20 +171,8 @@ export function buildMdProjectTable(options: {
     cordialPHighAffinity?: number;
   }>;
 }): ViewerProjectTableState {
-  const { familyId, title, systemPdb, trajectoryPath, clusters, queueBackedClusters = true } = options;
-  const rows: ViewerProjectRow[] = [
-    {
-      id: `${familyId}:initial-complex`,
-      familyId,
-      label: 'Initial complex',
-      rowKind: 'initial-complex',
-      jobType: 'simulation',
-      item: { pdbPath: systemPdb, label: 'Initial complex' },
-      loadKind: 'structure',
-      metrics: {},
-      trajectoryPath: trajectoryPath ?? null,
-    },
-  ];
+  const { familyId, title, trajectoryPath, clusters, queueBackedClusters = true } = options;
+  const rows: ViewerProjectRow[] = [];
 
   rows.push(...clusters
     .filter((cluster) => cluster.centroidPdbPath)
@@ -274,7 +200,7 @@ export function buildMdProjectTable(options: {
       id: familyId,
       title,
       jobType: 'simulation',
-      collapsed: false,
+      collapsed: true,
       rowIds: rows.map((row) => row.id),
       columns: [
         { key: 'population', label: 'Pop%', kind: 'percent', priority: 0, minPanelWidth: 0 },
@@ -292,6 +218,8 @@ export function buildMdProjectTable(options: {
     rows,
     activeRowId: rows[0]?.id ?? null,
     selectedRowIds: [rows[0]?.id].filter(Boolean) as string[],
+    hiddenFamilyIds: [],
+    hiddenRowIds: [],
   };
 }
 
@@ -337,4 +265,132 @@ export function buildImportFamily(options: {
   };
 
   return { family, rows };
+}
+
+/**
+ * Build a complete project table from all scanned jobs + imported structures.
+ * Creates one family per job, all collapsed. Used to auto-populate the viewer
+ * project table when a project is selected.
+ */
+export function buildProjectTableFromJobs(
+  jobs: ProjectJob[],
+  importedFiles?: string[],
+): ViewerProjectTableState {
+  const allFamilies: ViewerProjectFamily[] = [];
+  const allRows: ViewerProjectRow[] = [];
+
+  const jobTypeMap: Record<string, ViewerProjectJobType> = {
+    docking: 'docking',
+    simulation: 'simulation',
+    conformer: 'conformer',
+    scoring: 'scoring',
+  };
+
+  for (const job of jobs) {
+    // Skip x-ray jobs (PDFs, not viewable in the 3D viewer)
+    if (job.type === 'xray') continue;
+
+    const familyId = `job:${job.type}:${job.folder}`;
+    const jobType = jobTypeMap[job.type];
+    if (!jobType) continue;
+    const rows: ViewerProjectRow[] = [];
+
+    // Build summary row for each job
+    const summaryLabel = job.label || job.folder;
+    const summaryRow: ViewerProjectRow = {
+      id: `${familyId}:summary`,
+      familyId,
+      label: summaryLabel,
+      rowKind: 'apo',
+      jobType,
+      item: { pdbPath: job.path, label: summaryLabel },
+      loadKind: 'structure',
+      metrics: {},
+    };
+
+    if (job.type === 'docking' && job.poses) {
+      for (let i = 0; i < job.poses.length; i++) {
+        const pose = job.poses[i];
+        rows.push({
+          id: `${familyId}:pose:${i}`,
+          familyId,
+          label: formatDockingQueueLabel(pose),
+          rowKind: 'pose',
+          jobType: 'docking',
+          item: { pdbPath: pose.path, label: pose.name },
+          loadKind: 'structure',
+          metrics: { vinaAffinity: pose.affinity ?? null },
+        });
+      }
+    } else if (job.type === 'conformer' && job.conformerPaths) {
+      for (let i = 0; i < job.conformerPaths.length; i++) {
+        const p = job.conformerPaths[i];
+        const name = p.split('/').pop() || `Conformer ${i + 1}`;
+        rows.push({
+          id: `${familyId}:conf:${i}`,
+          familyId,
+          label: name,
+          rowKind: 'conformer',
+          jobType: 'conformer',
+          item: { pdbPath: p, label: name, type: 'conformer' },
+          loadKind: 'standalone-ligand',
+          metrics: {},
+        });
+      }
+    } else if (job.type === 'simulation' && job.systemPdb) {
+      rows.push({
+        id: `${familyId}:system`,
+        familyId,
+        label: 'Initial complex',
+        rowKind: 'initial-complex',
+        jobType: 'simulation',
+        item: { pdbPath: job.systemPdb, label: 'Initial complex' },
+        loadKind: 'structure',
+        metrics: {},
+        trajectoryPath: job.trajectoryDcd || null,
+      });
+    } else {
+      rows.push(summaryRow);
+    }
+
+    const columns: ViewerProjectColumn[] = [];
+    if (job.type === 'docking') {
+      columns.push({ key: 'vinaAffinity', label: 'Vina', kind: 'number', priority: 0 });
+    }
+
+    allFamilies.push({
+      id: familyId,
+      title: job.metadata.descriptor || job.folder,
+      jobType,
+      collapsed: true,
+      rowIds: rows.map((r) => r.id),
+      columns,
+      trajectoryPath: job.trajectoryDcd || null,
+    });
+    allRows.push(...rows);
+  }
+
+  // Add imported structures
+  if (importedFiles && importedFiles.length > 0) {
+    const importFamily = buildImportFamily({
+      filePaths: importedFiles,
+      fileTypes: importedFiles.map((f) => {
+        const lower = f.toLowerCase();
+        return (lower.endsWith('.sdf') || lower.endsWith('.mol') || lower.endsWith('.mol2'))
+          ? 'ligand' : 'protein';
+      }),
+    });
+    importFamily.family.collapsed = true;
+    allFamilies.push(importFamily.family);
+    allRows.push(...importFamily.rows);
+  }
+
+  return {
+    families: allFamilies,
+    rows: allRows,
+    activeRowId: null,
+    selectedRowIds: [],
+    hiddenFamilyIds: [],
+    hiddenRowIds: [],
+  };
 }

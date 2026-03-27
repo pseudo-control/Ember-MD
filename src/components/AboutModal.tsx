@@ -15,10 +15,13 @@ type AboutTab = 'about' | 'changelog';
 const AboutModal: Component<AboutModalProps> = (props) => {
   const [appVersion, setAppVersion] = createSignal('');
   const [copied, setCopied] = createSignal(false);
-  const [activeTab, setActiveTab] = createSignal<AboutTab>(props.showWhatsNew ? 'changelog' : 'about');
+  const [activeTab, setActiveTab] = createSignal<AboutTab>('about');
   const brewUpdateCommand = 'brew update && brew upgrade --cask ember-md';
 
   onMount(async () => {
+    if (props.showWhatsNew) {
+      setActiveTab('changelog');
+    }
     try { setAppVersion(await window.electronAPI.getAppVersion()); }
     catch { setAppVersion('unknown'); }
   });

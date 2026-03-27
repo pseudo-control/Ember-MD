@@ -40,6 +40,8 @@ export type AppError =
   | { type: 'CLUSTER_SCORING_FAILED'; message: string }
   | { type: 'USER_CANCELLED'; message: string }
   | { type: 'MOVE_FAILED'; message: string }
+  | { type: 'DELETE_FAILED'; message: string }
+  | { type: 'WRITE_FAILED'; message: string }
   | { type: 'UNKNOWN'; message: string };
 
 export function createError(
@@ -108,9 +110,23 @@ export function formatError(error: AppError): string {
       return `Binding site mapping failed: ${error.message}`;
     case 'POCKET_MAP_FAILED':
       return `Pocket map failed: ${error.message}`;
+    case 'SURFACE_PROPS_FAILED':
+      return `Surface property computation failed: ${error.message}`;
+    case 'FEP_SCORING_FAILED':
+      return `FEP scoring failed: ${error.message}`;
+    case 'IMPORT_FAILED':
+      return `Import failed: ${error.message}`;
+    case 'FEP_SCORING_CANCELLED':
+      return `FEP scoring cancelled: ${error.message}`;
+    case 'REFINEMENT_FAILED':
+      return `Refinement failed: ${error.message}`;
     case 'CLUSTER_SCORING_FAILED':
       return `Cluster scoring failed: ${error.message}`;
-    default:
+    case 'USER_CANCELLED':
+    case 'MOVE_FAILED':
+    case 'DELETE_FAILED':
+    case 'WRITE_FAILED':
+    case 'UNKNOWN':
       return error.message;
   }
 }

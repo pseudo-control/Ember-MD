@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, For, createSignal, createMemo, createEffect, on, onMount, onCleanup, batch } from 'solid-js';
+import { Component, Show, For, createSignal, createMemo, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { workflowStore, ViewerQueueItem } from '../../stores/workflow';
 import path from 'path';
 import MDTorsionPanel from './MDTorsionPanel';
@@ -173,7 +173,6 @@ const MDStepResults: Component = () => {
     const projectTable = buildMdProjectTable({
       familyId: `md:${state().jobName || 'current'}`,
       title: getSimulationRunRoot()?.split('/').pop() || 'Simulation job',
-      systemPdb: result()!.systemPdbPath,
       trajectoryPath: result()!.trajectoryPath,
       queueBackedClusters: false,
       clusters: sortedClusters(),
@@ -197,7 +196,6 @@ const MDStepResults: Component = () => {
     const projectTable = buildMdProjectTable({
       familyId: `md:${state().jobName || 'current'}`,
       title: getSimulationRunRoot()?.split('/').pop() || 'Simulation job',
-      systemPdb: result()!.systemPdbPath,
       trajectoryPath: result()?.trajectoryPath,
       queueBackedClusters: true,
       clusters: sortedClusters(),
@@ -223,7 +221,6 @@ const MDStepResults: Component = () => {
     const projectTable = buildMdProjectTable({
       familyId: `md:${state().jobName || 'current'}`,
       title: getSimulationRunRoot()?.split('/').pop() || 'Simulation job',
-      systemPdb: result()!.systemPdbPath,
       trajectoryPath: result()?.trajectoryPath,
       queueBackedClusters: true,
       clusters: sortedClusters(),
@@ -240,14 +237,14 @@ const MDStepResults: Component = () => {
 
   const handleOpenFolder = () => {
     const dir = getSimulationRunRoot();
-    if (dir) api.openFolder(dir);
+    if (dir) void api.openFolder(dir);
   };
 
   const openReport = () => {
     const runRoot = getSimulationRunRoot();
     if (!runRoot) return;
     const reportPath = path.join(runRoot, 'analysis', 'full_report.pdf');
-    api.openFolder(reportPath);
+    void api.openFolder(reportPath);
   };
 
   const handleCopyTable = async () => {

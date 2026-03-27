@@ -33,6 +33,7 @@ import {
   runCordialScoringJob,
   parseSdfProperties,
 } from '../scoring-utils';
+import { createJobMetadata, inferDescriptorFromFolderName, updateJobStatus, writeJobMetadata } from '../job-metadata';
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -408,6 +409,20 @@ export function register(): void {
       const inputsLigandsDir = path.join(inputsDir, 'ligands');
       fs.rmSync(inputsLigandsDir, { recursive: true, force: true });
       fs.mkdirSync(inputsLigandsDir, { recursive: true });
+      writeJobMetadata(outputDir, createJobMetadata({
+        jobDir: outputDir,
+        type: 'docking',
+        descriptor: inferDescriptorFromFolderName(path.basename(outputDir), 'docking'),
+        status: 'running',
+        artifacts: {
+          inputsDir: 'inputs',
+          prepDir: 'prep',
+          resultsDir: 'results',
+          posesDir: 'results/poses',
+          receptorPdb: 'inputs/receptor.pdb',
+          referenceLigandPath: 'inputs/reference_ligand.sdf',
+        },
+      }));
 
       // Copy receptor and reference ligand to inputs/ (no project prefix)
       const receptorOutputPath = path.join(inputsDir, 'receptor.pdb');
@@ -512,6 +527,13 @@ export function register(): void {
         console.error('Post-processing (pooling) failed:', e);
         // Non-fatal -- docking results are still available
       }
+
+      try {
+        updateJobStatus(outputDir, 'complete', {
+          pooledResultsSdf: fs.existsSync(path.join(outputDir, 'results', 'all_docked.sdf')) ? 'results/all_docked.sdf' : null,
+          posesDir: 'results/poses',
+        });
+      } catch { /* ignore metadata update failures */ }
 
       return Ok(outputDir);
     }

@@ -5,6 +5,7 @@ import { workflowStore } from '../../stores/workflow';
 import { buildDockFolderName, buildDockConformRunFolderName } from '../../utils/jobName';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import TerminalOutput from '../shared/TerminalOutput';
+import StopConfirmModal from '../shared/StopConfirmModal';
 
 const DockStepProgress: Component = () => {
   const {
@@ -26,6 +27,7 @@ const DockStepProgress: Component = () => {
 
   const [hasStarted, setHasStarted] = createSignal(false);
   const [cordialRunning, setCordialRunning] = createSignal(false);
+  const [showStopConfirm, setShowStopConfirm] = createSignal(false);
 
   const api = window.electronAPI;
 
@@ -65,7 +67,6 @@ const DockStepProgress: Component = () => {
       setCurrentPhase('error');
       return;
     }
-    const jobName = state().jobName.trim();
     const paths = projectPathsFromProjectDir(projectDir);
     const dockFolder = buildDockFolderName({
       referenceLigandId: dock.referenceLigandId,
@@ -196,7 +197,7 @@ const DockStepProgress: Component = () => {
         if (confResult.ok && confResult.value.conformerPaths.length > 0) {
           ligandPaths = confResult.value.conformerPaths;
           appendLog(`  ${ligandPaths.length} conformers generated\n`);
-          appendLog(`  Saved reusable conformer job: ${path.join(jobName, 'conformers', conformerRunFolder)}\n\n`);
+          appendLog(`  Saved reusable conformer job: ${path.join('conformers', conformerRunFolder)}\n\n`);
         } else {
           appendLog('  Conformer generation skipped\n\n');
         }
@@ -216,7 +217,7 @@ const DockStepProgress: Component = () => {
             if (preoptResult.value.failedCount > 0) {
               appendLog(`  ${preoptResult.value.failedCount} ligands kept their original geometry after xTB failure\n`);
             }
-            appendLog(`  Saved optimized ligands: ${path.join(jobName, 'docking', dockFolder, 'prep', 'xtb_preopt')}\n\n`);
+            appendLog(`  Saved optimized ligands: ${path.join('docking', dockFolder, 'prep', 'xtb_preopt')}\n\n`);
           } else {
             appendLog(`  xTB pre-optimization skipped: ${preoptResult.error.message}\n\n`);
           }
@@ -331,7 +332,7 @@ const DockStepProgress: Component = () => {
     const phase = state().currentPhase;
     if (!state().isRunning && !hasStarted() && phase !== 'complete') {
       setHasStarted(true);
-      runDocking();
+      void runDocking();
     }
   });
 
@@ -382,12 +383,7 @@ const DockStepProgress: Component = () => {
             <button
               class="btn btn-circle btn-xs btn-ghost text-error"
               title="Cancel"
-              onClick={async () => {
-                await api.cancelVinaDocking();
-                setIsRunning(false);
-                setCurrentPhase('idle');
-                appendLog('\n--- Docking cancelled by user ---\n');
-              }}
+              onClick={() => setShowStopConfirm(true)}
             >
               <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M6 6h12v12H6z" />
@@ -470,13 +466,29 @@ const DockStepProgress: Component = () => {
               clearLogs();
               setError(null);
               setHasStarted(false);
-              runDocking();
+              void runDocking();
             }}
           >
             Retry
           </button>
         </Show>
       </div>
+
+      <StopConfirmModal
+        isOpen={showStopConfirm()}
+        title="Stop Docking?"
+        message="Are you sure you want to cancel the docking run? Already-docked poses will be preserved."
+        onConfirm={() => {
+          setShowStopConfirm(false);
+          void (async () => {
+            await api.cancelVinaDocking();
+            setIsRunning(false);
+            setCurrentPhase('idle');
+            appendLog('\n--- Docking cancelled by user ---\n');
+          })();
+        }}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

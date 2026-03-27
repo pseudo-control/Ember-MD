@@ -20,6 +20,7 @@ import {
   getBindingSiteResultFile,
   resolveMdRun,
 } from './projects';
+import { createJobMetadata, inferDescriptorFromFolderName, updateJobStatus, writeJobMetadata } from '../job-metadata';
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -27,6 +28,7 @@ import {
 
 let currentBenchmarkProcess: ChildProcess | null = null;
 let currentMdProcess: ChildProcess | null = null;
+let currentMdOutputDir: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -493,6 +495,17 @@ export function register(): void {
         }
 
         fs.mkdirSync(outputDir, { recursive: true });
+        writeJobMetadata(outputDir, createJobMetadata({
+          jobDir: outputDir,
+          type: 'simulation',
+          descriptor: inferDescriptorFromFolderName(path.basename(outputDir), 'simulation'),
+          status: 'running',
+          artifacts: {
+            inputsDir: 'inputs',
+            resultsDir: 'results',
+            analysisDir: 'analysis',
+          },
+        }));
 
         const args = [
           scriptPath,
@@ -529,9 +542,13 @@ export function register(): void {
 
         console.log('Running MD simulation:', appState.condaPythonPath, args.join(' '));
 
-        const python = spawn(appState.condaPythonPath, args);
+        const python = spawn(appState.condaPythonPath, args, {
+          detached: true,
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        });
         childProcesses.add(python);
         currentMdProcess = python;
+        currentMdOutputDir = outputDir;
 
         let trajectoryPath = '';
 
@@ -563,9 +580,21 @@ export function register(): void {
         python.on('close', (code: number | null) => {
           childProcesses.delete(python);
           currentMdProcess = null;
+          currentMdOutputDir = null;
           if (code === 0 && trajectoryPath) {
+            try {
+              updateJobStatus(outputDir, 'complete', {
+                trajectoryPath: 'results/trajectory.dcd',
+                systemPdb: 'results/system.pdb',
+                finalPdb: 'results/final.pdb',
+                analysisDir: 'analysis',
+              });
+            } catch { /* ignore metadata update failures */ }
             resolve(Ok(trajectoryPath));
           } else {
+            try {
+              updateJobStatus(outputDir, 'error');
+            } catch { /* ignore metadata update failures */ }
             resolve(Err({
               type: 'SIMULATION_FAILED',
               message: `Simulation failed with code ${code}`,
@@ -576,6 +605,10 @@ export function register(): void {
         python.on('error', (error: Error) => {
           childProcesses.delete(python);
           currentMdProcess = null;
+          currentMdOutputDir = null;
+          try {
+            updateJobStatus(outputDir, 'error');
+          } catch { /* ignore metadata update failures */ }
           resolve(Err({
             type: 'SIMULATION_FAILED',
             message: error.message,
@@ -601,18 +634,32 @@ export function register(): void {
     }
   });
 
-  // Pause running MD simulation (SIGSTOP)
+  // Pause running MD simulation (SIGSTOP to entire process group)
   ipcMain.handle(IpcChannels.PAUSE_MD_SIMULATION, async (): Promise<void> => {
-    if (currentMdProcess && !currentMdProcess.killed) {
-      currentMdProcess.kill('SIGSTOP');
+    if (currentMdProcess && !currentMdProcess.killed && currentMdProcess.pid) {
+      // Send to process group (-pid) so child processes (sqm, etc.) also stop.
+      // Without this, SIGCONT to Python resumes it but sqm stays frozen,
+      // causing the simulation to hang permanently after pause/resume.
+      try { process.kill(-currentMdProcess.pid, 'SIGSTOP'); } catch {
+        currentMdProcess.kill('SIGSTOP');
+      }
     }
   });
 
-  // Resume paused MD simulation (SIGCONT)
+  // Resume paused MD simulation (SIGCONT to entire process group)
   ipcMain.handle(IpcChannels.RESUME_MD_SIMULATION, async (): Promise<void> => {
-    if (currentMdProcess && !currentMdProcess.killed) {
-      currentMdProcess.kill('SIGCONT');
+    if (currentMdProcess && !currentMdProcess.killed && currentMdProcess.pid) {
+      try { process.kill(-currentMdProcess.pid, 'SIGCONT'); } catch {
+        currentMdProcess.kill('SIGCONT');
+      }
     }
+  });
+
+  // Extend running MD simulation (write file for Python loop to pick up)
+  ipcMain.handle(IpcChannels.EXTEND_MD_SIMULATION, async (_event, newTotalNs: number): Promise<void> => {
+    if (!currentMdOutputDir || !currentMdProcess || currentMdProcess.killed) return;
+    const extendFile = path.join(currentMdOutputDir, 'extend_ns.txt');
+    fs.writeFileSync(extendFile, String(newTotalNs));
   });
 
   // Prepare a PDB for viewing: add missing hydrogens via PDBFixer
@@ -712,115 +759,4 @@ export function register(): void {
     }
   );
 
-  // Select an Ember job folder via dialog, validate, and return as ProjectJob
-  ipcMain.handle(
-    IpcChannels.SELECT_EMBER_JOB_FOLDER,
-    async (): Promise<any | null> => {
-      const emberDir = appState.getEmberBaseDir();
-      const result = await dialog.showOpenDialog({
-        title: 'Select Ember Job Folder',
-        defaultPath: emberDir,
-        properties: ['openDirectory'],
-      });
-      if (result.canceled || result.filePaths.length === 0) return null;
-
-      const folderPath = result.filePaths[0];
-      const folderName = path.basename(folderPath);
-      const folderFiles = fs.readdirSync(folderPath);
-      const folderStat = fs.statSync(folderPath);
-
-      // Check for docking job: inputs/receptor.pdb + results/poses/*_docked.sdf.gz
-      const newReceptor = path.join(folderPath, 'inputs', 'receptor.pdb');
-      const legacyReceptor = folderFiles.find((f) => f.includes('_receptor_prepared') && f.endsWith('.pdb'));
-      const receptorPdb = fs.existsSync(newReceptor) ? newReceptor : (legacyReceptor ? path.join(folderPath, legacyReceptor) : undefined);
-
-      const newPosesDir = path.join(folderPath, 'results', 'poses');
-      const legacyPosesDir = path.join(folderPath, 'poses');
-      const posesSearchDir = fs.existsSync(newPosesDir) ? newPosesDir : fs.existsSync(legacyPosesDir) ? legacyPosesDir : folderPath;
-
-      let poseFiles: string[] = [];
-      try {
-        poseFiles = fs.readdirSync(posesSearchDir).filter((f) => f.endsWith('_docked.sdf.gz'));
-      } catch { /* ignore */ }
-
-      if (receptorPdb && poseFiles.length > 0) {
-        const poses = poseFiles.map((f) => ({
-          name: f.replace('_docked.sdf.gz', ''),
-          path: path.join(posesSearchDir, f),
-          affinity: extractVinaAffinity(path.join(posesSearchDir, f)),
-        }));
-        poses.sort((a, b) => (a.affinity ?? 0) - (b.affinity ?? 0));
-        return {
-          id: `dock:${folderName}`,
-          type: 'docking',
-          folder: folderName,
-          label: `${folderName} (${poses.length} poses)`,
-          path: folderPath,
-          lastModified: folderStat.mtimeMs,
-          receptorPdb,
-          poses,
-        };
-      }
-
-      // Check for simulation job via shared resolver
-      const md = resolveMdRun(folderPath);
-      if (md && (md.systemPdb || md.finalPdb)) {
-        const { clusterCount, clusterDirPath, clusteringResultsPath } = getSimulationClusterArtifacts(folderPath);
-        return {
-          id: `sim:${folderName}`,
-          type: 'simulation',
-          folder: folderName,
-          label: folderName,
-          path: folderPath,
-          lastModified: folderStat.mtimeMs,
-          systemPdb: md.systemPdb ?? undefined,
-          trajectoryDcd: md.trajectory ?? undefined,
-          hasTrajectory: !!md.trajectory,
-          clusterCount,
-          clusterDir: clusterDirPath,
-          clusteringResultsPath,
-        };
-      }
-
-      const conformerFiles = folderFiles
-        .filter((f) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(f))
-        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-      if (conformerFiles.length > 0) {
-        return {
-          id: `conformer:${folderName}`,
-          type: 'conformer',
-          folder: folderName,
-          label: `${folderName} (${conformerFiles.length} conformers)`,
-          path: folderPath,
-          lastModified: folderStat.mtimeMs,
-          conformerPaths: conformerFiles.map((f) => path.join(folderPath, f)),
-          conformerCount: conformerFiles.length,
-        };
-      }
-
-      const projectDir = path.dirname(path.dirname(folderPath));
-      const projectName = path.basename(projectDir);
-      const mapResultJson = getBindingSiteResultFile(folderPath, projectName);
-      if (mapResultJson) {
-        const metadata = readJsonIfExists<MapJobMetadata>(path.join(folderPath, 'map_metadata.json'));
-        const mapResult = readJsonIfExists<{ hotspots?: unknown[] }>(mapResultJson);
-        const inferredMethod: 'solvation' = 'solvation';
-        return {
-          id: `map:${folderName}`,
-          type: 'map',
-          folder: folderName,
-          label: folderName,
-          path: folderPath,
-          lastModified: folderStat.mtimeMs,
-          mapMethod: inferredMethod,
-          mapResultJson,
-          mapPdb: metadata?.sourcePdbPath,
-          mapTrajectoryDcd: metadata?.sourceTrajectoryPath,
-          hotspotCount: Array.isArray(mapResult?.hotspots) ? mapResult.hotspots.length : 0,
-        };
-      }
-
-      return null;
-    }
-  );
 }

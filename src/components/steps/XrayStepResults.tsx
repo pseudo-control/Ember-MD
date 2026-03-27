@@ -67,7 +67,7 @@ const XrayStepResults: Component = () => {
                             </div>
                             <div class="text-[10px] text-base-content/55 truncate">{pdfPath}</div>
                           </div>
-                          <span class="text-[10px] font-semibold text-primary">Reveal</span>
+                          <span class="text-[10px] font-semibold text-primary">Open</span>
                         </div>
                       </button>
                     )}</For>

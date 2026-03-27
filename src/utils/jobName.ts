@@ -4,7 +4,7 @@
  */
 
 import type { ConformerMethod } from '../../shared/types/dock';
-import { MDForceFieldPreset, MD_PRESET_PARAMS } from '../../shared/types/md';
+import { MDForceFieldPreset } from '../../shared/types/md';
 
 // Word lists for random job name generation (chemistry/science themed)
 const ADJECTIVES = [
@@ -67,41 +67,15 @@ export function generateJobName(): string {
 }
 
 /**
- * Job type identifiers for folder naming
- */
-export type JobType = 'MD' | 'Dock';
-
-/**
- * Build output folder name for MD simulation jobs
- * Format: {jobName}_{forceField}_MD-{temp}K-{duration}ns
- */
-export function buildMdFolderName(
-  jobName: string,
-  params: {
-    forceFieldPreset: MDForceFieldPreset;
-    temperatureK?: number;
-    productionNs: number;
-  }
-): string {
-  const ff = MD_PRESET_PARAMS[params.forceFieldPreset].folderSuffix;
-  const temp = params.temperatureK || 300;
-  const ns = params.productionNs;
-  return `${jobName}_${ff}_MD-${temp}K-${ns}ns`;
-}
-
-/**
- * Build output folder name for docking runs
- * Format: Vina_{ligand} or Vina_{ligand}_{n}lig
- * Examples: Vina_VU9, Vina_ATP_5lig
+ * Build output folder name for docking runs.
+ * Format: docking[-descriptor]-YYYYMMDD-HHMMSS
  */
 export function buildDockFolderName(params: {
   referenceLigandId?: string | null;
   numLigands?: number;
-}): string {
-  const resname = params.referenceLigandId?.split('_')[0] || 'dock';
-  const ligCount = params.numLigands && params.numLigands > 1
-    ? `_${params.numLigands}lig` : '';
-  return `Vina_${resname}${ligCount}`;
+}, date: Date = new Date()): string {
+  const descriptor = sanitizeCompoundId(params.referenceLigandId?.split('_')[0] || 'dock') || 'dock';
+  return buildWorkflowRunFolderName('docking', descriptor, date);
 }
 
 /**
@@ -131,9 +105,30 @@ export function sanitizeConformOutputName(name: string): string {
   return sanitizeForFilesystem(name, 40);
 }
 
-export function buildXrayRunFolderName(inputFolderName: string): string {
-  const descriptor = sanitizeForFilesystem(inputFolderName, 40) || 'xray';
-  return `${descriptor}_xray_pose`;
+function formatTimestamp(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+export function buildWorkflowRunFolderName(
+  prefix: string,
+  descriptor?: string | null,
+  date: Date = new Date(),
+): string {
+  const sanitizedDescriptor = sanitizeForFilesystem(descriptor || '', 40);
+  const timestamp = formatTimestamp(date);
+  return sanitizedDescriptor
+    ? `${prefix}-${sanitizedDescriptor}-${timestamp}`
+    : `${prefix}-${timestamp}`;
+}
+
+export function buildXrayRunFolderName(descriptor?: string | null, date: Date = new Date()): string {
+  return buildWorkflowRunFolderName('analyzed_xrays', descriptor, date);
 }
 
 /**
@@ -149,23 +144,19 @@ export function estimateChargeTime(atoms: number): string {
 }
 
 /**
- * Build run folder name for project-based directory structure
- * Format: {ff}_{compoundId}_MD-{temp}K-{duration}ns or {ff}_MD-{temp}K-{duration}ns
+ * Build simulation run folder name.
+ * Format: simulation[-descriptor]-YYYYMMDD-HHMMSS
  */
 export function buildMdRunFolderName(params: {
   forceFieldPreset: MDForceFieldPreset;
   temperatureK?: number;
   productionNs: number;
   compoundId?: string;
-}): string {
-  const ff = MD_PRESET_PARAMS[params.forceFieldPreset].folderSuffix;
-  const temp = params.temperatureK || 300;
-  const ns = params.productionNs;
-  const compound = params.compoundId?.trim();
-  if (compound) {
-    return `${ff}_${compound}_MD-${temp}K-${ns}ns`;
-  }
-  return `${ff}_MD-${temp}K-${ns}ns`;
+  inputMode?: 'holo' | 'ligand_only' | 'apo';
+}, date: Date = new Date()): string {
+  const compound = sanitizeCompoundId(params.compoundId?.trim() || '');
+  const fallback = params.inputMode === 'apo' ? 'apo' : params.inputMode === 'ligand_only' ? 'ligand-only' : '';
+  return buildWorkflowRunFolderName('simulation', compound || fallback, date);
 }
 
 export function buildConformRunFolderName(params: {
@@ -178,14 +169,11 @@ export function buildConformRunFolderName(params: {
     phMin: number;
     phMax: number;
   };
-}): string {
+}, date: Date = new Date()): string {
   const descriptor = sanitizeConformOutputName(
     params.outputName?.trim() || params.ligandName?.trim() || 'molecule'
   ) || 'molecule';
-  const protonationSuffix = !params.protonation?.enabled
-    ? ''
-    : `_prot-ph${formatPhToken(params.protonation.phMin)}-${formatPhToken(params.protonation.phMax)}`;
-  return `${descriptor}_${params.method.toUpperCase()}-${params.maxConformers}conf${protonationSuffix}`;
+  return buildWorkflowRunFolderName('conformers', descriptor, date);
 }
 
 export function buildDockConformRunFolderName(params: {
@@ -198,23 +186,26 @@ export function buildDockConformRunFolderName(params: {
     phMin: number;
     phMax: number;
   };
-}): string {
-  const dockRunName = buildDockFolderName({
-    referenceLigandId: params.referenceLigandId,
-    numLigands: params.numLigands,
-  }).replace(/_/g, '-');
+}, date: Date = new Date()): string {
+  const dockDescriptor = sanitizeConformOutputName(
+    params.referenceLigandId?.split('_')[0] || 'dock'
+  ) || 'dock';
 
   return buildConformRunFolderName({
     method: params.method,
     maxConformers: params.maxConformers,
-    outputName: dockRunName,
+    outputName: dockDescriptor,
     protonation: params.protonation,
-  });
+  }, date);
 }
 
-function formatPhToken(value: number): string {
-  const normalized = Number.isFinite(value) ? value : 7.0;
-  return normalized.toFixed(1).replace('.', 'p');
+export function buildScoreRunFolderName(
+  descriptor?: string | null,
+  mode: 'batch' | 'trajectory' = 'batch',
+  date: Date = new Date(),
+): string {
+  const fallback = mode === 'trajectory' ? 'trajectory' : 'batch';
+  return buildWorkflowRunFolderName('scoring', descriptor?.trim() || fallback, date);
 }
 
 export function formatJobCountLabel(count: number): string {

@@ -19,11 +19,21 @@ import {
 } from '../app-state';
 import { childProcesses } from '../spawn';
 import type {
-  ClusteringResult,
+  ImportProjectJobRequest,
+  JobMetadata,
+  JobType,
   ProjectJob,
   ProjectJobPose,
-  ScoredClusterResult,
+  ProjectRunInfo,
 } from '../../shared/types/ipc';
+import {
+  createJobMetadata,
+  getJobCollectionDir,
+  jobMetadataPath,
+  readJobMetadata,
+  resolveArtifactPath,
+  writeJobMetadata,
+} from '../job-metadata';
 
 // ---------------------------------------------------------------------------
 // Local types (not in shared/types)
@@ -52,12 +62,17 @@ const readProjectNameFromMetadata = (projectDir: string): string => {
   return projectName;
 };
 
-const promptForImportDestinationName = async (rootDir: string, sourceName: string): Promise<string | null> => {
+const promptForImportDestinationName = async (
+  rootDir: string,
+  sourceName: string,
+  title: string,
+  buttonLabel: string,
+): Promise<string | null> => {
   const suggestion = `${sourceName}-imported`;
   const saveResult = await dialog.showSaveDialog({
-    title: 'Choose Imported Project Name',
+    title,
     defaultPath: path.join(rootDir, suggestion),
-    buttonLabel: 'Import Project',
+    buttonLabel,
     showsTagField: false,
   });
   if (saveResult.canceled || !saveResult.filePath) return null;
@@ -205,257 +220,154 @@ export const writeMapMetadata = (
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
 };
 
-export const findDockingRunJobs = (
-  runPath: string,
-  runName: string,
-  stripPrefix: (name: string) => string,
-): ProjectJob[] => {
-  const stat = fs.statSync(runPath);
-  const runFiles = fs.readdirSync(runPath);
-  const newReceptor = path.join(runPath, 'inputs', 'receptor.pdb');
-  const legacyReceptorFile = runFiles.find((f) => f.includes('_receptor_prepared') && f.endsWith('.pdb'));
-  const receptorPdb = fs.existsSync(newReceptor)
-    ? newReceptor
-    : legacyReceptorFile
-      ? path.join(runPath, legacyReceptorFile)
-      : undefined;
+const JOB_COLLECTIONS: Array<{ dirName: string; type: JobType }> = [
+  { dirName: 'docking', type: 'docking' },
+  { dirName: 'simulations', type: 'simulation' },
+  { dirName: 'conformers', type: 'conformer' },
+  { dirName: 'scoring', type: 'scoring' },
+  { dirName: 'xray', type: 'xray' },
+];
 
-  const newPosesDir = path.join(runPath, 'results', 'poses');
-  const legacyPosesDir = path.join(runPath, 'poses');
-  const posesSearchDir = fs.existsSync(newPosesDir)
-    ? newPosesDir
-    : fs.existsSync(legacyPosesDir)
-      ? legacyPosesDir
-      : runPath;
-  const poseFiles = fs.existsSync(posesSearchDir)
-    ? fs.readdirSync(posesSearchDir).filter((f) => f.endsWith('_docked.sdf.gz'))
-    : [];
-
-  const manifest = readJsonIfExists<{
-    prepared_reference_ligand_sdf?: string;
-  }>(path.join(runPath, 'prep', 'complex', 'prepared_complex_manifest.json'))
-    || readJsonIfExists<{
-      prepared_reference_ligand_sdf?: string;
-    }>(path.join(runPath, 'prep', 'prepared_complex_manifest.json'));
-  const referenceLigandCandidates = [
-    manifest?.prepared_reference_ligand_sdf,
-    path.join(runPath, 'inputs', 'reference_ligand.sdf'),
-  ].filter((candidate): candidate is string => typeof candidate === 'string' && fs.existsSync(candidate));
-
-  const preparedLigandCandidates: string[] = [];
-  const inputsLigandsDir = path.join(runPath, 'inputs', 'ligands');
-  if (fs.existsSync(inputsLigandsDir)) {
-    preparedLigandCandidates.push(
-      ...fs.readdirSync(inputsLigandsDir)
-        .filter((fileName) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(fileName))
-        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-        .map((fileName) => path.join(inputsLigandsDir, fileName)),
-    );
-  }
-  const preparedLigandPath = preparedLigandCandidates[0];
-  const referenceLigandPath = referenceLigandCandidates[0];
-
-  if (!receptorPdb || poseFiles.length === 0) return [];
-
-  const poses: ProjectJobPose[] = poseFiles.map((f) => {
-    const posePath = path.join(posesSearchDir, f);
-    const name = f.replace('_docked.sdf.gz', '');
-    return {
-      name: stripPrefix(name),
-      path: posePath,
-      affinity: extractVinaAffinity(posePath),
-    };
-  });
-
-  poses.sort((a, b) => (a.affinity ?? 0) - (b.affinity ?? 0));
-
-  const groupId = `dock:${runName}`;
-  const allJob: ProjectJob = {
-    id: groupId,
-    type: 'docking',
-    folder: runName,
-    label: `${runName} (${poses.length} poses)`,
-    path: runPath,
-    lastModified: stat.mtimeMs,
-    parentId: groupId,
-    parentLabel: runName,
-    sortKey: 0,
-    receptorPdb,
-    poses,
-    preparedLigandPath,
-    referenceLigandPath,
-  };
-
-  const poseJobs: ProjectJob[] = poses.map((pose, index) => ({
-    id: `${groupId}:pose:${index}`,
-    type: 'docking-pose',
-    folder: runName,
-    label: `${pose.name}${pose.affinity != null ? ` (${pose.affinity.toFixed(1)})` : ''}`,
-    path: runPath,
-    lastModified: stat.mtimeMs,
-    parentId: groupId,
-    parentLabel: runName,
-    sortKey: index + 1,
-    receptorPdb,
-    poses,
-    ligandPath: pose.path,
-    poseIndex: index,
-    preparedLigandPath,
-    referenceLigandPath,
+const getCanonicalJobDirs = (projectDir: string): Array<{ dirName: string; type: JobType; collectionPath: string }> =>
+  JOB_COLLECTIONS.map(({ dirName, type }) => ({
+    dirName,
+    type,
+    collectionPath: path.join(projectDir, dirName),
   }));
 
-  return [allJob, ...poseJobs];
-};
+const buildProjectRunInfo = (job: ProjectJob): ProjectRunInfo => ({
+  folderName: `${job.type}/${job.folder}`,
+  path: job.path,
+  lastModified: job.lastModified ?? 0,
+  hasTrajectory: !!job.trajectoryDcd,
+  hasFinalPdb: !!job.finalPdb,
+  type: job.type,
+});
 
-export const findSimulationJob = (runPath: string, runName: string): ProjectJob | null => {
-  const md = resolveMdRun(runPath);
-  if (!md) return null;
-
-  const stat = fs.statSync(runPath);
-  const { clusterCount, clusterDirPath, clusteringResultsPath } = getSimulationClusterArtifacts(runPath);
-
-  const parts = [];
-  if (md.trajectory) parts.push('trajectory');
-  if (clusterCount > 0) parts.push(`${clusterCount} clusters`);
-  const suffix = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-
-  return {
-    id: `sim:${runName}`,
-    type: 'simulation',
-    folder: runName,
-    label: `${runName}${suffix}`,
-    path: runPath,
+const buildProjectJobFromMetadata = (jobDir: string, metadata: JobMetadata): ProjectJob | null => {
+  if (!fs.existsSync(jobDir)) return null;
+  const stat = fs.statSync(jobDir);
+  const folder = path.basename(jobDir);
+  const base: ProjectJob = {
+    id: `${metadata.type}:${folder}`,
+    type: metadata.type,
+    folder,
+    label: folder,
+    path: jobDir,
     lastModified: stat.mtimeMs,
-    systemPdb: md.systemPdb ?? undefined,
-    trajectoryDcd: md.trajectory ?? undefined,
-    finalPdb: md.finalPdb ?? undefined,
-    hasTrajectory: !!md.trajectory,
-    clusterCount,
-    clusterDir: clusterDirPath,
-    clusteringResultsPath,
+    metadata,
   };
-};
 
-export const findConformerJob = (runPath: string, runName: string): ProjectJob | null => {
-  if (!fs.existsSync(runPath)) return null;
-  const stat = fs.statSync(runPath);
-  const resultsDir = path.join(runPath, 'results');
-  const searchDir = fs.existsSync(resultsDir) ? resultsDir : runPath;
-  const conformerPaths = fs.readdirSync(searchDir)
-    .filter((f) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(f))
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-    .map((f) => path.join(searchDir, f));
-
-  if (conformerPaths.length === 0) return null;
-
-  return {
-    id: `conformer:${runName}`,
-    type: 'conformer',
-    folder: runName,
-    label: `${runName} (${conformerPaths.length} conformers)`,
-    path: runPath,
-    lastModified: stat.mtimeMs,
-    conformerPaths,
-    conformerCount: conformerPaths.length,
-  };
-};
-
-export const inferPreferredMapSources = (projectDir: string): { pdbPath?: string; trajectoryPath?: string } => {
-  const simsDir = path.join(projectDir, 'simulations');
-  if (fs.existsSync(simsDir)) {
-    const simRuns = fs.readdirSync(simsDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-      .map((entry) => {
-        const runPath = path.join(simsDir, entry.name);
-        return {
-          job: findSimulationJob(runPath, entry.name),
-          mtime: fs.statSync(runPath).mtimeMs,
-        };
-      })
-      .filter((entry): entry is { job: ProjectJob; mtime: number } => entry.job !== null)
-      .sort((a, b) => b.mtime - a.mtime);
-
-    const latestSimulation = simRuns[0]?.job;
-    if (latestSimulation) {
+  if (metadata.type === 'docking') {
+    const posesDir = resolveArtifactPath(jobDir, (metadata.artifacts.posesDir as string) || 'results/poses');
+    const poseFiles = posesDir && fs.existsSync(posesDir)
+      ? fs.readdirSync(posesDir).filter((fileName) => fileName.endsWith('_docked.sdf.gz'))
+      : [];
+    const poses: ProjectJobPose[] = poseFiles.map((fileName) => {
+      const posePath = path.join(posesDir!, fileName);
       return {
-        pdbPath: latestSimulation.finalPdb || latestSimulation.systemPdb,
-        trajectoryPath: latestSimulation.trajectoryDcd,
+        name: fileName.replace('_docked.sdf.gz', ''),
+        path: posePath,
+        affinity: extractVinaAffinity(posePath),
       };
-    }
+    }).sort((a, b) => (a.affinity ?? 0) - (b.affinity ?? 0));
+    return {
+      ...base,
+      label: poses.length > 0 ? `${folder} (${poses.length} poses)` : folder,
+      receptorPdb: resolveArtifactPath(jobDir, metadata.artifacts.receptorPdb as string),
+      referenceLigandPath: resolveArtifactPath(jobDir, metadata.artifacts.referenceLigandPath as string),
+      preparedLigandPath: resolveArtifactPath(jobDir, metadata.artifacts.preparedLigandPath as string),
+      poses,
+    };
   }
 
-  const dockingDir = path.join(projectDir, 'docking');
-  if (fs.existsSync(dockingDir)) {
-    const dockRuns = fs.readdirSync(dockingDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-      .map((entry) => {
-        const runPath = path.join(dockingDir, entry.name);
-        const jobs = findDockingRunJobs(runPath, entry.name, (name) => name);
-        return {
-          receptorPdb: jobs.find((job) => job.type === 'docking')?.receptorPdb,
-          mtime: fs.statSync(runPath).mtimeMs,
-        };
-      })
-      .filter((entry) => !!entry.receptorPdb)
-      .sort((a, b) => b.mtime - a.mtime);
-
-    if (dockRuns[0]?.receptorPdb) {
-      return { pdbPath: dockRuns[0].receptorPdb };
-    }
+  if (metadata.type === 'simulation') {
+    const resultsDir = resolveArtifactPath(jobDir, (metadata.artifacts.resultsDir as string) || 'results') || path.join(jobDir, 'results');
+    const systemPdb = path.join(resultsDir, 'system.pdb');
+    const trajectoryDcd = path.join(resultsDir, 'trajectory.dcd');
+    const finalPdb = path.join(resultsDir, 'final.pdb');
+    const { clusterCount, clusterDirPath, clusteringResultsPath } = getSimulationClusterArtifacts(jobDir);
+    const parts = [];
+    if (fs.existsSync(trajectoryDcd)) parts.push('trajectory');
+    if (clusterCount > 0) parts.push(`${clusterCount} clusters`);
+    return {
+      ...base,
+      label: parts.length > 0 ? `${folder} (${parts.join(', ')})` : folder,
+      systemPdb: fs.existsSync(systemPdb) ? systemPdb : undefined,
+      trajectoryDcd: fs.existsSync(trajectoryDcd) ? trajectoryDcd : undefined,
+      finalPdb: fs.existsSync(finalPdb) ? finalPdb : undefined,
+      hasTrajectory: fs.existsSync(trajectoryDcd),
+      clusterCount,
+      clusterDir: clusterDirPath,
+      clusteringResultsPath,
+    };
   }
 
-  const structuresDir = path.join(projectDir, 'structures');
-  if (fs.existsSync(structuresDir)) {
-    const structure = fs.readdirSync(structuresDir)
-      .filter((fileName) => /\.(pdb|cif)$/i.test(fileName))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
-    if (structure) {
-      return { pdbPath: path.join(structuresDir, structure) };
-    }
+  if (metadata.type === 'conformer') {
+    const resultsDir = resolveArtifactPath(jobDir, (metadata.artifacts.resultsDir as string) || 'results') || path.join(jobDir, 'results');
+    const conformerPaths = fs.existsSync(resultsDir)
+      ? fs.readdirSync(resultsDir)
+          .filter((fileName) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(fileName))
+          .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+          .map((fileName) => path.join(resultsDir, fileName))
+      : [];
+    return {
+      ...base,
+      label: conformerPaths.length > 0 ? `${folder} (${conformerPaths.length} conformers)` : folder,
+      conformerPaths,
+      conformerCount: conformerPaths.length,
+    };
   }
 
-  return {};
+  if (metadata.type === 'scoring') {
+    const resultsJson = resolveArtifactPath(jobDir, (metadata.artifacts.scoreResultsJson as string) || 'results/score_results.json');
+    const parsed = resultsJson ? readJsonIfExists<{ entries?: Array<unknown> }>(resultsJson) : null;
+    const count = Array.isArray(parsed?.entries) ? parsed!.entries!.length : 0;
+    return {
+      ...base,
+      label: count > 0 ? `${folder} (${count} scored)` : folder,
+      scoreResultsJson: resultsJson,
+    };
+  }
+
+  if (metadata.type === 'xray') {
+    const resultsDir = resolveArtifactPath(jobDir, (metadata.artifacts.resultsDir as string) || 'results') || path.join(jobDir, 'results');
+    const pdfPaths = fs.existsSync(resultsDir)
+      ? fs.readdirSync(resultsDir)
+          .filter((fileName) => /^xray_analysis_.*\.pdf$/i.test(fileName))
+          .map((fileName) => path.join(resultsDir, fileName))
+          .sort((a, b) => a.localeCompare(b))
+      : [];
+    return {
+      ...base,
+      label: pdfPaths.length > 0 ? `${folder} (${pdfPaths.length} reports)` : folder,
+      xrayReportPaths: pdfPaths,
+    };
+  }
+
+  return null;
 };
 
-const findMapJob = (projectDir: string, runPath: string, runName: string): ProjectJob | null => {
-  if (!fs.existsSync(runPath)) return null;
-
-  const stat = fs.statSync(runPath);
-  const projectName = path.basename(projectDir);
-  const metadata = readJsonIfExists<MapJobMetadata>(path.join(runPath, 'map_metadata.json'));
-  const resultJson = getBindingSiteResultFile(runPath, projectName);
-  const result = resultJson
-    ? readJsonIfExists<{
-        hydrophobicDx?: string;
-        hbondDonorDx?: string;
-        hbondAcceptorDx?: string;
-        hotspots?: unknown[];
-      }>(resultJson)
-    : null;
-
-  if (!resultJson || !result?.hydrophobicDx || !result.hbondDonorDx || !result.hbondAcceptorDx) {
-    return null;
+const listCanonicalJobs = (projectDir: string): ProjectJob[] => {
+  const jobs: ProjectJob[] = [];
+  for (const { type, collectionPath } of getCanonicalJobDirs(projectDir)) {
+    if (!fs.existsSync(collectionPath)) continue;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(collectionPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const jobDir = path.join(collectionPath, entry.name);
+      const metadata = readJobMetadata(jobDir);
+      if (!metadata || metadata.type !== type) continue;
+      const job = buildProjectJobFromMetadata(jobDir, metadata);
+      if (job) jobs.push(job);
+    }
   }
-
-  const inferredMethod: 'solvation' = 'solvation';
-
-  const inferredSources = inferPreferredMapSources(projectDir);
-  const methodLabel = 'Water Map (GIST)';
-  const hotspotCount = Array.isArray(result.hotspots) ? result.hotspots.length : 0;
-
-  return {
-    id: `map:${runName}`,
-    type: 'map',
-    folder: runName,
-    label: `${methodLabel}${hotspotCount > 0 ? ` (${hotspotCount} hotspots)` : ''}`,
-    path: runPath,
-    lastModified: stat.mtimeMs,
-    mapMethod: inferredMethod,
-    mapResultJson: resultJson,
-    mapPdb: metadata?.sourcePdbPath || inferredSources.pdbPath,
-    mapTrajectoryDcd: metadata?.sourceTrajectoryPath || inferredSources.trajectoryPath,
-    hotspotCount,
-  };
+  return jobs.sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
 };
 
 // ---------------------------------------------------------------------------
@@ -595,88 +507,6 @@ export function register(): void {
     const rootDir = getEmberBaseDir();
     const projects: any[] = [];
 
-    const scanRunDir = (runPath: string, folderName: string): any | null => {
-      try {
-        const runFiles = fs.readdirSync(runPath);
-        const md = resolveMdRun(runPath);
-        const hasSimOutput = md !== null;
-        const newPosesPath = path.join(runPath, 'results', 'poses');
-        const legacyPosesPath = path.join(runPath, 'poses');
-        const hasDockOutput = runFiles.some((f: string) => f.endsWith('_docked.sdf.gz') || f.endsWith('_docked.sdf'))
-          || (fs.existsSync(newPosesPath) && fs.readdirSync(newPosesPath).some((f: string) => f.endsWith('_docked.sdf.gz')))
-          || (fs.existsSync(legacyPosesPath) && fs.readdirSync(legacyPosesPath).some((f: string) => f.endsWith('_docked.sdf.gz')));
-        const hasInputs = fs.existsSync(path.join(runPath, 'inputs', 'receptor.pdb'));
-        const conformerResultsDir = path.join(runPath, 'results');
-        const hasConformerOutput = runFiles.some((f: string) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(f))
-          || (fs.existsSync(conformerResultsDir) && fs.readdirSync(conformerResultsDir).some((f: string) => /\.(sdf|sdf\.gz|mol|mol2)$/i.test(f)));
-        const hasMapOutput = runFiles.some((f: string) => f === 'binding_site_results.json' || f.endsWith('_binding_site_results.json'));
-        if (!hasSimOutput && !hasDockOutput && !hasInputs && !hasConformerOutput && !hasMapOutput) return null;
-        const stat = fs.statSync(runPath);
-        const type = hasMapOutput
-          ? 'map'
-          : hasConformerOutput
-            ? 'conformer'
-            : hasSimOutput
-              ? 'simulation'
-              : 'docking';
-        return {
-          folderName,
-          path: runPath,
-          lastModified: stat.mtimeMs,
-          type,
-          hasTrajectory: md ? !!md.trajectory : false,
-          hasFinalPdb: md ? !!md.finalPdb : false,
-        };
-      } catch {
-        return null;
-      }
-    };
-
-    const scanProjectRuns = (entryPath: string): any[] => {
-      const runs: any[] = [];
-      try {
-        const subEntries = fs.readdirSync(entryPath, { withFileTypes: true });
-        for (const sub of subEntries) {
-          if (!sub.isDirectory() || sub.name.startsWith('.')) continue;
-
-          if (sub.name === 'simulations' || sub.name === 'docking' || sub.name === 'conformers') {
-            const typeDir = path.join(entryPath, sub.name);
-            try {
-              const typeEntries = fs.readdirSync(typeDir, { withFileTypes: true });
-              for (const runEntry of typeEntries) {
-                if (!runEntry.isDirectory() || runEntry.name.startsWith('.')) continue;
-                const runInfo = scanRunDir(path.join(typeDir, runEntry.name), `${sub.name}/${runEntry.name}`);
-                if (runInfo) runs.push(runInfo);
-              }
-            } catch { /* skip unreadable */ }
-            continue;
-          }
-
-          if (sub.name === 'surfaces') {
-            const surfaceDir = path.join(entryPath, sub.name);
-            try {
-              const typeEntries = fs.readdirSync(surfaceDir, { withFileTypes: true });
-              for (const runEntry of typeEntries) {
-                if (!runEntry.isDirectory() || runEntry.name.startsWith('.')) continue;
-                if (runEntry.name !== 'binding_site_map' && !runEntry.name.startsWith('pocket_map_')) continue;
-                const runInfo = scanRunDir(path.join(surfaceDir, runEntry.name), `${sub.name}/${runEntry.name}`);
-                if (runInfo) runs.push(runInfo);
-              }
-            } catch { /* skip unreadable */ }
-            continue;
-          }
-
-          if (sub.name === 'structures' || sub.name === 'fep' || sub.name === 'scoring' || sub.name === 'xray') {
-            continue;
-          }
-
-          const runInfo = scanRunDir(path.join(entryPath, sub.name), sub.name);
-          if (runInfo) runs.push(runInfo);
-        }
-      } catch { /* skip unreadable */ }
-      return runs;
-    };
-
     try {
       if (fs.existsSync(rootDir)) {
         const entries = fs.readdirSync(rootDir, { withFileTypes: true });
@@ -686,14 +516,14 @@ export function register(): void {
           const idFile = path.join(entryPath, '.ember-project');
           if (!fs.existsSync(idFile)) continue;
 
-          const runs = scanProjectRuns(entryPath);
-          runs.sort((a: any, b: any) => b.lastModified - a.lastModified);
+          const jobs = listCanonicalJobs(entryPath);
+          const runs = jobs.map(buildProjectRunInfo);
           const stat = fs.statSync(entryPath);
           projects.push({
             name: readProjectNameFromMetadata(entryPath),
             path: normalizePath(entryPath),
             runs,
-            lastModified: runs.length > 0 ? runs[0].lastModified : stat.mtimeMs,
+            lastModified: jobs[0]?.lastModified ?? stat.mtimeMs,
           });
         }
       }
@@ -846,73 +676,7 @@ export function register(): void {
     async (_event: any, projectDir: string): Promise<ProjectJob[]> => {
       projectDir = normalizePath(projectDir);
       if (!fs.existsSync(projectDir)) return [];
-
-      const jobs: ProjectJob[] = [];
-      const projectName = path.basename(projectDir);
-
-      // Strip project name prefix from filenames for cleaner labels
-      const stripPrefix = (name: string) => {
-        if (name.startsWith(projectName + '_')) return name.substring(projectName.length + 1);
-        return name;
-      };
-
-      // 1. Scan docking/ for docking run folders and per-pose entries
-      const dockingDir = path.join(projectDir, 'docking');
-      if (fs.existsSync(dockingDir)) {
-        try {
-          const dockRuns = fs.readdirSync(dockingDir, { withFileTypes: true });
-          for (const run of dockRuns) {
-            if (!run.isDirectory() || run.name.startsWith('.')) continue;
-            const runPath = path.join(dockingDir, run.name);
-            jobs.push(...findDockingRunJobs(runPath, run.name, stripPrefix));
-          }
-        } catch { /* skip */ }
-      }
-
-      // 2. Scan simulations/ for MD run folders
-      const simsDir = path.join(projectDir, 'simulations');
-      if (fs.existsSync(simsDir)) {
-        try {
-          const simRuns = fs.readdirSync(simsDir, { withFileTypes: true });
-          for (const run of simRuns) {
-            if (!run.isDirectory() || run.name.startsWith('.')) continue;
-            const runPath = path.join(simsDir, run.name);
-            const job = findSimulationJob(runPath, run.name);
-            if (job) jobs.push(job);
-          }
-        } catch { /* skip */ }
-      }
-
-      // 3. Scan conformers/ for MCMM runs
-      const conformersDir = path.join(projectDir, 'conformers');
-      if (fs.existsSync(conformersDir)) {
-        try {
-          const conformerRuns = fs.readdirSync(conformersDir, { withFileTypes: true });
-          for (const run of conformerRuns) {
-            if (!run.isDirectory() || run.name.startsWith('.') || run.name.startsWith('_')) continue;
-            const runPath = path.join(conformersDir, run.name);
-            const job = findConformerJob(runPath, run.name);
-            if (job) jobs.push(job);
-          }
-        } catch { /* skip */ }
-      }
-
-      // 4. Scan surfaces/ for map runs
-      const surfacesDir = path.join(projectDir, 'surfaces');
-      if (fs.existsSync(surfacesDir)) {
-        try {
-          const surfaceRuns = fs.readdirSync(surfacesDir, { withFileTypes: true });
-          for (const run of surfaceRuns) {
-            if (!run.isDirectory() || run.name.startsWith('.')) continue;
-            if (run.name !== 'binding_site_map' && !run.name.startsWith('pocket_map_')) continue;
-            const runPath = path.join(surfacesDir, run.name);
-            const job = findMapJob(projectDir, runPath, run.name);
-            if (job) jobs.push(job);
-          }
-        } catch { /* skip */ }
-      }
-
-      return jobs.sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
+      return listCanonicalJobs(projectDir);
     }
   );
 
@@ -978,7 +742,12 @@ export function register(): void {
         let destName = sourceName;
         let destDir = path.join(rootDir, destName);
         while (fs.existsSync(destDir)) {
-          const chosenName = await promptForImportDestinationName(rootDir, destName);
+          const chosenName = await promptForImportDestinationName(
+            rootDir,
+            destName,
+            'Choose Imported Project Name',
+            'Import Project',
+          );
           if (!chosenName) {
             return Err({ type: 'USER_CANCELLED', message: 'Import cancelled' });
           }
@@ -998,6 +767,92 @@ export function register(): void {
 
         console.log(`[Project] Imported project: ${sourceDir} → ${destDir}`);
         return Ok({ name: readProjectNameFromMetadata(destDir), path: destDir });
+      } catch (err: any) {
+        return Err({ type: 'IMPORT_FAILED', message: `Import failed: ${err.message}` });
+      }
+    }
+  );
+
+  ipcMain.handle(
+    IpcChannels.IMPORT_PROJECT_JOB,
+    async (_event, request: ImportProjectJobRequest): Promise<Result<ProjectJob, AppError>> => {
+      try {
+        const projectDir = normalizePath(request.projectDir);
+        if (!fs.existsSync(projectDir)) {
+          return Err({ type: 'DIRECTORY_NOT_FOUND', message: 'Project not found' });
+        }
+
+        const openResult = await dialog.showOpenDialog({
+          title: 'Import Ember Job',
+          defaultPath: getEmberBaseDir(),
+          properties: ['openDirectory'],
+          buttonLabel: 'Import Job',
+        });
+        if (openResult.canceled || !openResult.filePaths.length) {
+          return Err({ type: 'USER_CANCELLED', message: 'Import cancelled' });
+        }
+
+        const sourceDir = normalizePath(openResult.filePaths[0]);
+        const metadata = readJobMetadata(sourceDir);
+        if (!metadata) {
+          return Err({
+            type: 'VALIDATION_FAILED',
+            message: 'Selected folder is not an Ember job (no valid .ember-job file found)',
+          });
+        }
+        if (metadata.type !== request.expectedType) {
+          return Err({
+            type: 'VALIDATION_FAILED',
+            message: `Selected job is type "${metadata.type}", but "${request.expectedType}" was expected`,
+          });
+        }
+
+        const collectionDir = getJobCollectionDir(projectDir, request.expectedType);
+        fs.mkdirSync(collectionDir, { recursive: true });
+        const sourceName = path.basename(sourceDir);
+
+        if (normalizePath(path.dirname(sourceDir)) === normalizePath(collectionDir)) {
+          const localJob = buildProjectJobFromMetadata(sourceDir, metadata);
+          return localJob
+            ? Ok(localJob)
+            : Err({ type: 'VALIDATION_FAILED', message: 'Imported job metadata is invalid' });
+        }
+
+        let destName = sourceName;
+        let destDir = path.join(collectionDir, destName);
+        while (fs.existsSync(destDir)) {
+          const chosenName = await promptForImportDestinationName(
+            collectionDir,
+            destName,
+            'Choose Imported Job Name',
+            'Import Job',
+          );
+          if (!chosenName) {
+            return Err({ type: 'USER_CANCELLED', message: 'Import cancelled' });
+          }
+          destName = chosenName;
+          destDir = path.join(collectionDir, destName);
+        }
+
+        await fs.promises.cp(sourceDir, destDir, { recursive: true });
+        const copiedMetadata = readJobMetadata(destDir) || createJobMetadata({
+          jobDir: destDir,
+          type: request.expectedType,
+          descriptor: metadata.descriptor,
+          mode: metadata.mode,
+          status: metadata.status,
+          artifacts: metadata.artifacts,
+        });
+        writeJobMetadata(destDir, {
+          ...copiedMetadata,
+          folderName: destName,
+          type: request.expectedType,
+        });
+
+        const importedJob = buildProjectJobFromMetadata(destDir, readJobMetadata(destDir)!);
+        return importedJob
+          ? Ok(importedJob)
+          : Err({ type: 'VALIDATION_FAILED', message: 'Imported job metadata is invalid after copy' });
       } catch (err: any) {
         return Err({ type: 'IMPORT_FAILED', message: `Import failed: ${err.message}` });
       }

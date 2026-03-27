@@ -49,7 +49,7 @@ const ConformStepConfigure: Component = () => {
                 onInput={(e) => setConformOutputName(sanitizeConformOutputName(e.currentTarget.value))}
               />
               <p class="text-[10px] text-base-content/60 mt-1">
-                Saved to {state().jobName}/conformers/{outputFolder()}
+                Saved to conformers/{outputFolder()}
               </p>
             </div>
 

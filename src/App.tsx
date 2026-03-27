@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Match, Switch, Show } from 'solid-js';
+import { Component, Match, Switch } from 'solid-js';
 import WizardLayout from './components/layout/WizardLayout';
 import MDStepLoad from './components/steps/MDStepLoad';
 import MDStepConfigure from './components/steps/MDStepConfigure';

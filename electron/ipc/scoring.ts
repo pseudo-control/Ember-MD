@@ -19,6 +19,7 @@ import * as appState from '../app-state';
 import { spawnPythonScript as _spawnPythonScriptRaw } from '../spawn';
 import { getCordialRoot } from '../paths';
 import { runVinaScoreOnly, runCordialScoringJob, parseSdfProperties } from '../scoring-utils';
+import { createJobMetadata, inferDescriptorFromFolderName, updateJobStatus, writeJobMetadata } from '../job-metadata';
 
 // ---------------------------------------------------------------------------
 // Local convenience wrappers
@@ -44,6 +45,75 @@ let cancelRequested = false;
 
 function emit(event: Electron.IpcMainInvokeEvent, text: string): void {
   event.sender.send(IpcChannels.SCORE_OUTPUT, { type: 'stdout', data: text });
+}
+
+/** Run batch CORDIAL scoring and merge results back into entries. */
+async function runCordialBatch(
+  event: Electron.IpcMainInvokeEvent,
+  results: BatchScoreEntryResult[],
+  resultsDir: string,
+  label: string,
+): Promise<void> {
+  const scorableEntries = results.filter(
+    (r) => r.status === 'done' && r.extractedLigandSdfPath && r.preparedReceptorPath,
+  );
+  if (scorableEntries.length === 0) return;
+
+  emit(event, `\n[Score] Running CORDIAL on ${scorableEntries.length} ${label}...\n`);
+
+  const pairCsvPath = path.join(resultsDir, 'cordial_pairs.csv');
+  const csvLines = ['source_name,ligand_sdf,receptor_pdb,pose_index'];
+  for (const entry of scorableEntries) {
+    csvLines.push(`${entry.name},${entry.extractedLigandSdfPath},${entry.preparedReceptorPath},0`);
+  }
+  fs.writeFileSync(pairCsvPath, csvLines.join('\n'));
+
+  const cordialOutputCsv = path.join(resultsDir, 'cordial_scores.csv');
+  const cordialResult = await runCordialScoringJob(
+    { pairCsv: pairCsvPath },
+    cordialOutputCsv,
+    8,
+    {
+      onStdout: (text) => emit(event, text),
+      onStderr: (text) => emit(event, text),
+    },
+  );
+
+  if (cordialResult.ok) {
+    emit(event, `  CORDIAL scored ${cordialResult.value.count} ${label}\n`);
+    const jsonPath = cordialOutputCsv.replace(/\.csv$/, '.json');
+    if (fs.existsSync(jsonPath)) {
+      try {
+        const cordialData = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        const scoresByName = new Map<string, any>();
+        for (const row of cordialData) {
+          scoresByName.set(row.source_name, row);
+        }
+        for (const entry of results) {
+          const score = scoresByName.get(entry.name);
+          if (score) {
+            entry.cordialExpectedPkd = score.cordial_expected_pkd ?? null;
+            entry.cordialPHighAffinity = score.cordial_p_high_affinity ?? null;
+          }
+        }
+      } catch (err) {
+        emit(event, `  Warning: Failed to parse CORDIAL JSON: ${err}\n`);
+      }
+    }
+  } else {
+    emit(event, `  CORDIAL failed: ${cordialResult.error.message}\n`);
+  }
+}
+
+function sanitizePathToken(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9._-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 48) || 'entry';
 }
 
 async function extractLigandFromPdb(
@@ -127,13 +197,30 @@ export function register(): void {
   // -------------------------------------------------------------------------
   ipcMain.handle(IpcChannels.SCORE_BATCH, async (event, request: BatchScoreRequest) => {
     cancelRequested = false;
-    const { entries, outputDir } = request;
+    const { entries, jobDir } = request;
     const results: BatchScoreEntryResult[] = [];
 
-    fs.mkdirSync(outputDir, { recursive: true });
-    const runRoot = path.dirname(outputDir);
-    const inputsDir = path.join(runRoot, 'inputs');
+    const inputsDir = path.join(jobDir, 'inputs');
+    const entriesDir = path.join(jobDir, 'entries');
+    const resultsDir = path.join(jobDir, 'results');
+    fs.mkdirSync(jobDir, { recursive: true });
     fs.mkdirSync(inputsDir, { recursive: true });
+    fs.mkdirSync(entriesDir, { recursive: true });
+    fs.mkdirSync(resultsDir, { recursive: true });
+
+    writeJobMetadata(jobDir, createJobMetadata({
+      jobDir,
+      type: 'scoring',
+      mode: 'batch',
+      descriptor: inferDescriptorFromFolderName(path.basename(jobDir), 'scoring'),
+      status: 'running',
+      artifacts: {
+        inputsDir: 'inputs',
+        entriesDir: 'entries',
+        resultsDir: 'results',
+        scoreResultsJson: 'results/score_results.json',
+      },
+    }));
 
     const cordialRoot = getCordialRoot();
     const cordialAvailable = !!cordialRoot;
@@ -144,12 +231,13 @@ export function register(): void {
       const entry = entries[i];
       const name = entry.name || path.basename(entry.pdbPath).replace(/\.(pdb|cif)$/i, '');
       const id = entry.id;
-      const entryDir = path.join(outputDir, name);
+      const entryDir = path.join(entriesDir, `${String(i + 1).padStart(3, '0')}_${sanitizePathToken(name)}`);
+      const entryResultsDir = path.join(entryDir, 'results');
       const stagedPdbPath = path.join(inputsDir, `${String(i + 1).padStart(3, '0')}_${path.basename(entry.pdbPath)}`);
       if (path.resolve(stagedPdbPath) !== path.resolve(entry.pdbPath)) {
         fs.copyFileSync(entry.pdbPath, stagedPdbPath);
       }
-      fs.mkdirSync(entryDir, { recursive: true });
+      fs.mkdirSync(entryResultsDir, { recursive: true });
 
       emit(event, `\n[Score] (${i + 1}/${entries.length}) ${name}\n`);
 
@@ -201,7 +289,7 @@ export function register(): void {
 
         // Extract ligand to SDF
         emit(event, `  Extracting ligand...\n`);
-        const ligandSdfPath = path.join(entryDir, 'ligand.sdf');
+        const ligandSdfPath = path.join(entryResultsDir, 'ligand.sdf');
         const extractResult = await extractLigandFromPdb(stagedPdbPath, ligandId, ligandSdfPath, event);
         if (!extractResult.ok) {
           result.status = 'error';
@@ -216,7 +304,7 @@ export function register(): void {
         let receptorPath = stagedPdbPath;
         if (!entry.isPrepared) {
           emit(event, `  Preparing receptor (auto-protonation)...\n`);
-          const prepPath = path.join(entryDir, 'receptor_prepared.pdb');
+          const prepPath = path.join(entryResultsDir, 'receptor_prepared.pdb');
           const prepResult = await prepareReceptorForScoring(stagedPdbPath, ligandId, prepPath, event);
           if (prepResult.ok) {
             receptorPath = prepResult.preparedPath!;
@@ -271,71 +359,26 @@ export function register(): void {
       results.push(result);
     }
 
-    // Batch CORDIAL scoring at the end
     if (cordialAvailable && !cancelRequested) {
-      const scorableEntries = results.filter(
-        (r) => r.status === 'done' && r.extractedLigandSdfPath && r.preparedReceptorPath,
-      );
-
-      if (scorableEntries.length > 0) {
-        emit(event, `\n[Score] Running CORDIAL on ${scorableEntries.length} complexes...\n`);
-
-        // Write pair CSV for CORDIAL
-        const pairCsvPath = path.join(outputDir, 'cordial_pairs.csv');
-        const csvLines = ['source_name,ligand_sdf,receptor_pdb,pose_index'];
-        for (const entry of scorableEntries) {
-          csvLines.push(`${entry.name},${entry.extractedLigandSdfPath},${entry.preparedReceptorPath},0`);
-        }
-        fs.writeFileSync(pairCsvPath, csvLines.join('\n'));
-
-        const cordialOutputCsv = path.join(outputDir, 'cordial_scores.csv');
-        const cordialResult = await runCordialScoringJob(
-          { pairCsv: pairCsvPath },
-          cordialOutputCsv,
-          8,
-          {
-            onStdout: (text) => emit(event, text),
-            onStderr: (text) => emit(event, text),
-          },
-        );
-
-        if (cordialResult.ok) {
-          emit(event, `  CORDIAL scored ${cordialResult.value.count} complexes\n`);
-          // Parse CORDIAL JSON output and merge
-          const jsonPath = cordialOutputCsv.replace(/\.csv$/, '.json');
-          if (fs.existsSync(jsonPath)) {
-            try {
-              const cordialData = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-              const scoresByName = new Map<string, any>();
-              for (const row of cordialData) {
-                scoresByName.set(row.source_name, row);
-              }
-              for (const entry of results) {
-                const score = scoresByName.get(entry.name);
-                if (score) {
-                  entry.cordialExpectedPkd = score.cordial_expected_pkd ?? null;
-                  entry.cordialPHighAffinity = score.cordial_p_high_affinity ?? null;
-                }
-              }
-            } catch (err) {
-              emit(event, `  Warning: Failed to parse CORDIAL JSON: ${err}\n`);
-            }
-          }
-        } else {
-          emit(event, `  CORDIAL failed: ${cordialResult.error.message}\n`);
-        }
-      }
+      await runCordialBatch(event, results, resultsDir, 'complexes');
     }
 
     // Write results JSON
-    const resultsJsonPath = path.join(outputDir, 'score_results.json');
+    const resultsJsonPath = path.join(resultsDir, 'score_results.json');
     fs.writeFileSync(resultsJsonPath, JSON.stringify({ entries: results }, null, 2));
     const doneCount = results.filter((entry) => entry.status === 'done').length;
     const errorCount = results.length - doneCount;
     emit(event, `\n[Score] Batch summary: ${doneCount} done, ${errorCount} error, ${results.length} total\n`);
     emit(event, `\n[Score] Results saved to ${resultsJsonPath}\n`);
 
-    return Ok({ entries: results, outputDir, cordialAvailable } as BatchScoreResult);
+    updateJobStatus(jobDir, cancelRequested ? 'cancelled' : 'complete', {
+      scoreResultsJson: 'results/score_results.json',
+      cordialPairsCsv: fs.existsSync(path.join(resultsDir, 'cordial_pairs.csv')) ? 'results/cordial_pairs.csv' : null,
+      cordialScoresCsv: fs.existsSync(path.join(resultsDir, 'cordial_scores.csv')) ? 'results/cordial_scores.csv' : null,
+      cordialScoresJson: fs.existsSync(path.join(resultsDir, 'cordial_scores.json')) ? 'results/cordial_scores.json' : null,
+    });
+
+    return Ok({ entries: results, outputDir: jobDir, cordialAvailable } as BatchScoreResult);
   });
 
   // -------------------------------------------------------------------------
@@ -399,13 +442,44 @@ export function register(): void {
   // -------------------------------------------------------------------------
   ipcMain.handle(IpcChannels.SCORE_TRAJECTORY, async (event, request: ScoreTrajectoryRequest) => {
     cancelRequested = false;
-    const { trajectoryPath, topologyPath, ligandSdfPath, numClusters, outputDir } = request;
+    const { trajectoryPath, topologyPath, ligandSdfPath, numClusters, jobDir } = request;
 
-    fs.mkdirSync(outputDir, { recursive: true });
-    const clusteringDir = path.join(outputDir, 'clustering');
-    const scoredDir = path.join(outputDir, 'scored_clusters');
+    const inputsDir = path.join(jobDir, 'inputs');
+    const resultsDir = path.join(jobDir, 'results');
+    const analysisDir = path.join(jobDir, 'analysis');
+    fs.mkdirSync(jobDir, { recursive: true });
+    fs.mkdirSync(inputsDir, { recursive: true });
+    fs.mkdirSync(resultsDir, { recursive: true });
+    fs.mkdirSync(analysisDir, { recursive: true });
+    const clusteringDir = path.join(analysisDir, 'clustering');
+    const scoredDir = path.join(analysisDir, 'scored_clusters');
     fs.mkdirSync(clusteringDir, { recursive: true });
     fs.mkdirSync(scoredDir, { recursive: true });
+
+    const stagedTopologyPath = path.join(inputsDir, path.basename(topologyPath));
+    if (path.resolve(stagedTopologyPath) !== path.resolve(topologyPath)) {
+      fs.copyFileSync(topologyPath, stagedTopologyPath);
+    }
+    const stagedLigandSdfPath = path.join(inputsDir, path.basename(ligandSdfPath));
+    if (path.resolve(stagedLigandSdfPath) !== path.resolve(ligandSdfPath)) {
+      fs.copyFileSync(ligandSdfPath, stagedLigandSdfPath);
+    }
+
+    writeJobMetadata(jobDir, createJobMetadata({
+      jobDir,
+      type: 'scoring',
+      mode: 'trajectory',
+      descriptor: inferDescriptorFromFolderName(path.basename(jobDir), 'scoring'),
+      status: 'running',
+      artifacts: {
+        inputsDir: 'inputs',
+        resultsDir: 'results',
+        analysisDir: 'analysis',
+        topologyPath: `inputs/${path.basename(topologyPath)}`,
+        ligandSdfPath: `inputs/${path.basename(ligandSdfPath)}`,
+        scoreResultsJson: 'results/score_results.json',
+      },
+    }));
 
     const cordialRoot = getCordialRoot();
     const cordialAvailable = !!cordialRoot;
@@ -469,7 +543,7 @@ export function register(): void {
       const { code } = await spawnPythonScript([
         scoreScript,
         '--clustering_dir', clusteringDir,
-        '--input_ligand_sdf', ligandSdfPath,
+        '--input_ligand_sdf', stagedLigandSdfPath,
         '--output_dir', scoredDir,
       ], {
         onStdout: (text) => emit(event, text),
@@ -547,57 +621,24 @@ export function register(): void {
       results.push(result);
     }
 
-    // --- Step 4: Batch CORDIAL ---
     if (cordialAvailable && !cancelRequested) {
-      const scorableEntries = results.filter(
-        (r) => r.status === 'done' && r.extractedLigandSdfPath && r.preparedReceptorPath,
-      );
-      if (scorableEntries.length > 0) {
-        emit(event, `\n[Score] Running CORDIAL on ${scorableEntries.length} centroids...\n`);
-        const pairCsvPath = path.join(outputDir, 'cordial_pairs.csv');
-        const csvLines = ['source_name,ligand_sdf,receptor_pdb,pose_index'];
-        for (const entry of scorableEntries) {
-          csvLines.push(`${entry.name},${entry.extractedLigandSdfPath},${entry.preparedReceptorPath},0`);
-        }
-        fs.writeFileSync(pairCsvPath, csvLines.join('\n'));
-
-        const cordialOutputCsv = path.join(outputDir, 'cordial_scores.csv');
-        const cordialResult = await runCordialScoringJob(
-          { pairCsv: pairCsvPath },
-          cordialOutputCsv,
-          8,
-          {
-            onStdout: (text) => emit(event, text),
-            onStderr: (text) => emit(event, text),
-          },
-        );
-        if (cordialResult.ok) {
-          const jsonPath = cordialOutputCsv.replace(/\.csv$/, '.json');
-          if (fs.existsSync(jsonPath)) {
-            try {
-              const cordialData = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-              const scoresByName = new Map<string, any>();
-              for (const row of cordialData) {
-                scoresByName.set(row.source_name, row);
-              }
-              for (const entry of results) {
-                const score = scoresByName.get(entry.name);
-                if (score) {
-                  entry.cordialExpectedPkd = score.cordial_expected_pkd ?? null;
-                  entry.cordialPHighAffinity = score.cordial_p_high_affinity ?? null;
-                }
-              }
-            } catch { /* ignore */ }
-          }
-        }
-      }
+      await runCordialBatch(event, results, resultsDir, 'centroids');
     }
 
     // Write results
-    const resultsJsonPath = path.join(outputDir, 'score_results.json');
+    const resultsJsonPath = path.join(resultsDir, 'score_results.json');
     fs.writeFileSync(resultsJsonPath, JSON.stringify({ entries: results }, null, 2));
     emit(event, `\n[Score] Trajectory scoring complete. ${results.length} centroids scored.\n`);
 
-    return Ok({ entries: results, outputDir, cordialAvailable } as BatchScoreResult);
+    updateJobStatus(jobDir, cancelRequested ? 'cancelled' : 'complete', {
+      scoreResultsJson: 'results/score_results.json',
+      clusteringDir: 'analysis/clustering',
+      scoredClustersDir: 'analysis/scored_clusters',
+      cordialPairsCsv: fs.existsSync(path.join(resultsDir, 'cordial_pairs.csv')) ? 'results/cordial_pairs.csv' : null,
+      cordialScoresCsv: fs.existsSync(path.join(resultsDir, 'cordial_scores.csv')) ? 'results/cordial_scores.csv' : null,
+      cordialScoresJson: fs.existsSync(path.join(resultsDir, 'cordial_scores.json')) ? 'results/cordial_scores.json' : null,
+    });
+
+    return Ok({ entries: results, outputDir: jobDir, cordialAvailable } as BatchScoreResult);
   });
 }

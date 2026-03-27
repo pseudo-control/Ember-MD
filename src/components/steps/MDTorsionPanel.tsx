@@ -351,23 +351,17 @@ const MDTorsionPanel: Component<MDTorsionPanelProps> = (props) => {
                       <polyline fill="none" stroke={C_TRAJ} stroke-width="1.5"
                                 points={trajectoryPoints()} opacity="0.85" />
                       {/* X-axis frame labels */}
-                      {(() => {
-                        const frames = props.analysis.sampledFrameIndices;
-                        if (!frames.length) return null;
-                        return (
-                          <>
-                            <text x={PL} y={PB + 16} font-size="9" fill="#64748b" text-anchor="start">
-                              {frames[0]}
-                            </text>
-                            <text x={PR} y={PB + 16} font-size="9" fill="#64748b" text-anchor="end">
-                              {frames[frames.length - 1]}
-                            </text>
-                            <text x={(PL + PR) / 2} y={PB + 16} font-size="9" fill="#64748b" text-anchor="middle">
-                              Frame
-                            </text>
-                          </>
-                        );
-                      })()}
+                      <Show when={props.analysis.sampledFrameIndices.length > 0}>
+                        <text x={PL} y={PB + 16} font-size="9" fill="#64748b" text-anchor="start">
+                          {props.analysis.sampledFrameIndices[0]}
+                        </text>
+                        <text x={PR} y={PB + 16} font-size="9" fill="#64748b" text-anchor="end">
+                          {props.analysis.sampledFrameIndices[props.analysis.sampledFrameIndices.length - 1]}
+                        </text>
+                        <text x={(PL + PR) / 2} y={PB + 16} font-size="9" fill="#64748b" text-anchor="middle">
+                          Frame
+                        </text>
+                      </Show>
                     </Show>
 
                     {/* ── Cluster lollipop view ── */}
@@ -385,32 +379,42 @@ const MDTorsionPanel: Component<MDTorsionPanelProps> = (props) => {
 
                             <For each={vals}>
                               {(v, i) => {
-                                const x = n === 1
-                                  ? (PL + PR) / 2
-                                  : PL + (i() / span) * PW;
                                 const y = angleToY(v.angle);
                                 const r = 4 + (v.population / 100) * 6;
                                 return (
                                   <>
                                     {/* Stem from 0° to angle */}
-                                    <line x1={x} y1={zeroY} x2={x} y2={y}
+                                    <line
+                                          x1={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                          y1={zeroY}
+                                          x2={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                          y2={y}
                                           stroke={C_CLUST} stroke-width="2" opacity="0.45" />
                                     {/* Dot (radius scaled by population) */}
-                                    <circle cx={x} cy={y} r={r}
+                                    <circle
+                                            cx={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                            cy={y}
+                                            r={r}
                                             fill={C_CLUST} opacity="0.85" />
                                     {/* Angle label above dot */}
-                                    <text x={x} y={y - r - 3}
+                                    <text
+                                          x={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                          y={y - r - 3}
                                           font-size="9" fill="#0f766e" text-anchor="middle"
                                           font-weight="600">
                                       {v.angle.toFixed(0)}°
                                     </text>
                                     {/* Cluster ID below plot */}
-                                    <text x={x} y={PB + 14}
+                                    <text
+                                          x={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                          y={PB + 14}
                                           font-size="9" fill="#64748b" text-anchor="middle">
                                       C{v.clusterId + 1}
                                     </text>
                                     {/* Population below ID */}
-                                    <text x={x} y={PB + 24}
+                                    <text
+                                          x={n === 1 ? (PL + PR) / 2 : PL + (i() / span) * PW}
+                                          y={PB + 24}
                                           font-size="8" fill="#94a3b8" text-anchor="middle">
                                       {v.population.toFixed(0)}%
                                     </text>

@@ -212,13 +212,16 @@ def main() -> None:
     qed = Descriptors.qed(mol_no_h)
     mw = Descriptors.MolWt(mol_no_h)
 
-    # Write 3D SDF
+    # Write 3D SDF — use heavy-atom-only mol for viewer compatibility
+    # (NGL's distance-based bond inference creates phantom bonds with explicit H
+    # in strained polycyclic molecules like terpenoids)
     name = args.name.replace(' ', '_')
     sdf_path = os.path.join(args.output_dir, f'{name}.sdf')
+    mol_for_sdf = Chem.RemoveAllHs(mol)
+    mol_for_sdf.SetProp("_Name", name)
+    mol_for_sdf.SetProp("SMILES", smiles)
     writer = Chem.SDWriter(sdf_path)
-    mol.SetProp("_Name", name)
-    mol.SetProp("SMILES", smiles)
-    writer.write(mol)
+    writer.write(mol_for_sdf)
     writer.close()
 
     # Generate 2D thumbnail

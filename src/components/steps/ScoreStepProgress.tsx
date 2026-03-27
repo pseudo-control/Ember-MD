@@ -2,9 +2,10 @@
 import { Component, Show, For, createSignal, onCleanup, onMount } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
-import { generateJobName } from '../../utils/jobName';
+import { buildScoreRunFolderName } from '../../utils/jobName';
 import TerminalOutput from '../shared/TerminalOutput';
-import type { BatchScoreRequest, BatchScoreEntryResult } from '../../../shared/types/ipc';
+import StopConfirmModal from '../shared/StopConfirmModal';
+import type { BatchScoreRequest, BatchScoreEntryResult, ScoreTrajectoryRequest } from '../../../shared/types/ipc';
 
 const ScoreStepProgress: Component = () => {
   const {
@@ -22,6 +23,7 @@ const ScoreStepProgress: Component = () => {
   } = workflowStore;
   const api = window.electronAPI;
   const [hasStarted, setHasStarted] = createSignal(false);
+  const [showStopConfirm, setShowStopConfirm] = createSignal(false);
 
   onMount(() => {
     const cleanup = api.onScoreOutput((data) => {
@@ -66,8 +68,10 @@ const ScoreStepProgress: Component = () => {
   });
 
   const runScoring = async () => {
+    const trajectoryConfig = state().score.trajectoryConfig;
     const entries = state().score.entries.filter((e) => e.status !== 'error');
-    if (entries.length === 0) return;
+
+    if (entries.length === 0 && !trajectoryConfig) return;
 
     setScoreRunning(true);
     setIsRunning(true);
@@ -90,33 +94,74 @@ const ScoreStepProgress: Component = () => {
       return;
     }
     const paths = projectPathsFromProjectDir(projectDir);
-    const runFolder = `Score_${generateJobName()}`;
-    const outputDir = paths.scoring(runFolder).results;
-    setScoreOutputDir(outputDir);
-
-    const request: BatchScoreRequest = {
-      entries: entries.map((e) => ({
-        id: e.id,
-        name: e.name,
-        pdbPath: e.pdbPath,
-        ligandId: e.selectedLigandId,
-        isPrepared: e.isPrepared,
-      })),
-      outputDir,
-    };
+    const runFolder = buildScoreRunFolderName(
+      state().score.descriptor,
+      trajectoryConfig ? 'trajectory' : 'batch',
+    );
+    const jobDir = paths.scoring(runFolder).root;
+    setScoreOutputDir(jobDir);
 
     try {
-      const result = await api.scoreBatch(request);
+      let result;
+
+      if (trajectoryConfig) {
+        // Trajectory scoring: cluster + score centroids
+        const trajRequest: ScoreTrajectoryRequest = {
+          trajectoryPath: trajectoryConfig.trajectoryPath,
+          topologyPath: trajectoryConfig.topologyPath,
+          ligandSdfPath: trajectoryConfig.ligandSdfPath,
+          numClusters: trajectoryConfig.numClusters,
+          jobDir,
+        };
+        result = await api.scoreTrajectory(trajRequest);
+      } else {
+        // Batch PDB scoring
+        const request: BatchScoreRequest = {
+          entries: entries.map((e) => ({
+            id: e.id,
+            name: e.name,
+            pdbPath: e.pdbPath,
+            ligandId: e.selectedLigandId,
+            isPrepared: e.isPrepared,
+          })),
+          jobDir,
+        };
+        result = await api.scoreBatch(request);
+      }
+
       if (result.ok) {
-        const mergeSummary = applyScoreBatchResults(result.value.entries, result.value.cordialAvailable);
-        setCurrentPhase('complete');
-        appendLog(
-          `\n[Score][UI] Merged ${mergeSummary.updatedEntries}/${result.value.entries.length} results ` +
-          `(id=${mergeSummary.matchedById}, path=${mergeSummary.matchedByPath}, unmatched=${mergeSummary.unmatchedResults}).\n`,
-        );
-        if (result.value.entries.length > 0 && mergeSummary.updatedEntries === 0) {
-          appendLog('[Score][UI] Warning: batch returned results, but no rows were updated in the table.\n');
+        if (trajectoryConfig) {
+          // For trajectory results, create score entries from the returned centroids
+          const { setScoreEntries } = workflowStore;
+          const newEntries = result.value.entries.map((r: BatchScoreEntryResult) => ({
+            id: r.id,
+            pdbPath: r.pdbPath,
+            name: r.name,
+            detectedLigands: [],
+            selectedLigandId: r.ligandId,
+            isPrepared: true,
+            preparedReceptorPath: r.preparedReceptorPath,
+            extractedLigandSdfPath: r.extractedLigandSdfPath,
+            vinaScore: r.vinaScore,
+            cordialExpectedPkd: r.cordialExpectedPkd,
+            cordialPHighAffinity: r.cordialPHighAffinity,
+            qed: r.qed,
+            status: r.status,
+            errorMessage: r.errorMessage,
+          }));
+          setScoreEntries(newEntries);
+          workflowStore.setScoreCordialAvailable(result.value.cordialAvailable);
+        } else {
+          const mergeSummary = applyScoreBatchResults(result.value.entries, result.value.cordialAvailable);
+          appendLog(
+            `\n[Score][UI] Merged ${mergeSummary.updatedEntries}/${result.value.entries.length} results ` +
+            `(id=${mergeSummary.matchedById}, path=${mergeSummary.matchedByPath}, unmatched=${mergeSummary.unmatchedResults}).\n`,
+          );
+          if (result.value.entries.length > 0 && mergeSummary.updatedEntries === 0) {
+            appendLog('[Score][UI] Warning: batch returned results, but no rows were updated in the table.\n');
+          }
         }
+        setCurrentPhase('complete');
         appendLog(`\nScoring complete: ${result.value.entries.filter((e) => e.status === 'done').length} scored successfully.\n`);
       } else {
         setError(result.error.message);
@@ -134,7 +179,7 @@ const ScoreStepProgress: Component = () => {
   onMount(() => {
     if (!state().score.isRunning && !hasStarted()) {
       setHasStarted(true);
-      runScoring();
+      void runScoring();
     }
   });
 
@@ -259,7 +304,7 @@ const ScoreStepProgress: Component = () => {
         </button>
         <div class="flex gap-2">
           <Show when={state().score.isRunning}>
-            <button class="btn btn-error btn-sm" onClick={handleCancel}>Cancel</button>
+            <button class="btn btn-error btn-sm" onClick={() => setShowStopConfirm(true)}>Cancel</button>
           </Show>
           <Show when={state().currentPhase === 'complete'}>
             <button class="btn btn-primary" onClick={() => setScoreStep('score-results')}>
@@ -271,6 +316,17 @@ const ScoreStepProgress: Component = () => {
           </Show>
         </div>
       </div>
+
+      <StopConfirmModal
+        isOpen={showStopConfirm()}
+        title="Stop Scoring?"
+        message="Are you sure you want to cancel? Scores already computed will be preserved."
+        onConfirm={() => {
+          setShowStopConfirm(false);
+          void handleCancel();
+        }}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

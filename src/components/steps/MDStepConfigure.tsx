@@ -62,14 +62,13 @@ const MDStepConfigure: Component = () => {
       temperatureK: state().md.config.temperatureK,
       productionNs: state().md.config.productionNs,
       compoundId: state().md.config.compoundId,
+      inputMode: state().md.inputMode,
     });
-    return `${state().jobName}/${runFolder}`;
+    return `simulations/${runFolder}`;
   });
 
   const isLigandOnly = () => state().md.inputMode === 'ligand_only';
   const isApo = () => state().md.inputMode === 'apo';
-  const hasProtein = () => !isLigandOnly();
-
   // Set smart default duration on first render if still at initial default
   onMount(() => {
     if (state().md.config.productionNs === 10) {

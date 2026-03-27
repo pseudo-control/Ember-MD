@@ -4,9 +4,10 @@ import { workflowStore, WorkflowMode } from '../../stores/workflow';
 import HelpModal from '../HelpModal';
 import AboutModal from '../AboutModal';
 import { formatJobCountLabel, generateJobName, sanitizeJobName } from '../../utils/jobName';
-import type { ProjectInfo } from '../../../shared/types/ipc';
+import type { JobType, ProjectInfo } from '../../../shared/types/ipc';
 import { theme, toggleTheme } from '../../utils/theme';
 import { checkForUpdate, UpdateInfo } from '../../utils/updateCheck';
+import { loadProjectJob } from '../../utils/projectJobLoader';
 
 interface StepInfo {
   id: string;
@@ -52,11 +53,41 @@ const xraySteps: StepInfo[] = [
   { id: 'xray-results', label: 'Results', icon: '3' },
 ];
 
+const mapSteps: StepInfo[] = [
+  { id: 'map-load', label: 'Load', icon: '1' },
+  { id: 'map-configure', label: 'Configure', icon: '2' },
+  { id: 'map-progress', label: 'Generate', icon: '3' },
+  { id: 'map-results', label: 'Results', icon: '4' },
+];
+
 const dockStepOrder = dockSteps.map((s) => s.id);
 const mdStepOrder = mdSteps.map((s) => s.id);
 const conformStepOrder = conformSteps.map((s) => s.id);
 const scoreStepOrder = scoreSteps.map((s) => s.id);
 const xrayStepOrder = xraySteps.map((s) => s.id);
+const mapStepOrder = mapSteps.map((s) => s.id);
+const modeTabs: [WorkflowMode, string][] = [
+  ['viewer', 'View'],
+  ['conform', 'MCMM'],
+  ['dock', 'Dock'],
+  ['xray', 'X-ray'],
+  ['score', 'Score'],
+  ['md', 'Simulate'],
+];
+
+const ModeStatusDot: Component<{ running: boolean; phase: string }> = (props) => (
+  <Show when={props.running} fallback={
+    <Show when={props.phase === 'complete'} fallback={
+      <Show when={props.phase === 'error'}>
+        <span class="ml-1 inline-block w-2 h-2 rounded-full bg-error" />
+      </Show>
+    }>
+      <span class="ml-1 inline-block w-2 h-2 rounded-full bg-success" />
+    </Show>
+  }>
+    <span class="ml-1 inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+  </Show>
+);
 
 type PickerView = 'list' | 'rename' | 'delete';
 
@@ -226,6 +257,39 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     }
   };
 
+  const currentImportJobType = (): JobType | null => {
+    switch (state().mode) {
+      case 'viewer':
+      case 'map':
+        return null;
+      case 'dock':
+        return 'docking';
+      case 'md':
+        return 'simulation';
+      case 'conform':
+        return 'conformer';
+      case 'score':
+        return 'scoring';
+      case 'xray':
+        return 'xray';
+    }
+  };
+
+  const handleImportJob = async () => {
+    const projectDir = state().projectDir;
+    const expectedType = currentImportJobType();
+    if (!projectDir || !expectedType) return;
+    setError(null);
+    const result = await api.importProjectJob({ projectDir, expectedType });
+    if (result.ok) {
+      await loadProjectJob(result.value, api);
+      return;
+    }
+    if (result.error?.type !== 'USER_CANCELLED') {
+      setError(result.error?.message || 'Failed to import job');
+    }
+  };
+
   const resetPickerView = () => {
     setPickerView('list');
     setTargetProject(null);
@@ -327,8 +391,9 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
         return getStepProgressStatus(scoreStepOrder, state().scoreStep, stepId);
       case 'xray':
         return getStepProgressStatus(xrayStepOrder, state().xrayStep, stepId);
+      case 'map':
+        return getStepProgressStatus(mapStepOrder, state().map.step, stepId);
       case 'md':
-      default:
         return getStepProgressStatus(mdStepOrder, state().mdStep, stepId);
     }
   };
@@ -345,8 +410,9 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
         return scoreSteps;
       case 'xray':
         return xraySteps;
+      case 'map':
+        return mapSteps;
       case 'md':
-      default:
         return mdSteps;
     }
   };
@@ -475,32 +541,20 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
             </button>
           </div>
           <div class="tabs tabs-boxed bg-base-300 p-0.5">
-            {([
-              ['viewer', 'View'],
-              ['conform', 'MCMM'],
-              ['dock', 'Dock'],
-              ['xray', 'X-ray'],
-              ['score', 'Score'],
-              ['md', 'Simulate'],
-            ] as [WorkflowMode, string][]).map(([mode, label]) => (
-              <button
-                class={`tab tab-xs min-h-8 px-2.5 font-semibold tracking-tight ${state().mode === mode ? 'tab-active' : ''}`}
-                onClick={() => handleModeSwitch(mode)}
-                disabled={!canSwitchMode()}
-              >
-                {label}
-                <Show when={state().runningMode === mode && state().mode !== mode}>
-                  {(() => {
-                    const phase = state().currentPhase;
-                    const running = state().isRunning;
-                    if (running) return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />;
-                    if (phase === 'complete') return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-success" />;
-                    if (phase === 'error') return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-error" />;
-                    return null;
-                  })()}
-                </Show>
-              </button>
-            ))}
+            <For each={modeTabs}>
+              {([mode, label]) => (
+                <button
+                  class={`tab tab-xs min-h-8 px-2.5 font-semibold tracking-tight ${state().mode === mode ? 'tab-active' : ''}`}
+                  onClick={() => handleModeSwitch(mode)}
+                  disabled={!canSwitchMode()}
+                >
+                  {label}
+                  <Show when={state().runningMode === mode && state().mode !== mode}>
+                    <ModeStatusDot running={state().isRunning} phase={state().currentPhase} />
+                  </Show>
+                </button>
+              )}
+            </For>
           </div>
         </div>
 
@@ -548,8 +602,13 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
           </div>
         </Show>
 
-        {/* Right: Step indicators (all modes) */}
-        <div class="flex-shrink-0">
+        {/* Right: mode actions + step indicators */}
+        <div class="flex-shrink-0 flex items-center gap-3">
+          <Show when={state().projectReady && currentImportJobType()}>
+            <button class="btn btn-ghost btn-xs" onClick={handleImportJob}>
+              Import Job...
+            </button>
+          </Show>
           <Show when={state().projectReady}>
             <ul class="steps steps-horizontal">
               <For each={currentSteps()}>{(step) => {

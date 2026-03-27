@@ -18,6 +18,7 @@ const IpcChannels = {
   FILE_EXISTS: 'file-exists',
   GET_FILE_INFO: 'get-file-info',
   CREATE_DIRECTORY: 'create-directory',
+  DELETE_DIRECTORY: 'fs:delete-directory',
   LIST_SDF_FILES: 'list-sdf-files',
   OPEN_FOLDER: 'open-folder',
   GET_AVAILABLE_DEVICES: 'get-available-devices',
@@ -56,6 +57,7 @@ const IpcChannels = {
   // Conformer generation (standalone)
   CONFORM_OUTPUT: 'conform:output',
   RUN_CONFORM_GENERATION: 'conform:generate',
+  CANCEL_CONFORM: 'conform:cancel',
   // Post-dock refinement
   REFINE_POSES: 'dock:refine-poses',
   // CORDIAL rescoring
@@ -74,6 +76,7 @@ const IpcChannels = {
   CANCEL_MD_SIMULATION: 'md:cancel',
   PAUSE_MD_SIMULATION: 'md:pause',
   RESUME_MD_SIMULATION: 'md:resume',
+  EXTEND_MD_SIMULATION: 'md:extend',
   // Trajectory viewer channels
   SELECT_DCD_FILE: 'select-dcd-file',
   LIST_PDB_IN_DIRECTORY: 'list-pdb-in-directory',
@@ -88,6 +91,7 @@ const IpcChannels = {
   ANALYZE_TRAJECTORY: 'analyze-trajectory',
   GENERATE_MD_REPORT: 'generate-md-report',
   RUN_XRAY_ANALYSIS: 'xray:run-analysis',
+  CANCEL_XRAY: 'xray:cancel',
   SCORE_MD_CLUSTERS: 'md:score-clusters',
   LOAD_MD_TORSION_ANALYSIS: 'md:load-torsion-analysis',
   SCORE_COMPLEX: 'score-complex',
@@ -106,7 +110,7 @@ const IpcChannels = {
   DELETE_PROJECT: 'delete-project',
   GET_PROJECT_FILE_COUNT: 'get-project-file-count',
   SCAN_PROJECT_ARTIFACTS: 'scan-project-artifacts',
-  SELECT_EMBER_JOB_FOLDER: 'select-ember-job-folder',
+  IMPORT_PROJECT_JOB: 'import-project-job',
   OPEN_PROJECT_FOLDER: 'open-project-folder',
   IMPORT_EXTERNAL_PROJECT: 'import-external-project',
   GET_HOME_DIR: 'get-home-dir',
@@ -259,6 +263,7 @@ const electronAPI = {
   fileExists: (path: string) => ipcRenderer.invoke(IpcChannels.FILE_EXISTS, path),
   getFileInfo: (path: string) => ipcRenderer.invoke(IpcChannels.GET_FILE_INFO, path),
   createDirectory: (dirPath: string) => ipcRenderer.invoke(IpcChannels.CREATE_DIRECTORY, dirPath),
+  deleteDirectory: (dirPath: string) => ipcRenderer.invoke(IpcChannels.DELETE_DIRECTORY, dirPath),
   listSdfFiles: (dirPath: string) => ipcRenderer.invoke(IpcChannels.LIST_SDF_FILES, dirPath),
   listPdbInDirectory: (dirPath: string) => ipcRenderer.invoke(IpcChannels.LIST_PDB_IN_DIRECTORY, dirPath),
   scanXrayDirectory: (dirPath: string) => ipcRenderer.invoke(IpcChannels.SCAN_XRAY_DIRECTORY, dirPath),
@@ -498,6 +503,8 @@ const electronAPI = {
     mcmmOptions
   ),
 
+  cancelConformGeneration: () => ipcRenderer.invoke(IpcChannels.CANCEL_CONFORM),
+
   onConformOutput: (callback: (data: OutputData) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: OutputData) => callback(data);
     ipcRenderer.on(IpcChannels.CONFORM_OUTPUT, listener);
@@ -577,6 +584,7 @@ const electronAPI = {
   cancelMdSimulation: () => ipcRenderer.invoke(IpcChannels.CANCEL_MD_SIMULATION),
   pauseMdSimulation: () => ipcRenderer.invoke(IpcChannels.PAUSE_MD_SIMULATION),
   resumeMdSimulation: () => ipcRenderer.invoke(IpcChannels.RESUME_MD_SIMULATION),
+  extendMdSimulation: (newTotalNs: number) => ipcRenderer.invoke(IpcChannels.EXTEND_MD_SIMULATION, newTotalNs),
 
   // MD event listener
   onMdOutput: (callback: (data: OutputData) => void) => {
@@ -624,10 +632,12 @@ const electronAPI = {
   runXrayAnalysis: (inputDir: string, outputDir: string) =>
     ipcRenderer.invoke(IpcChannels.RUN_XRAY_ANALYSIS, inputDir, outputDir),
 
+  cancelXrayAnalysis: () => ipcRenderer.invoke(IpcChannels.CANCEL_XRAY),
+
   // Score tab operations
-  scoreBatch: (request: { entries: Array<{ id: string; name: string; pdbPath: string; ligandId: string | null; isPrepared: boolean }>; outputDir: string }) =>
+  scoreBatch: (request: { entries: Array<{ id: string; name: string; pdbPath: string; ligandId: string | null; isPrepared: boolean }>; jobDir: string }) =>
     ipcRenderer.invoke(IpcChannels.SCORE_BATCH, request),
-  scoreTrajectory: (request: { trajectoryPath: string; topologyPath: string; ligandSdfPath: string; numClusters: number; outputDir: string }) =>
+  scoreTrajectory: (request: { trajectoryPath: string; topologyPath: string; ligandSdfPath: string; numClusters: number; jobDir: string }) =>
     ipcRenderer.invoke(IpcChannels.SCORE_TRAJECTORY, request),
   cancelScoreBatch: () =>
     ipcRenderer.invoke(IpcChannels.CANCEL_SCORE_BATCH),
@@ -687,12 +697,12 @@ const electronAPI = {
   cancelFepScoring: () => ipcRenderer.invoke(IpcChannels.CANCEL_FEP_SCORING),
 
   // Molecule alignment
-  alignMoleculesMcs: (refSdf: string, mobileSdf: string, outPath: string) =>
-    ipcRenderer.invoke('align:mcs', refSdf, mobileSdf, outPath),
+  alignMoleculesMcs: (refSdf: string, mobileSdf: string) =>
+    ipcRenderer.invoke('align:mcs', refSdf, mobileSdf),
   alignDetectScaffolds: (refSdf: string, mobileSdf: string) =>
     ipcRenderer.invoke('align:detect-scaffolds', refSdf, mobileSdf),
-  alignByScaffold: (refSdf: string, mobileSdf: string, scaffoldIndex: number, outPath: string) =>
-    ipcRenderer.invoke('align:by-scaffold', refSdf, mobileSdf, scaffoldIndex, outPath),
+  alignByScaffold: (refSdf: string, mobileSdf: string, scaffoldIndex: number) =>
+    ipcRenderer.invoke('align:by-scaffold', refSdf, mobileSdf, scaffoldIndex),
 
   // Fetch structure from RCSB PDB by ID
   fetchPdb: (pdbId: string, projectDir: string) =>
@@ -733,8 +743,8 @@ const electronAPI = {
     ipcRenderer.invoke(IpcChannels.GET_PROJECT_FILE_COUNT, projectDir),
   scanProjectArtifacts: (projectDir: string) =>
     ipcRenderer.invoke(IpcChannels.SCAN_PROJECT_ARTIFACTS, projectDir),
-  selectEmberJobFolder: () =>
-    ipcRenderer.invoke(IpcChannels.SELECT_EMBER_JOB_FOLDER),
+  importProjectJob: (request: { projectDir: string; expectedType: string }) =>
+    ipcRenderer.invoke(IpcChannels.IMPORT_PROJECT_JOB, request),
 
   // Ligand preparation for viewing (sanitize + add hydrogens + bond orders)
   prepareLigandForViewing: (inputSdf: string, outputSdf: string) =>

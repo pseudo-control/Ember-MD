@@ -79,7 +79,7 @@ const LayerRow: Component<{
     class={`h-7 ${props.indent ? 'pl-5 pr-2' : 'px-2'} flex items-center gap-2 hover:bg-base-200 cursor-pointer ${
       props.isSelected ? '!bg-primary/20 hover:!bg-primary/25' : ''
     }`}
-    onClick={props.onSelect}
+    onClick={() => props.onSelect()}
   >
     <span class="flex-1 min-w-0 text-xs font-medium truncate" title={props.layer.filePath}>
       {props.layer.label}
@@ -124,7 +124,8 @@ const LayerPanel: Component<LayerPanelProps> = (props) => {
     if (job.type === 'docking') return 'Dock';
     if (job.type === 'simulation') return 'MD';
     if (job.type === 'conformer') return 'MCMM';
-    if (job.type === 'map') return 'Map';
+    if (job.type === 'scoring') return 'Score';
+    if (job.type === 'xray') return 'X-ray';
     return 'Job';
   };
 
@@ -145,10 +146,10 @@ const LayerPanel: Component<LayerPanelProps> = (props) => {
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <Show when={props.proteinCount >= 2}>
-              <button class="btn btn-xs btn-accent" onClick={props.onAlignAll}>Align</button>
+              <button class="btn btn-xs btn-accent" onClick={() => props.onAlignAll()}>Align</button>
             </Show>
             <Show when={props.canClear}>
-              <button class="btn btn-xs btn-ghost" onClick={props.onClearAll}>Close</button>
+              <button class="btn btn-xs btn-ghost" onClick={() => props.onClearAll()}>Close</button>
             </Show>
           </div>
         </div>

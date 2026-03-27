@@ -8,9 +8,7 @@ import type { DetailScore } from '../shared/MoleculeDetailPanel';
 const ConformStepResults: Component = () => {
   const {
     state,
-    setConformStep,
     openViewerSession,
-    addViewerProjectFamily,
     resetConform,
   } = workflowStore;
   const api = window.electronAPI;
@@ -62,7 +60,6 @@ const ConformStepResults: Component = () => {
     const projectTable = buildConformerProjectTable({
       familyId: `conform:${state().jobName || 'current'}`,
       title: state().conform.outputName || state().conform.ligandName || 'Conformer job',
-      inputPath: state().conform.ligandSdfPath,
       conformerPaths: paths,
       conformerEnergies: energies(),
     });
@@ -70,13 +67,13 @@ const ConformStepResults: Component = () => {
       pdbPath: queue[0].pdbPath,
       pdbQueue: queue,
       pdbQueueIndex: 0,
+      projectTable,
     });
-    addViewerProjectFamily(projectTable.families[0], projectTable.rows);
   };
 
   const handleOpenFolder = () => {
     const dir = state().conform.outputDir;
-    if (dir) api.openFolder(dir);
+    if (dir) void api.openFolder(dir);
   };
 
   const methodLabel = () => {
