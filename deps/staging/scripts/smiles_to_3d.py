@@ -186,15 +186,18 @@ def process_smiles_csv(input_csv: str, output_dir: str) -> List[Dict[str, Any]]:
         # Calculate properties
         qed, sa_score = calculate_properties(Chem.RemoveAllHs(mol_3d))
 
-        # Save to SDF
+        # Save to SDF — strip explicit H for viewer compatibility
+        # (NGL's distance-based bond inference creates phantom bonds with explicit H
+        # in strained polycyclic molecules)
         sdf_path = os.path.join(output_dir, f"{name}.sdf")
 
+        mol_for_sdf = Chem.RemoveAllHs(mol_3d)
+        mol_for_sdf.SetProp("_Name", name)
+        mol_for_sdf.SetProp("SMILES", smiles)
+        mol_for_sdf.SetProp("QED", f"{qed:.4f}")
+        mol_for_sdf.SetProp("SA_Score", f"{sa_score:.2f}")
         writer = Chem.SDWriter(sdf_path)
-        mol_3d.SetProp("_Name", name)
-        mol_3d.SetProp("SMILES", smiles)
-        mol_3d.SetProp("QED", f"{qed:.4f}")
-        mol_3d.SetProp("SA_Score", f"{sa_score:.2f}")
-        writer.write(mol_3d)
+        writer.write(mol_for_sdf)
         writer.close()
 
         molecules.append({

@@ -4,6 +4,7 @@ import { workflowStore } from '../../stores/workflow';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import { buildConformRunFolderName } from '../../utils/jobName';
 import TerminalOutput from '../shared/TerminalOutput';
+import StopConfirmModal from '../shared/StopConfirmModal';
 
 const ConformStepProgress: Component = () => {
   const {
@@ -20,6 +21,7 @@ const ConformStepProgress: Component = () => {
   } = workflowStore;
 
   const [hasStarted, setHasStarted] = createSignal(false);
+  const [showStopConfirm, setShowStopConfirm] = createSignal(false);
   const api = window.electronAPI;
 
   onMount(() => {
@@ -53,17 +55,18 @@ const ConformStepProgress: Component = () => {
       ligandName: conform.ligandName,
       protonation: conform.protonationConfig,
     });
-    const outputDir = paths.conformers(runFolder).results;
-    setConformOutputDir(outputDir);
+    const jobDir = paths.conformers(runFolder).root;
+    const resultsDir = paths.conformers(runFolder).results;
+    setConformOutputDir(jobDir);
 
     try {
-      await api.createDirectory(outputDir);
+      await api.createDirectory(resultsDir);
 
       let ligandPath = conform.ligandSdfPath;
 
       if (conform.protonationConfig.enabled) {
         appendLog('--- Enumerating protonation states... ---\n');
-        const protonDir = `${outputDir}/protonated`;
+        const protonDir = `${jobDir}/inputs/protonated`;
         const protonResult = await api.enumerateProtonation(
           [ligandPath],
           protonDir,
@@ -90,7 +93,7 @@ const ConformStepProgress: Component = () => {
 
       const result = await api.runConformGeneration(
         ligandPath,
-        outputDir,
+        resultsDir,
         conform.config.maxConformers,
         conform.config.rmsdCutoff,
         conform.config.energyWindow,
@@ -119,7 +122,7 @@ const ConformStepProgress: Component = () => {
     const phase = state().currentPhase;
     if (!state().conform.isRunning && !hasStarted() && phase !== 'complete') {
       setHasStarted(true);
-      runConformers();
+      void runConformers();
     }
   });
 
@@ -147,6 +150,15 @@ const ConformStepProgress: Component = () => {
         </div>
         <div class="flex items-center gap-2">
           <Show when={state().conform.isRunning}>
+            <button
+              class="btn btn-circle btn-xs btn-ghost text-error"
+              title="Cancel"
+              onClick={() => setShowStopConfirm(true)}
+            >
+              <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 6h12v12H6z" />
+              </svg>
+            </button>
             <span class="loading loading-spinner loading-sm text-primary" />
           </Show>
           <Show when={state().currentPhase === 'complete'}>
@@ -182,6 +194,22 @@ const ConformStepProgress: Component = () => {
           </button>
         </Show>
       </div>
+
+      <StopConfirmModal
+        isOpen={showStopConfirm()}
+        title="Stop Conformer Search?"
+        message="Are you sure you want to cancel? Partial results will not be available."
+        onConfirm={() => {
+          setShowStopConfirm(false);
+          void (async () => {
+            await api.cancelConformGeneration();
+            setConformRunning(false);
+            setCurrentPhase('idle');
+            appendLog('\n--- Conformer search cancelled by user ---\n');
+          })();
+        }}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

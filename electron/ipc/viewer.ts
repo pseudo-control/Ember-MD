@@ -199,8 +199,18 @@ ipcMain.handle(
       if (!fs.existsSync(dirPath)) {
         return [];
       }
-      const files = fs.readdirSync(dirPath)
-        .filter((f) => f.toLowerCase().endsWith('.pdb'))
+      const structureExts = ['.pdb', '.cif', '.sdf', '.mol', '.mol2'];
+      const allFiles = fs.readdirSync(dirPath)
+        .filter((f) => structureExts.some((ext) => f.toLowerCase().endsWith(ext)))
+        .filter((f) => !f.includes('_prepared'));
+      // If a CIF exists, hide the intermediate .pdb created by CIF→PDB conversion
+      const cifBases = new Set(
+        allFiles
+          .filter((f) => f.toLowerCase().endsWith('.cif'))
+          .map((f) => f.replace(/\.cif$/i, '')),
+      );
+      const files = allFiles
+        .filter((f) => !f.toLowerCase().endsWith('.pdb') || !cifBases.has(f.replace(/\.pdb$/i, '')))
         .sort();
       return files;
     } catch (error) {
@@ -1942,11 +1952,11 @@ ipcMain.handle(
 
 ipcMain.handle(
   IpcChannels.ALIGN_MOLECULES_MCS,
-  async (_event, refSdf: string, mobileSdf: string, outPath: string) => {
+  async (_event, refSdf: string, mobileSdf: string) => {
     try {
       const scriptPath = path.join(appState.fraggenRoot, 'align_molecules.py');
       const { stdout, stderr, code } = await spawnPythonScript(
-        [scriptPath, '--mode', 'mcs', '--ref', refSdf, '--mobile', mobileSdf, '--out', outPath],
+        [scriptPath, '--mode', 'mcs', '--ref', refSdf, '--mobile', mobileSdf],
         { env: getSpawnEnv() }
       );
       if (code !== 0) return Err({ type: 'ALIGNMENT_FAILED', message: stderr.slice(0, 500) });
@@ -1978,12 +1988,12 @@ ipcMain.handle(
 
 ipcMain.handle(
   IpcChannels.ALIGN_BY_SCAFFOLD,
-  async (_event, refSdf: string, mobileSdf: string, scaffoldIndex: number, outPath: string) => {
+  async (_event, refSdf: string, mobileSdf: string, scaffoldIndex: number) => {
     try {
       const scriptPath = path.join(appState.fraggenRoot, 'align_molecules.py');
       const { stdout, stderr, code } = await spawnPythonScript(
         [scriptPath, '--mode', 'align_scaffold', '--ref', refSdf, '--mobile', mobileSdf,
-         '--scaffold-index', String(scaffoldIndex), '--out', outPath],
+         '--scaffold-index', String(scaffoldIndex)],
         { env: getSpawnEnv() }
       );
       if (code !== 0) return Err({ type: 'ALIGNMENT_FAILED', message: stderr.slice(0, 500) });

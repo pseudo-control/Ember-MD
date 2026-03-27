@@ -65,4 +65,41 @@ export default [
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },
+
+  // Targeted async safety for IPC handlers and progress monitors
+  // Unawaited promises in these files cause real bugs (silent failures, race conditions)
+  {
+    files: [
+      'electron/ipc/*.ts',
+      'src/components/steps/*Progress.tsx',
+      'src/components/steps/*Results.tsx',
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': ['error', {
+        checksVoidReturn: { attributes: false },
+      }],
+    },
+  },
+
+  // Type-aware switch exhaustiveness checking for frontend + shared types
+  {
+    files: [
+      'src/**/*.{ts,tsx}',
+      'shared/**/*.{ts,tsx}',
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+      },
+    },
+    rules: {
+      '@typescript-eslint/switch-exhaustiveness-check': 'error',
+    },
+  },
 ];

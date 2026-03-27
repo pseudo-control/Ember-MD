@@ -4,12 +4,13 @@
  *
  * {project}/
  *   .ember-project         — Project ID file
- *   structures/            — Imported structure and support files
+ *   structures/            — User-imported structure files only
  *   surfaces/              — Computed surface caches
+ *   .ember/support/        — Internal scratch/support files
  *   docking/{run}/         — inputs/, prep/, results/
  *   simulations/{run}/     — inputs/, results/, analysis/
  *   conformers/{run}/      — inputs/, results/
- *   scoring/{run}/         — inputs/, results/
+ *   scoring/{run}/         — inputs/, entries/, results/, analysis/
  *   xray/{run}/            — inputs/, results/
  *   fep/                   — FEP scoring results
  */
@@ -42,7 +43,9 @@ export interface ConformerPaths {
 export interface ScoringPaths {
   root: string;
   inputs: string;
+  entries: string;
   results: string;
+  analysis: string;
 }
 
 export interface XrayPaths {
@@ -55,6 +58,8 @@ export interface ProjectPaths {
   root: string;
   structures: string;
   surfaces: string;
+  internal: string;
+  support: string;
   bindingSiteMap: string;
   docking: (runFolder: string) => DockingPaths;
   simulations: (runFolder: string) => SimulationPaths;
@@ -70,6 +75,8 @@ export function projectPaths(baseDir: string, projectName: string): ProjectPaths
     root,
     structures: path.join(root, 'structures'),
     surfaces: path.join(root, 'surfaces'),
+    internal: path.join(root, '.ember'),
+    support: path.join(root, '.ember', 'support'),
     bindingSiteMap: path.join(root, 'surfaces', 'binding_site_map'),
     docking: (runFolder: string): DockingPaths => {
       const base = path.join(root, 'docking', runFolder);
@@ -105,7 +112,9 @@ export function projectPaths(baseDir: string, projectName: string): ProjectPaths
       return {
         root: base,
         inputs: path.join(base, 'inputs'),
+        entries: path.join(base, 'entries'),
         results: path.join(base, 'results'),
+        analysis: path.join(base, 'analysis'),
       };
     },
     xray: (runFolder: string): XrayPaths => {

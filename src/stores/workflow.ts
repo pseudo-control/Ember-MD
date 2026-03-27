@@ -135,7 +135,7 @@ export interface ViewerLayerGroup {
   visible: boolean;
 }
 
-export type ViewerProjectJobType = 'import' | 'docking' | 'conformer' | 'simulation';
+export type ViewerProjectJobType = 'import' | 'docking' | 'conformer' | 'simulation' | 'scoring';
 export type ViewerProjectRowKind =
   | 'apo'
   | 'holo'
@@ -188,6 +188,8 @@ export interface ViewerProjectTableState {
   rows: ViewerProjectRow[];
   activeRowId: string | null;
   selectedRowIds: string[];
+  hiddenFamilyIds: string[];
+  hiddenRowIds: string[];
 }
 
 export interface BindingSiteMapChannel {
@@ -314,15 +316,26 @@ export interface ScoreComplexEntry {
   errorMessage: string | null;
 }
 
+export interface TrajectoryConfig {
+  trajectoryPath: string;
+  topologyPath: string;
+  ligandSdfPath: string;
+  numClusters: number;
+  frameCount: number;
+}
+
 export interface ScoreState {
   entries: ScoreComplexEntry[];
+  descriptor: string;
   outputDir: string | null;
   isRunning: boolean;
   cordialAvailable: boolean;
+  trajectoryConfig: TrajectoryConfig | null;
 }
 
 export interface XrayState {
   inputDir: string | null;
+  descriptor: string;
   scanResult: XrayDirectoryScanResult | null;
   outputDir: string | null;
   result: XrayAnalysisResult | null;
@@ -497,13 +510,16 @@ const defaultConformState: ConformState = {
 
 const defaultScoreState: ScoreState = {
   entries: [],
+  descriptor: '',
   outputDir: null,
   isRunning: false,
   cordialAvailable: false,
+  trajectoryConfig: null,
 };
 
 const defaultXrayState: XrayState = {
   inputDir: null,
+  descriptor: '',
   scanResult: null,
   outputDir: null,
   result: null,
@@ -1016,7 +1032,7 @@ function createWorkflowStore() {
           ...s,
           viewer: {
             ...s.viewer,
-            projectTable: { families: [family], rows, activeRowId: rows[0]?.id ?? null, selectedRowIds: rows[0]?.id ? [rows[0].id] : [] },
+            projectTable: { families: [family], rows, activeRowId: rows[0]?.id ?? null, selectedRowIds: rows[0]?.id ? [rows[0].id] : [], hiddenFamilyIds: [], hiddenRowIds: [] },
           },
         };
       }
@@ -1035,6 +1051,8 @@ function createWorkflowStore() {
               rows: [...existing.rows, ...newRows],
               activeRowId: existing.activeRowId,
               selectedRowIds: existing.selectedRowIds || [],
+              hiddenFamilyIds: existing.hiddenFamilyIds || [],
+              hiddenRowIds: existing.hiddenRowIds || [],
             },
           },
         };
@@ -1049,6 +1067,8 @@ function createWorkflowStore() {
             rows: [...existing.rows, ...rows],
             activeRowId: existing.activeRowId,
             selectedRowIds: existing.selectedRowIds || [],
+            hiddenFamilyIds: existing.hiddenFamilyIds || [],
+            hiddenRowIds: existing.hiddenRowIds || [],
           },
         },
       };
@@ -1075,6 +1095,8 @@ function createWorkflowStore() {
           rows,
           activeRowId,
           selectedRowIds: (existing.selectedRowIds || []).filter((id) => rows.some((r) => r.id === id)),
+          hiddenFamilyIds: (existing.hiddenFamilyIds || []).filter((id) => families.some((family) => family.id === id)),
+          hiddenRowIds: (existing.hiddenRowIds || []).filter((id) => rows.some((r) => r.id === id)),
         },
       },
     };
@@ -1088,6 +1110,70 @@ function createWorkflowStore() {
         s.viewer.projectTable.families.filter((f) => f.id !== familyId),
         s.viewer.projectTable.rows.filter((r) => r.familyId !== familyId),
       );
+    });
+
+  const hideViewerProjectFamily = (familyId: string) =>
+    setState((s) => {
+      if (!s.viewer.projectTable) return s;
+      const hidden = s.viewer.projectTable.hiddenFamilyIds;
+      if (hidden.includes(familyId)) return s;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          projectTable: {
+            ...s.viewer.projectTable,
+            hiddenFamilyIds: [...hidden, familyId],
+          },
+        },
+      };
+    });
+
+  const unhideViewerProjectFamily = (familyId: string) =>
+    setState((s) => {
+      if (!s.viewer.projectTable) return s;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          projectTable: {
+            ...s.viewer.projectTable,
+            hiddenFamilyIds: s.viewer.projectTable.hiddenFamilyIds.filter((id) => id !== familyId),
+          },
+        },
+      };
+    });
+
+  const hideViewerProjectRow = (rowId: string) =>
+    setState((s) => {
+      if (!s.viewer.projectTable) return s;
+      const hidden = s.viewer.projectTable.hiddenRowIds || [];
+      if (hidden.includes(rowId)) return s;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          projectTable: {
+            ...s.viewer.projectTable,
+            hiddenRowIds: [...hidden, rowId],
+          },
+        },
+      };
+    });
+
+  const unhideViewerProjectRow = (rowId: string) =>
+    setState((s) => {
+      if (!s.viewer.projectTable) return s;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          projectTable: {
+            ...s.viewer.projectTable,
+            hiddenRowIds: (s.viewer.projectTable.hiddenRowIds || []).filter((id) => id !== rowId),
+          },
+        },
+      };
     });
 
   const removeViewerProjectRow = (rowId: string) =>
@@ -1167,6 +1253,27 @@ function createWorkflowStore() {
           : null,
       },
     }));
+
+  const toggleViewerProjectSectionCollapsed = (jobType: ViewerProjectJobType) =>
+    setState((s) => {
+      if (!s.viewer.projectTable) return s;
+      const sectionFams = s.viewer.projectTable.families.filter((f) => f.jobType === jobType);
+      if (sectionFams.length === 0) return s;
+      const allCollapsed = sectionFams.every((f) => f.collapsed);
+      const newCollapsed = !allCollapsed;
+      return {
+        ...s,
+        viewer: {
+          ...s.viewer,
+          projectTable: {
+            ...s.viewer.projectTable,
+            families: s.viewer.projectTable.families.map((f) =>
+              f.jobType === jobType ? { ...f, collapsed: newCollapsed } : f,
+            ),
+          },
+        },
+      };
+    });
 
   const setViewerProjectFamilySort = (
     familyId: string,
@@ -1323,6 +1430,9 @@ function createWorkflowStore() {
   const setScoreEntries = (entries: ScoreComplexEntry[]) =>
     setState((s) => ({ ...s, score: { ...s.score, entries } }));
 
+  const setScoreDescriptor = (descriptor: string) =>
+    setState((s) => ({ ...s, score: { ...s.score, descriptor } }));
+
   const addScoreEntries = (newEntries: ScoreComplexEntry[]) =>
     setState((s) => ({ ...s, score: { ...s.score, entries: [...s.score.entries, ...newEntries] } }));
 
@@ -1347,8 +1457,14 @@ function createWorkflowStore() {
   const setScoreCordialAvailable = (cordialAvailable: boolean) =>
     setState((s) => ({ ...s, score: { ...s.score, cordialAvailable } }));
 
+  const setScoreTrajectoryConfig = (trajectoryConfig: TrajectoryConfig | null) =>
+    setState((s) => ({ ...s, score: { ...s.score, trajectoryConfig } }));
+
   const setXrayInputDir = (inputDir: string | null) =>
     setState((s) => ({ ...s, xray: { ...s.xray, inputDir } }));
+
+  const setXrayDescriptor = (descriptor: string) =>
+    setState((s) => ({ ...s, xray: { ...s.xray, descriptor } }));
 
   const setXrayScanResult = (scanResult: XrayDirectoryScanResult | null) =>
     setState((s) => ({ ...s, xray: { ...s.xray, scanResult } }));
@@ -1656,6 +1772,10 @@ function createWorkflowStore() {
     setViewerProjectTable,
     addViewerProjectFamily,
     removeViewerProjectFamily,
+    hideViewerProjectFamily,
+    unhideViewerProjectFamily,
+    hideViewerProjectRow,
+    unhideViewerProjectRow,
     removeViewerProjectRow,
     renameViewerProjectRow,
     setViewerProjectActiveRow,
@@ -1665,6 +1785,7 @@ function createWorkflowStore() {
     toggleViewerLayerGroupVisible,
     toggleViewerProjectRowSelection,
     toggleViewerProjectFamilyCollapsed,
+    toggleViewerProjectSectionCollapsed,
     setViewerProjectFamilySort,
     clearViewerLayers,
     // Map state
@@ -1692,14 +1813,17 @@ function createWorkflowStore() {
     setConformRunning,
     // Score state
     setScoreEntries,
+    setScoreDescriptor,
     addScoreEntries,
     removeScoreEntry,
     updateScoreEntry,
     setScoreOutputDir,
     setScoreRunning,
     setScoreCordialAvailable,
+    setScoreTrajectoryConfig,
     applyScoreBatchResults,
     setXrayInputDir,
+    setXrayDescriptor,
     setXrayScanResult,
     setXrayOutputDir,
     setXrayResult,
@@ -1726,6 +1850,13 @@ function createWorkflowStore() {
 export const workflowStore = createRoot(createWorkflowStore);
 
 // Expose store for E2E test assertions and state manipulation
-if ((window as any).__EMBER_TEST__) {
-  (window as any).__emberStore = workflowStore;
+type EmberTestWindow = Window & {
+  __EMBER_TEST__?: boolean;
+  __emberStore?: typeof workflowStore;
+};
+
+const emberTestWindow = window as EmberTestWindow;
+
+if (emberTestWindow.__EMBER_TEST__) {
+  emberTestWindow.__emberStore = workflowStore;
 }

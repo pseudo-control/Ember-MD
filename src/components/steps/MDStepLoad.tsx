@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, createMemo, createSignal, onCleanup, For } from 'solid-js';
+import { Component, Show, createMemo, createSignal, onCleanup, onMount, For } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import DropZone from '../shared/DropZone';
@@ -33,13 +33,12 @@ const MDStepLoad: Component = () => {
   const [showCancelConfirm, setShowCancelConfirm] = createSignal(false);
   const importPanelClass = 'w-full max-w-xl';
 
-  // Subscribe to live prep progress from main process
-  const cleanupPrepProgress = api.onPrepProgress((message: string) => {
-    if (isPreparing()) {
+  onMount(() => {
+    const cleanupPrepProgress = api.onPrepProgress((message: string) => {
       setStatusText(`Preparing receptor: ${message}`);
-    }
+    });
+    onCleanup(cleanupPrepProgress);
   });
-  onCleanup(cleanupPrepProgress);
 
   const detectedSmiles = createMemo(() =>
     smilesText().split('\n').map(l => l.trim()).filter(l => l.length > 0)
@@ -72,8 +71,8 @@ const MDStepLoad: Component = () => {
       } else {
         setError(result.error?.message || 'Failed to fetch PDB');
       }
-    } catch (err: any) {
-      setError(`PDB fetch error: ${err.message}`);
+    } catch (err: unknown) {
+      setError(`PDB fetch error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsLoading(false);
       setStatusText(null);
@@ -141,7 +140,7 @@ const MDStepLoad: Component = () => {
     setNeedsSmiles(false);
 
     const paths = getProjectPaths();
-    const supportDir = path.join(paths.structures, 'md-load');
+    const supportDir = path.join(paths.support, 'md-load');
     const ligandDir = path.join(supportDir, 'ligands');
     const receptorDir = path.join(supportDir, 'receptors');
     await api.createDirectory(ligandDir);
@@ -205,7 +204,7 @@ const MDStepLoad: Component = () => {
     setError(null);
 
     const paths = getProjectPaths();
-    const ligandDir = path.join(paths.structures, 'md-load', 'ligands');
+    const ligandDir = path.join(paths.support, 'md-load', 'ligands');
     await api.createDirectory(ligandDir);
 
     const result = await api.convertSingleMolecule(filePath, ligandDir, 'mol_file');
@@ -233,7 +232,7 @@ const MDStepLoad: Component = () => {
     setError(null);
 
     const paths = getProjectPaths();
-    const ligandDir = path.join(paths.structures, 'md-load', 'ligands');
+    const ligandDir = path.join(paths.support, 'md-load', 'ligands');
     await api.createDirectory(ligandDir);
 
     const result = await api.convertSmilesList(smiles, ligandDir);

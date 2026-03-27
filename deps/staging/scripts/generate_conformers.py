@@ -953,10 +953,11 @@ def process_ligand(sdf_path: str, output_dir: str, max_conformers: int, rmsd_cut
                 except Exception:
                     pass
 
-        # Write to SDF
+        # Write to SDF — strip explicit H for viewer compatibility
         output_path = os.path.join(output_dir, f"{output_name}.sdf")
+        mol_for_sdf = Chem.RemoveAllHs(conf_mol)
         writer = Chem.SDWriter(output_path)
-        writer.write(conf_mol)
+        writer.write(mol_for_sdf)
         writer.close()
 
         results.append((output_path, parent_name))

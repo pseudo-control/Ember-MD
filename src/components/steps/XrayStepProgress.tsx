@@ -5,6 +5,7 @@ import { workflowStore } from '../../stores/workflow';
 import { buildXrayRunFolderName } from '../../utils/jobName';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import TerminalOutput from '../shared/TerminalOutput';
+import StopConfirmModal from '../shared/StopConfirmModal';
 
 const XrayStepProgress: Component = () => {
   const {
@@ -21,6 +22,7 @@ const XrayStepProgress: Component = () => {
   } = workflowStore;
   const api = window.electronAPI;
   const [hasStarted, setHasStarted] = createSignal(false);
+  const [showStopConfirm, setShowStopConfirm] = createSignal(false);
 
   onMount(() => {
     const cleanup = api.onXrayOutput((data) => appendLog(data.data));
@@ -43,9 +45,10 @@ const XrayStepProgress: Component = () => {
     clearLogs();
 
     const paths = projectPathsFromProjectDir(projectDir);
-    const runFolder = buildXrayRunFolderName(path.basename(inputDir));
+    const runFolder = buildXrayRunFolderName(state().xray.descriptor);
+    const jobDir = paths.xray(runFolder).root;
     const outputDir = paths.xray(runFolder).results;
-    setXrayOutputDir(outputDir);
+    setXrayOutputDir(jobDir);
     setXrayResult(null);
 
     try {
@@ -82,6 +85,11 @@ const XrayStepProgress: Component = () => {
     setXrayStep('xray-load');
   };
 
+  const inputDirLabel = () => {
+    const inputDir = state().xray.inputDir;
+    return inputDir ? path.basename(inputDir) : 'Preparing analysis';
+  };
+
   return (
     <div class="h-full flex flex-col">
       <div class="flex items-center justify-between mb-3">
@@ -90,11 +98,20 @@ const XrayStepProgress: Component = () => {
             {state().currentPhase === 'complete' ? 'X-ray Analysis Complete' : 'Running X-ray Analyzer'}
           </h2>
           <p class="text-sm text-base-content/90">
-            {state().xray.inputDir ? path.basename(state().xray.inputDir) : 'Preparing analysis'}
+            {inputDirLabel()}
           </p>
         </div>
         <div class="flex items-center gap-2">
           <Show when={state().xray.isRunning}>
+            <button
+              class="btn btn-circle btn-xs btn-ghost text-error"
+              title="Cancel"
+              onClick={() => setShowStopConfirm(true)}
+            >
+              <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 6h12v12H6z" />
+              </svg>
+            </button>
             <span class="loading loading-spinner loading-sm text-primary" />
           </Show>
           <Show when={state().currentPhase === 'complete'}>
@@ -130,6 +147,23 @@ const XrayStepProgress: Component = () => {
           </button>
         </Show>
       </div>
+
+      <StopConfirmModal
+        isOpen={showStopConfirm()}
+        title="Stop X-ray Analysis?"
+        message="Are you sure you want to cancel the X-ray analysis?"
+        onConfirm={() => {
+          setShowStopConfirm(false);
+          void (async () => {
+            await api.cancelXrayAnalysis();
+            setXrayRunning(false);
+            setIsRunning(false);
+            setCurrentPhase('idle');
+            appendLog('\n--- X-ray analysis cancelled by user ---\n');
+          })();
+        }}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

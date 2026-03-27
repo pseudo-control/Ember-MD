@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, For, Show, createSignal, onCleanup } from 'solid-js';
+import { Component, For, Show, onCleanup } from 'solid-js';
 import type { MapMethod } from '../../stores/workflow';
 import { workflowStore } from '../../stores/workflow';
+import { DEFAULT_MD_CONFIG } from '../../../shared/types/md';
 
 const METHOD_LABEL = 'Water Map (GIST)';
 
@@ -169,7 +170,7 @@ const MapMode: Component = () => {
         pdbPath,
         ligand.id,
         mdOutputDir,
-        { productionNs: 2, forceFieldPreset: 'ff14sb-tip3p' } as any,
+        { ...DEFAULT_MD_CONFIG, productionNs: 2, forceFieldPreset: 'ff14sb-tip3p' },
       );
 
       if (!mdResult.ok) {
@@ -387,12 +388,9 @@ const MapMode: Component = () => {
     );
   };
 
-  if (map().step === 'map-results' && result()) {
-    return renderResults();
-  }
-
   return (
-    <div class="h-full flex flex-col gap-4">
+    <Show when={map().step === 'map-results' && result()} fallback={
+      <div class="h-full flex flex-col gap-4">
       <div class="flex items-center gap-3 flex-wrap">
         <Show
           when={hasPdb()}
@@ -563,7 +561,10 @@ const MapMode: Component = () => {
           <div class="modal-backdrop" onClick={() => setMapShowMdConfirm(false)} />
         </div>
       </Show>
-    </div>
+      </div>
+    }>
+      {renderResults()}
+    </Show>
   );
 };
 

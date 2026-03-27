@@ -34,7 +34,11 @@ except ImportError:
 
 
 def extract_ligand_pdb(pdb_path: str, ligand_id: str, output_pdb: str) -> None:
-    """Extract HETATM records for a specific ligand to a PDB file."""
+    """Extract HETATM records for a specific ligand to a PDB file.
+
+    Strips hydrogen atoms to avoid element misidentification (e.g., atom name
+    HO1 being parsed as Holmium instead of hydrogen by OpenBabel/RDKit).
+    """
     resname, chain, resnum = ligand_id.rsplit('_', 2)
 
     with open(pdb_path, 'r') as f_in, open(output_pdb, 'w') as f_out:
@@ -44,13 +48,22 @@ def extract_ligand_pdb(pdb_path: str, ligand_id: str, output_pdb: str) -> None:
                 line_chain = line[21].strip() or '_'
                 line_resnum = line[22:26].strip()
                 if line_resname == resname and line_chain == chain and line_resnum == resnum:
+                    # Skip hydrogen atoms — element is in columns 77-78
+                    element = line[76:78].strip() if len(line) > 76 else ''
+                    if element == 'H' or element == 'D':
+                        continue
+                    # Fallback: check atom name for H-like patterns
+                    atom_name = line[12:16].strip()
+                    if not element and (atom_name.startswith('H') or atom_name.startswith('D')):
+                        continue
                     f_out.write(line)
         f_out.write("END\n")
 
 
 def pdb_to_sdf_rdkit(pdb_path: str) -> Tuple[Any, Optional[str]]:
     """Try to convert ligand PDB to RDKit mol using RDKit's PDB reader."""
-    mol = Chem.MolFromPDBFile(pdb_path, removeHs=False, sanitize=False)
+    # removeHs=True to avoid PDB atom names like HO1/HO2 being parsed as Holmium
+    mol = Chem.MolFromPDBFile(pdb_path, removeHs=True, sanitize=False)
     if mol is None:
         return None, "RDKit failed to parse PDB"
 
@@ -104,7 +117,7 @@ def pdb_to_sdf_obabel(pdb_path: str, sdf_path: str) -> Tuple[Any, Optional[str]]
             env=env
         )
         if result.returncode == 0 and os.path.exists(sdf_path):
-            mol = Chem.SDMolSupplier(sdf_path, removeHs=False)
+            mol = Chem.SDMolSupplier(sdf_path, removeHs=True)
             m = next(iter(mol), None)
             if m is not None:
                 return m, None
@@ -237,13 +250,15 @@ def main() -> None:
         }))
         sys.exit(0)  # Not an error — just needs user input
 
-    # Step 3: Write SDF
+    # Step 3: Write SDF — strip explicit H for viewer/FF compatibility
+    # (PDB atom names like HO1/HO2 can be misread as Holmium by RDKit)
     sdf_path = os.path.join(args.output_dir, f'{args.ligand_id}.sdf')
+    mol_for_sdf = Chem.RemoveAllHs(mol)
+    mol_for_sdf.SetProp("_Name", args.ligand_id)
+    smiles = Chem.MolToSmiles(mol_for_sdf)
+    mol_for_sdf.SetProp("SMILES", smiles)
     writer = Chem.SDWriter(sdf_path)
-    mol.SetProp("_Name", args.ligand_id)
-    smiles = Chem.MolToSmiles(Chem.RemoveAllHs(mol))
-    mol.SetProp("SMILES", smiles)
-    writer.write(mol)
+    writer.write(mol_for_sdf)
     writer.close()
 
     # Step 4: Calculate properties

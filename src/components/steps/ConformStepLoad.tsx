@@ -46,7 +46,7 @@ const ConformStepLoad: Component = () => {
       const projectDir = state().projectDir;
       if (!projectDir) throw new Error('No project selected');
       const paths = projectPathsFromProjectDir(projectDir);
-      const tmpDir = `${paths.structures}/conform-load`;
+      const tmpDir = `${paths.support}/conform-load`;
       await api.createDirectory(tmpDir);
       const result = await api.convertSmilesList(smiles, tmpDir);
       if (result.ok && result.value.length > 0) {

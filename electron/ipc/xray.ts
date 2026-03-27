@@ -8,6 +8,7 @@ import { AppError } from '../../shared/types/errors';
 import { IpcChannels, XrayAnalysisResult, XrayDirectoryScanResult } from '../../shared/types/ipc';
 import * as appState from '../app-state';
 import { childProcesses, getSpawnEnv as _getSpawnEnv } from '../spawn';
+import { createJobMetadata, inferDescriptorFromFolderName, updateJobStatus, writeJobMetadata } from '../job-metadata';
 
 const xrayProcesses = new Set<ChildProcess>();
 
@@ -134,6 +135,16 @@ export function register(): void {
         const stagedInputDir = path.join(runRoot, 'inputs');
         fs.rmSync(stagedInputDir, { recursive: true, force: true });
         fs.cpSync(inputDir, stagedInputDir, { recursive: true });
+        writeJobMetadata(runRoot, createJobMetadata({
+          jobDir: runRoot,
+          type: 'xray',
+          descriptor: inferDescriptorFromFolderName(path.basename(runRoot), 'analyzed_xrays'),
+          status: 'running',
+          artifacts: {
+            inputsDir: 'inputs',
+            resultsDir: 'results',
+          },
+        }));
 
         const outputPrefix = path.join(outputDir, 'xray_analysis');
         const args = [scriptPath, stagedInputDir, '-o', outputPrefix];
@@ -180,10 +191,16 @@ export function register(): void {
           xrayProcesses.delete(proc);
 
           if (code === 0) {
+            const pdfPaths = listGeneratedPdfs(outputDir);
+            updateJobStatus(runRoot, 'complete', {
+              inputsDir: 'inputs',
+              resultsDir: 'results',
+              pdfPaths: pdfPaths.map((pdfPath) => path.join('results', path.basename(pdfPath))),
+            });
             resolve(Ok({
               inputDir: stagedInputDir,
               outputDir,
-              pdfPaths: listGeneratedPdfs(outputDir),
+              pdfPaths,
             }));
             return;
           }
@@ -198,11 +215,17 @@ export function register(): void {
             type: 'ANALYSIS_FAILED',
             message: `X-ray pose scoring failed: ${errorText.slice(0, 400)}`,
           }));
+          try {
+            updateJobStatus(runRoot, 'error');
+          } catch { /* ignore metadata update failures */ }
         });
 
         proc.on('error', (error: Error) => {
           childProcesses.delete(proc);
           xrayProcesses.delete(proc);
+          try {
+            updateJobStatus(runRoot, 'error');
+          } catch { /* ignore metadata update failures */ }
           resolve(Err({
             type: 'ANALYSIS_FAILED',
             message: error.message,
@@ -211,4 +234,12 @@ export function register(): void {
       });
     }
   );
+
+  // Cancel running X-ray analysis
+  ipcMain.handle(IpcChannels.CANCEL_XRAY, async (): Promise<void> => {
+    for (const proc of xrayProcesses) {
+      if (!proc.killed) proc.kill('SIGTERM');
+    }
+    xrayProcesses.clear();
+  });
 }

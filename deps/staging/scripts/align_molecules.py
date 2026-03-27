@@ -2,18 +2,19 @@
 """
 Align small molecules by MCS or shared rigid substructures.
 
+Returns aligned coordinates as JSON (no files written to disk).
+
 Usage:
-  align_molecules.py --mode mcs --ref REF.sdf --mobile MOBILE.sdf --out ALIGNED.sdf
+  align_molecules.py --mode mcs --ref REF.sdf --mobile MOBILE.sdf
   align_molecules.py --mode scaffolds --ref REF.sdf --mobile MOBILE.sdf
-  align_molecules.py --mode align_scaffold --ref REF.sdf --mobile MOBILE.sdf --scaffold-index 0 --out ALIGNED.sdf
+  align_molecules.py --mode align_scaffold --ref REF.sdf --mobile MOBILE.sdf --scaffold-index 0
 """
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdFMCS, Draw
+from rdkit.Chem import AllChem, rdFMCS
 
 
 def load_molecule(path: str) -> Chem.Mol:
@@ -25,8 +26,23 @@ def load_molecule(path: str) -> Chem.Mol:
     return mol
 
 
+def _get_coords(mol: Chem.Mol) -> list:
+    """Return flat [x,y,z, x,y,z, ...] coordinate list from a molecule."""
+    conf = mol.GetConformer()
+    coords = []
+    for i in range(mol.GetNumAtoms()):
+        pos = conf.GetAtomPosition(i)
+        coords.extend([pos.x, pos.y, pos.z])
+    return coords
+
+
 def mcs_align(ref_mol: Chem.Mol, mobile_mol: Chem.Mol) -> Chem.Mol:
-    """Align mobile to ref by Maximum Common Substructure."""
+    """Align mobile to ref by Maximum Common Substructure.
+
+    MCS is detected on heavy atoms only, then the rigid-body transform is
+    applied to the FULL molecule (including hydrogens) so bond lengths are
+    preserved.
+    """
     ref_noH = Chem.RemoveHs(ref_mol)
     mob_noH = Chem.RemoveHs(mobile_mol)
 
@@ -47,21 +63,18 @@ def mcs_align(ref_mol: Chem.Mol, mobile_mol: Chem.Mol) -> Chem.Mol:
     if not ref_match or not mob_match:
         raise ValueError("Substructure match failed after MCS detection")
 
-    atom_map = list(zip(mob_match, ref_match))
-
-    # Work on heavy-atom molecule for alignment, then propagate to full mol
-    rms = AllChem.AlignMol(mob_noH, ref_noH, atomMap=atom_map)
-
-    # Copy aligned coords back to the mobile (with H) molecule
-    conf_aligned = mob_noH.GetConformer()
-    conf_mobile = mobile_mol.GetConformer()
-    heavy_to_full = {i: i for i in range(mob_noH.GetNumAtoms())}
-    # Map heavy atom indices in mob_noH back to mobile_mol
+    # Map heavy-atom indices back to full-molecule indices so AlignMol
+    # applies the rigid-body rotation to ALL atoms (including H).
+    ref_noH_to_full = ref_mol.GetSubstructMatch(ref_noH)
     mob_noH_to_full = mobile_mol.GetSubstructMatch(mob_noH)
-    if mob_noH_to_full:
-        for noH_idx, full_idx in enumerate(mob_noH_to_full):
-            pos = conf_aligned.GetAtomPosition(noH_idx)
-            conf_mobile.SetAtomPosition(full_idx, pos)
+    if not ref_noH_to_full or not mob_noH_to_full:
+        raise ValueError("Could not map heavy atoms back to full molecule")
+
+    full_atom_map = [
+        (mob_noH_to_full[m], ref_noH_to_full[r])
+        for m, r in zip(mob_match, ref_match)
+    ]
+    AllChem.AlignMol(mobile_mol, ref_mol, atomMap=full_atom_map)
 
     return mobile_mol
 
@@ -76,7 +89,6 @@ def detect_shared_ring_scaffolds(ref_mol: Chem.Mol, mobile_mol: Chem.Mol) -> lis
 
     # Get ring systems from each molecule
     ref_ring_info = ref_noH.GetRingInfo()
-    mob_ring_info = mob_noH.GetRingInfo()
 
     scaffolds = []
     seen_smarts = set()
@@ -141,35 +153,32 @@ def _ring_label(ring_mol: Chem.Mol, smiles: str) -> str:
 
 
 def scaffold_align(ref_mol: Chem.Mol, mobile_mol: Chem.Mol, scaffold_index: int) -> Chem.Mol:
-    """Align mobile to ref by the specified scaffold index."""
+    """Align mobile to ref by the specified scaffold index.
+
+    Scaffold atom indices are on heavy-atom-only molecules. The rigid-body
+    transform is applied to the FULL molecule (including H).
+    """
     scaffolds = detect_shared_ring_scaffolds(ref_mol, mobile_mol)
     if scaffold_index >= len(scaffolds):
         raise ValueError(f"Scaffold index {scaffold_index} out of range (found {len(scaffolds)})")
 
     scaffold = scaffolds[scaffold_index]
-    atom_map = list(zip(scaffold["mobileAtomIndices"], scaffold["refAtomIndices"]))
 
+    # Scaffold indices are on heavy-atom-only molecules — map to full molecules
     ref_noH = Chem.RemoveHs(ref_mol)
     mob_noH = Chem.RemoveHs(mobile_mol)
-    AllChem.AlignMol(mob_noH, ref_noH, atomMap=atom_map)
-
-    # Copy aligned coords back
-    conf_aligned = mob_noH.GetConformer()
-    conf_mobile = mobile_mol.GetConformer()
+    ref_noH_to_full = ref_mol.GetSubstructMatch(ref_noH)
     mob_noH_to_full = mobile_mol.GetSubstructMatch(mob_noH)
-    if mob_noH_to_full:
-        for noH_idx, full_idx in enumerate(mob_noH_to_full):
-            pos = conf_aligned.GetAtomPosition(noH_idx)
-            conf_mobile.SetAtomPosition(full_idx, pos)
+    if not ref_noH_to_full or not mob_noH_to_full:
+        raise ValueError("Could not map heavy atoms back to full molecule")
+
+    full_atom_map = [
+        (mob_noH_to_full[m], ref_noH_to_full[r])
+        for m, r in zip(scaffold["mobileAtomIndices"], scaffold["refAtomIndices"])
+    ]
+    AllChem.AlignMol(mobile_mol, ref_mol, atomMap=full_atom_map)
 
     return mobile_mol
-
-
-def write_sdf(mol: Chem.Mol, path: str):
-    """Write a single molecule to SDF."""
-    writer = Chem.SDWriter(path)
-    writer.write(mol)
-    writer.close()
 
 
 def main():
@@ -177,7 +186,6 @@ def main():
     parser.add_argument("--mode", required=True, choices=["mcs", "scaffolds", "align_scaffold"])
     parser.add_argument("--ref", required=True, help="Reference molecule SDF")
     parser.add_argument("--mobile", required=True, help="Mobile molecule SDF")
-    parser.add_argument("--out", help="Output aligned SDF (required for mcs/align_scaffold)")
     parser.add_argument("--scaffold-index", type=int, default=0, help="Scaffold index for align_scaffold mode")
     args = parser.parse_args()
 
@@ -186,11 +194,7 @@ def main():
 
     if args.mode == "mcs":
         aligned = mcs_align(ref_mol, mobile_mol)
-        if not args.out:
-            print("ERROR: --out required for mcs mode", file=sys.stderr)
-            sys.exit(1)
-        write_sdf(aligned, args.out)
-        print(json.dumps({"status": "ok", "output": args.out}))
+        print(json.dumps({"status": "ok", "coords": _get_coords(aligned)}))
 
     elif args.mode == "scaffolds":
         scaffolds = detect_shared_ring_scaffolds(ref_mol, mobile_mol)
@@ -198,11 +202,11 @@ def main():
 
     elif args.mode == "align_scaffold":
         aligned = scaffold_align(ref_mol, mobile_mol, args.scaffold_index)
-        if not args.out:
-            print("ERROR: --out required for align_scaffold mode", file=sys.stderr)
-            sys.exit(1)
-        write_sdf(aligned, args.out)
-        print(json.dumps({"status": "ok", "output": args.out, "scaffoldIndex": args.scaffold_index}))
+        print(json.dumps({
+            "status": "ok",
+            "scaffoldIndex": args.scaffold_index,
+            "coords": _get_coords(aligned),
+        }))
 
 
 if __name__ == "__main__":

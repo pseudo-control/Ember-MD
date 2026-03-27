@@ -23,7 +23,7 @@ import ProjectTable from './ProjectTable';
 import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import { loadProjectJob } from '../../utils/projectJobLoader';
 import { getVisibleProjectRows } from '../../utils/projectTable';
-import { buildImportFamily } from '../../utils/viewerQueue';
+import { buildImportFamily, buildProjectTableFromJobs } from '../../utils/viewerQueue';
 import { deserializeAndValidateProjectTable } from '../../utils/projectTablePersistence';
 import { theme } from '../../utils/theme';
 import type { AtomProxy, ResidueProxy, SelectionSchemeEntry, NglLoadOptions, BindingSiteResultsJson, PreparedPath } from '../../types/ngl';
@@ -33,6 +33,28 @@ import {
   detectInteractions, collectAtoms,
   type DetectedInteraction, type SurfacePropsCacheEntry,
 } from '../../utils/interactionDetection';
+
+type ViewerTestState = {
+  renderedFrameIndex: number | null;
+  coordinateSignature: number[] | null;
+};
+
+type EmberViewerWindow = Window & {
+  __EMBER_TEST__?: boolean;
+  __viewerTestState?: ViewerTestState;
+  __nglStage?: NGL.Stage | null;
+};
+
+type BoxCapableComponent = NGL.Component & {
+  getBox?: () => { min: Vector3 } | null;
+};
+
+type NGLWithMouseActions = typeof NGL & {
+  MouseActions: {
+    focusScroll: (stage: NGL.Stage, delta: number) => void;
+    zoomFocusScroll: (stage: NGL.Stage, delta: number) => void;
+  };
+};
 
 const ViewerMode: Component = () => {
   const {
@@ -66,20 +88,23 @@ const ViewerMode: Component = () => {
     setViewerProjectActiveRow,
     addViewerProjectFamily,
     removeViewerProjectFamily,
+    hideViewerProjectFamily,
+    unhideViewerProjectFamily,
+    hideViewerProjectRow,
+    unhideViewerProjectRow,
     removeViewerProjectRow,
     renameViewerProjectRow,
     setViewerProjectTable,
     toggleViewerProjectRowSelection,
     toggleViewerProjectFamilyCollapsed,
+    toggleViewerProjectSectionCollapsed,
     setViewerProjectFamilySort,
     setViewerBindingSiteMap,
-    setViewerIsComputingBindingSiteMap,
     nextLayerId,
     addViewerLayer,
     removeViewerLayer,
     updateViewerLayer,
     setViewerLayerSelected,
-    addViewerLayerGroup,
     removeViewerLayerGroup,
     toggleViewerLayerGroupExpanded,
     toggleViewerLayerGroupVisible,
@@ -90,7 +115,6 @@ const ViewerMode: Component = () => {
     setMdLigandSdf,
     setMdLigandName,
     setMdPdbPath,
-    setMdConfig,
     setDockReceptorPdbPath,
     setDockLigandSdfPaths,
     setDockStep,
@@ -110,8 +134,8 @@ const ViewerMode: Component = () => {
   let loadPdbInFlight: string | null = null;
   let autoLoadPath: string | null = null;
   let autoLoadTrajectoryPath: string | null = null;
-  let lastQueueIndex = -1;
-  let lastQueueLength = 0;
+  let lastQueueIndex = state().viewer.pdbQueueIndex;
+  let lastQueueLength = state().viewer.pdbQueue.length;
   let isFirstFrameLoad = true;
   let cachedProteinTopology: { atomCount: number; sessionKey: number } | null = null;
   let cachedLigandTopology: { atomCount: number; sessionKey: number } | null = null;
@@ -122,6 +146,7 @@ const ViewerMode: Component = () => {
   const alignedComponents: Map<number, NGL.Component> = new Map();  // For multi-PDB alignment
   const volumeComponents: Map<string, NGL.Component> = new Map();  // For binding site isosurfaces
   const layerComponents: Map<string, NGL.Component> = new Map();   // Layer ID → NGL component
+  const preloadedComponents: Map<string, NGL.Component> = new Map(); // Pre-loaded structure cache (path → hidden NGL component)
 
   const [isLoading, setIsLoading] = createSignal(false);
   const [loadingStatus, setLoadingStatus] = createSignal('');
@@ -168,35 +193,97 @@ const ViewerMode: Component = () => {
     });
   };
 
-  createEffect(() => {
-    const ready = state().projectReady;
-    const projectDir = state().projectDir;
-
-    if (!ready || !projectDir) {
-      setRecentJobs([]);
-      return;
-    }
-
-    const requestId = ++recentJobsRequestId;
-    setIsLoadingRecentJobs(true);
-
-    void (async () => {
-      try {
-        const jobs = await api.scanProjectArtifacts(projectDir);
-        if (requestId !== recentJobsRequestId) return;
-        const loadableJobs = sortedRecentJobs(jobs.filter((job) => job.type !== 'docking-pose'));
-        setRecentJobs(loadableJobs);
-      } catch (err) {
-        if (requestId !== recentJobsRequestId) return;
-        console.error('[Viewer] Failed to scan project artifacts:', err);
+  // Scan project artifacts and pre-load structures as soon as the project is
+  // selected — not gated on viewer tab. ViewerMode is always mounted (CSS-hidden),
+  // so this runs immediately. By the time the user clicks View, structures are ready.
+  createEffect(on(
+    () => [state().projectReady, state().projectDir] as const,
+    ([ready, projectDir]) => {
+      if (!ready || !projectDir) {
         setRecentJobs([]);
-      } finally {
-        if (requestId === recentJobsRequestId) {
-          setIsLoadingRecentJobs(false);
-        }
+        return;
       }
-    })();
-  });
+
+      // Skip expensive scan if project table already has content
+      const projectTable = state().viewer.projectTable;
+      if (projectTable && projectTable.families.length > 0) {
+        setIsLoadingRecentJobs(false);
+        return;
+      }
+
+      const requestId = ++recentJobsRequestId;
+      setIsLoadingRecentJobs(true);
+
+      void (async () => {
+        try {
+          const structuresDir = `${projectDir}/structures`;
+          const [jobs, importedFileNames] = await Promise.all([
+            api.scanProjectArtifacts(projectDir),
+            api.listPdbInDirectory(structuresDir).catch(() => [] as string[]),
+          ]);
+          // listPdbInDirectory returns bare filenames — join with directory path
+          const importedFiles = importedFileNames.map((f) => `${structuresDir}/${f}`);
+          if (requestId !== recentJobsRequestId) return;
+          setRecentJobs(sortedRecentJobs(jobs));
+
+          // Auto-populate project table if not already populated
+          const currentProjectTable = state().viewer.projectTable;
+          if (!currentProjectTable || currentProjectTable.families.length === 0) {
+            const table = buildProjectTableFromJobs(jobs, importedFiles);
+            if (table.families.length > 0) {
+              setViewerProjectTable(table);
+            }
+          }
+
+          // Pre-cache structure preparation (add hydrogens) before releasing
+          // the loading state. This blocks the viewer UI briefly but ensures
+          // every subsequent click loads instantly from the cached _prepared.pdb.
+          const allPdbPaths = [
+            ...importedFiles.filter((f) => /\.(pdb|cif)$/i.test(f)),
+            ...jobs.flatMap((j) => {
+              const paths: string[] = [];
+              if (j.path && /\.(pdb|cif)$/i.test(j.path)) paths.push(j.path);
+              if (j.systemPdb) paths.push(j.systemPdb);
+              return paths;
+            }),
+          ];
+          if (allPdbPaths.length > 0) {
+            const preparedPaths = await Promise.all(allPdbPaths.map((p) => prepareStructure(p)));
+            // Pre-load prepared structures into NGL (hidden) so clicking any row is instant.
+            // Clear stale pre-loaded components first.
+            for (const [, comp] of preloadedComponents) {
+              if (stage) stage.removeComponent(comp);
+            }
+            preloadedComponents.clear();
+            const nglStage = stage;
+            if (nglStage) {
+              await Promise.all(preparedPaths.map(async (preparedPath) => {
+                if (requestId !== recentJobsRequestId) return;
+                try {
+                  const comp = await nglStage.loadFile(preparedPath, { defaultRepresentation: false });
+                  if (comp && requestId === recentJobsRequestId) {
+                    (comp as NGL.Component).setVisibility(false);
+                    preloadedComponents.set(preparedPath as string, comp as NGL.Component);
+                  } else if (comp) {
+                    nglStage.removeComponent(comp);
+                  }
+                } catch { /* skip failed loads */ }
+              }));
+            }
+            console.log(`[Viewer] Pre-loaded ${preloadedComponents.size} structures into NGL`);
+          }
+        } catch (err) {
+          if (requestId !== recentJobsRequestId) return;
+          console.error('[Viewer] Failed to scan project artifacts:', err);
+          setRecentJobs([]);
+        } finally {
+          if (requestId === recentJobsRequestId) {
+            setIsLoadingRecentJobs(false);
+          }
+        }
+      })();
+    },
+  ));
 
   const clearViewerStage = () => {
     playbackGeneration++;
@@ -219,6 +306,7 @@ const ViewerMode: Component = () => {
     }
 
     volumeComponents.clear();
+    preloadedComponents.clear();
     proteinComponent = null;
     ligandComponent = null;
     pocketReferenceLigandComponent = null;
@@ -249,6 +337,8 @@ const ViewerMode: Component = () => {
     rows: [],
     activeRowId: null,
     selectedRowIds: [],
+    hiddenFamilyIds: [],
+    hiddenRowIds: [],
   };
   const activeProjectRow = () => {
     const table = state().viewer.projectTable;
@@ -510,12 +600,12 @@ const ViewerMode: Component = () => {
 
   const getComputedSurfaceColorScheme = (sourcePath: string | null, expectedAtomCount?: number): string | null => {
     switch (state().viewer.surfaceColorScheme) {
+      case 'uniform-grey':
+        return null;
       case 'hydrophobic':
         return createHydrophobicScheme(sourcePath, expectedAtomCount);
       case 'electrostatic':
         return createElectrostaticScheme(sourcePath, expectedAtomCount);
-      default:
-        return null;
     }
   };
 
@@ -531,7 +621,7 @@ const ViewerMode: Component = () => {
   ) => {
     const { opacity, sourcePath, expectedAtomCount, sele, solidColor } = options;
     const scheme = state().viewer.surfaceColorScheme;
-    const surfaceParams: Record<string, any> = { opacity, color: solidColor };
+    const surfaceParams: Record<string, string | number> = { opacity, color: solidColor };
     if (sele) surfaceParams.sele = sele;
 
     if (scheme === 'uniform-grey') {
@@ -608,10 +698,12 @@ const ViewerMode: Component = () => {
   };
 
   const [stageReady, setStageReady] = createSignal(false);
+  const viewerWindow = window as EmberViewerWindow;
+  const nglWithMouseActions = NGL as NGLWithMouseActions;
 
   const resetViewerTestState = () => {
-    if (!(window as any).__EMBER_TEST__) return;
-    (window as any).__viewerTestState = {
+    if (!viewerWindow.__EMBER_TEST__) return;
+    viewerWindow.__viewerTestState = {
       renderedFrameIndex: null,
       coordinateSignature: null,
     };
@@ -622,7 +714,7 @@ const ViewerMode: Component = () => {
     structure: NGL.Structure | null | undefined,
     component?: NGL.Component | null,
   ) => {
-    if (!(window as any).__EMBER_TEST__) return;
+    if (!viewerWindow.__EMBER_TEST__) return;
     let coordinateSignature: number[] | null = null;
     if (structure) {
       const center = structure.atomCenter();
@@ -632,8 +724,9 @@ const ViewerMode: Component = () => {
         Number(center.z.toFixed(4)),
       ];
     }
-    if (component && typeof (component as any).getBox === 'function') {
-      const box = (component as any).getBox();
+    const boxComponent = component as BoxCapableComponent | null | undefined;
+    if (boxComponent && typeof boxComponent.getBox === 'function') {
+      const box = boxComponent.getBox();
       if (box) {
         coordinateSignature = [
           ...(coordinateSignature ?? []),
@@ -643,7 +736,7 @@ const ViewerMode: Component = () => {
         ];
       }
     }
-    (window as any).__viewerTestState = {
+    viewerWindow.__viewerTestState = {
       renderedFrameIndex: frameIndex,
       coordinateSignature,
     };
@@ -658,12 +751,12 @@ const ViewerMode: Component = () => {
       // Dampen shift+scroll clipping plane adjustment for smoother control
       const CLIP_DAMPING = 0.3;
       stage.mouseControls.remove('scroll-shift');
-      stage.mouseControls.add('scroll-shift', (stg: any, delta: number) => {
-        (NGL as any).MouseActions.focusScroll(stg, delta * CLIP_DAMPING);
+      stage.mouseControls.add('scroll-shift', (stg: NGL.Stage, delta: number) => {
+        nglWithMouseActions.MouseActions.focusScroll(stg, delta * CLIP_DAMPING);
       });
       stage.mouseControls.remove('scroll-shift-ctrl');
-      stage.mouseControls.add('scroll-shift-ctrl', (stg: any, delta: number) => {
-        (NGL as any).MouseActions.zoomFocusScroll(stg, delta * CLIP_DAMPING);
+      stage.mouseControls.add('scroll-shift-ctrl', (stg: NGL.Stage, delta: number) => {
+        nglWithMouseActions.MouseActions.zoomFocusScroll(stg, delta * CLIP_DAMPING);
       });
 
       // Handle window resize
@@ -675,8 +768,8 @@ const ViewerMode: Component = () => {
       window.addEventListener('resize', handleResize);
       setStageReady(true);
       // Expose stage for E2E test assertions (NGL state queries, not screenshots)
-      if ((window as any).__EMBER_TEST__) {
-        (window as any).__nglStage = stage;
+      if (viewerWindow.__EMBER_TEST__) {
+        viewerWindow.__nglStage = stage;
         resetViewerTestState();
       }
       console.log('[Viewer] NGL Stage created');
@@ -1202,12 +1295,19 @@ const ViewerMode: Component = () => {
 
       // Load PDB into NGL (disable default representations to control styling)
       if (stage) {
-        // Remove only the protein component if preserving ligand, otherwise remove all
+        // If a pre-loaded component exists for this path, we must avoid
+        // removeAllComponents which would destroy it before we can use it.
+        const hasPreloaded = preloadedComponents.has(pdbPath);
         if (proteinComponent) {
           stage.removeComponent(proteinComponent);
         }
-        if (!preserveExternalLigand) {
+        if (!preserveExternalLigand && !hasPreloaded) {
           stage.removeAllComponents();
+        } else if (!preserveExternalLigand) {
+          // Remove everything except pre-loaded components
+          if (ligandComponent) { stage.removeComponent(ligandComponent); ligandComponent = null; }
+          if (pocketReferenceLigandComponent) { stage.removeComponent(pocketReferenceLigandComponent); pocketReferenceLigandComponent = null; }
+          if (interactionShapeComponent) { stage.removeComponent(interactionShapeComponent); interactionShapeComponent = null; }
         }
 
         proteinComponent = await stageLoadProtein(pdbPath, { defaultRepresentation: false });
@@ -1305,7 +1405,7 @@ const ViewerMode: Component = () => {
       .replace(/\.[^.]+$/, '')
       .replace(/[^A-Za-z0-9._-]+/g, '_');
     const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const outputDir = `${paths.structures}/viewer-normalized/${safeName}-${uniqueSuffix}`;
+    const outputDir = `${paths.support}/viewer-normalized/${safeName}-${uniqueSuffix}`;
 
     const result = await api.convertSingleMolecule(filePath, outputDir, 'mol_file');
     if (!result.ok) {
@@ -1318,7 +1418,7 @@ const ViewerMode: Component = () => {
   const getViewerSupportDir = async (name: string): Promise<string> => {
     const projectDir = state().projectDir;
     if (!projectDir) throw new Error('No project selected');
-    return `${projectPathsFromProjectDir(projectDir).structures}/${name}`;
+    return `${projectPathsFromProjectDir(projectDir).support}/${name}`;
   };
 
   const resolvePocketReferenceLigandPath = async (row: ViewerProjectRow): Promise<string | null> => {
@@ -1672,7 +1772,9 @@ const ViewerMode: Component = () => {
   createEffect(async () => {
     const queue = state().viewer.pdbQueue;
     const idx = state().viewer.pdbQueueIndex;
-    // Fire on: index change (nav arrows) OR queue just populated (View 3D / structure import)
+    // Fire on: index change (nav arrows) OR queue just populated (View 3D / structure import).
+    // lastQueueLength is initialized from the current store, so a restored queue
+    // from a previous session won't trigger "just populated" on the first effect run.
     const queueJustPopulated = queue.length > 1 && lastQueueLength <= 1;
     const indexChanged = idx !== lastQueueIndex && lastQueueIndex >= 0;
     lastQueueLength = queue.length;
@@ -1680,7 +1782,13 @@ const ViewerMode: Component = () => {
       lastQueueIndex = idx;
       const item = queue[idx];
       if (!item) { lastQueueIndex = idx; return; }
+      const sessionKey = state().viewer.sessionKey;
       await loadViewerQueueItem(item);
+      // Staleness check: if session changed during async load, the result is stale
+      if (state().viewer.sessionKey !== sessionKey) {
+        console.log('[Viewer] Queue load discarded — session changed during load');
+        return;
+      }
     }
     lastQueueIndex = idx;
   });
@@ -1704,16 +1812,35 @@ const ViewerMode: Component = () => {
     // If a queue is set, let the queue nav effect handle loading (not auto-load)
     if (queue.length > 1) return;
 
+    // Skip ligand-format files — these are handled by handleLoadStandaloneLigand,
+    // not the protein auto-load path. Without this guard, conformer SDFs get
+    // incorrectly fed through prepareStructure → "mol_1_conf_0.sdf_prepared.pdb".
+    if (/\.(sdf|sdf\.gz|mol|mol2)$/i.test(pdbPath)) return;
+
     autoLoadPath = pdbPath;
     const hasExternalLigand = !!ligandPath;
+    const sessionKey = state().viewer.sessionKey;
 
     console.log('[Viewer] Auto-loading PDB:', pdbPath, 'preserveExternalLigand:', hasExternalLigand);
     await handleLoadPdb(pdbPath, hasExternalLigand);
+
+    // Staleness check: if session or path changed during async load, bail
+    if (state().viewer.sessionKey !== sessionKey || state().viewer.pdbPath !== pdbPath) {
+      console.log('[Viewer] Auto-load discarded — state changed during PDB load');
+      autoLoadPath = null;
+      return;
+    }
 
     // Load external ligand after PDB is loaded (if specified)
     if (ligandPath && !ligandComponent) {
       console.log('[Viewer] Auto-loading ligand:', ligandPath);
       await handleLoadExternalLigand(ligandPath);
+
+      if (state().viewer.sessionKey !== sessionKey) {
+        console.log('[Viewer] Auto-load discarded — session changed during ligand load');
+        autoLoadPath = null;
+        return;
+      }
     }
 
     // Clear the guard so a new path can be loaded later
@@ -1733,7 +1860,11 @@ const ViewerMode: Component = () => {
     if (!trajectoryPath || !topologyPath || trajectoryInfo || trajectoryPath === autoLoadTrajectoryPath) return;
 
     autoLoadTrajectoryPath = trajectoryPath;
+    const sessionKey = state().viewer.sessionKey;
     await handleLoadTrajectory(trajectoryPath);
+    if (state().viewer.sessionKey !== sessionKey) {
+      console.log('[Viewer] Trajectory load discarded — session changed during load');
+    }
     autoLoadTrajectoryPath = null;
   });
 
@@ -2282,9 +2413,6 @@ const ViewerMode: Component = () => {
 
   // FEP scoring overlay
 
-  // Scoring panel
-  const [showScoringPanel, setShowScoringPanel] = createSignal(false);
-
   // Clustering modal (for trajectory analysis — separate from multi-PDB import)
   const [showClusteringModal, setShowClusteringModal] = createSignal(false);
   const handleOpenClustering = () => setShowClusteringModal(true);
@@ -2389,6 +2517,14 @@ const ViewerMode: Component = () => {
     options: NglLoadOptions,
   ): Promise<NGL.Component | null> => {
     if (!stage) return Promise.resolve(null);
+    // Check pre-load cache — if the structure was already parsed during project
+    // scan, reuse the hidden component instead of re-parsing from disk.
+    const cached = preloadedComponents.get(path);
+    if (cached) {
+      preloadedComponents.delete(path);
+      cached.setVisibility(true);
+      return Promise.resolve(cached);
+    }
     return stage.loadFile(path, options).then((c) => (c as NGL.Component) || null);
   };
 
@@ -2559,14 +2695,17 @@ const ViewerMode: Component = () => {
         })));
       }
 
-      // Build project table family for imported structures
-      const allImported = [...preparedProteins, ...normalizedLigandPaths];
-      if (allImported.length > 0) {
+      // Build project table family for imported structures.
+      // Store ORIGINAL paths (not _prepared) so the scanner won't create duplicates on reload,
+      // and labels derive from the user's original filename. prepareStructure handles
+      // transparent CIF→PDB conversion + hydrogen addition when loading.
+      const allOriginal = [...proteinInputs, ...normalizedLigandPaths];
+      if (allOriginal.length > 0) {
         const fileTypes = [
-          ...preparedProteins.map(() => 'protein' as const),
+          ...proteinInputs.map(() => 'protein' as const),
           ...normalizedLigandPaths.map(() => 'ligand' as const),
         ];
-        const { family, rows } = buildImportFamily({ filePaths: allImported, fileTypes });
+        const { family, rows } = buildImportFamily({ filePaths: allOriginal, fileTypes });
         addViewerProjectFamily(family, rows);
       }
 
@@ -2596,7 +2735,6 @@ const ViewerMode: Component = () => {
     const importResult = structureFiles.length > 0
       ? await loadImportedStructures(structureFiles)
       : { lastPreparedProtein: null };
-    setShowImportOverlay(false);
 
     const dcdPath = trajectoryFiles[0];
     if (!dcdPath) return;
@@ -2785,46 +2923,53 @@ const ViewerMode: Component = () => {
     if (isAligned()) clearAlignment();
 
     if (row.loadKind === 'queue' && row.queueIndex !== undefined && row.queueIndex >= 0) {
+      const queueIndex = row.queueIndex;
       const familyQueueRows = projectTable?.rows
         .filter((entry) => entry.familyId === row.familyId && entry.loadKind === 'queue' && entry.queueIndex !== undefined)
         .sort((a, b) => (a.queueIndex ?? 0) - (b.queueIndex ?? 0)) ?? [];
 
-      if (familyQueueRows.length > 0) {
-        const restoredQueue = familyQueueRows.map((entry) => entry.item);
-        const queueMatches = state().viewer.pdbQueue.length === restoredQueue.length
-          && state().viewer.pdbQueue.every((item, index) =>
-            item.pdbPath === restoredQueue[index]?.pdbPath
-            && item.ligandPath === restoredQueue[index]?.ligandPath
-            && item.type === restoredQueue[index]?.type
-          );
-        if (!queueMatches) {
-          setViewerPdbQueue(restoredQueue);
-        }
-      }
+      const restoredQueue = familyQueueRows.length > 0 ? familyQueueRows.map((entry) => entry.item) : [];
+      const queueMatches = restoredQueue.length > 0
+        && state().viewer.pdbQueue.length === restoredQueue.length
+        && state().viewer.pdbQueue.every((item, index) =>
+          item.pdbPath === restoredQueue[index]?.pdbPath
+          && item.ligandPath === restoredQueue[index]?.ligandPath
+          && item.type === restoredQueue[index]?.type
+        );
 
-      setViewerTrajectoryPath(row.trajectoryPath ?? null);
-      setViewerTrajectoryInfo(row.trajectoryPath ? state().viewer.trajectoryInfo : null);
-      setViewerCurrentFrame(0);
-      setViewerPdbQueueIndex(row.queueIndex);
+      batch(() => {
+        if (!queueMatches && restoredQueue.length > 0) setViewerPdbQueue(restoredQueue);
+        setViewerTrajectoryPath(row.trajectoryPath ?? null);
+        setViewerTrajectoryInfo(row.trajectoryPath ? state().viewer.trajectoryInfo : null);
+        setViewerCurrentFrame(0);
+        setViewerPdbQueueIndex(queueIndex);
+      });
       return;
     }
 
-    setViewerPdbQueue([]);
-    setViewerTrajectoryPath(row.trajectoryPath ?? null);
-    setViewerTrajectoryInfo(null);
-    setViewerCurrentFrame(0);
-
     if (row.loadKind === 'standalone-ligand') {
-      setViewerDetectedLigands([]);
-      setViewerSelectedLigandId(null);
-      setViewerPdbPath(row.item.pdbPath);
-      setViewerLigandPath(row.item.pdbPath);
+      batch(() => {
+        setViewerPdbQueue([]);
+        setViewerTrajectoryPath(row.trajectoryPath ?? null);
+        setViewerTrajectoryInfo(null);
+        setViewerCurrentFrame(0);
+        setViewerDetectedLigands([]);
+        setViewerSelectedLigandId(null);
+        setViewerPdbPath(row.item.pdbPath);
+        setViewerLigandPath(row.item.pdbPath);
+      });
       await handleLoadStandaloneLigand(row.item.pdbPath);
       return;
     }
 
-    setViewerPdbPath(row.item.pdbPath);
-    setViewerLigandPath(row.item.ligandPath ?? null);
+    batch(() => {
+      setViewerPdbQueue([]);
+      setViewerTrajectoryPath(row.trajectoryPath ?? null);
+      setViewerTrajectoryInfo(null);
+      setViewerCurrentFrame(0);
+      setViewerPdbPath(row.item.pdbPath);
+      setViewerLigandPath(row.item.ligandPath ?? null);
+    });
     clearPocketReferenceLigand();
     await loadViewerQueueItem(row.item);
 
@@ -2837,18 +2982,22 @@ const ViewerMode: Component = () => {
     const projectTable = state().viewer.projectTable;
     const family = projectTable?.families.find((entry) => entry.id === familyId);
     if (!family?.trajectoryPath) return;
+    const trajectoryPath = family.trajectoryPath;
     const initialRow = projectTable?.rows.find((row) => row.familyId === familyId && row.rowKind === 'initial-complex');
     if (!initialRow) return;
 
-    setViewerProjectActiveRow(initialRow.id);
     clearProjectTableSelectionComponents();
     if (isAligned()) clearAlignment();
-    setViewerPdbQueue([]);
-    setViewerPdbPath(initialRow.item.pdbPath);
-    setViewerLigandPath(initialRow.item.ligandPath ?? null);
-    setViewerTrajectoryPath(family.trajectoryPath);
-    setViewerTrajectoryInfo(null);
-    setViewerCurrentFrame(0);
+
+    batch(() => {
+      setViewerProjectActiveRow(initialRow.id);
+      setViewerPdbQueue([]);
+      setViewerPdbPath(initialRow.item.pdbPath);
+      setViewerLigandPath(initialRow.item.ligandPath ?? null);
+      setViewerTrajectoryPath(trajectoryPath);
+      setViewerTrajectoryInfo(null);
+      setViewerCurrentFrame(0);
+    });
 
     if (!proteinComponent || state().viewer.pdbPath !== initialRow.item.pdbPath) {
       await loadViewerQueueItem(initialRow.item);
@@ -2979,7 +3128,6 @@ const ViewerMode: Component = () => {
   };
 
   const handleLayerRemove = (layerId: string) => {
-    const layer = state().viewer.layers.find((l) => l.id === layerId);
     const remainingLayers = state().viewer.layers.filter((l) => l.id !== layerId);
     const comp = layerComponents.get(layerId);
     if (comp && stage) {
@@ -3179,64 +3327,6 @@ const ViewerMode: Component = () => {
     }
   };
 
-  const handleComputeBindingSiteMap = async () => {
-    const pdbPath = state().viewer.pdbPath;
-    const selectedId = state().viewer.selectedLigandId;
-    if (!pdbPath || !selectedId) return;
-
-    const ligand = state().viewer.detectedLigands.find((l) => l.id === selectedId);
-    if (!ligand) return;
-
-    setViewerIsComputingBindingSiteMap(true);
-
-    try {
-      // Determine PDB to use: if trajectory loaded, export current frame; otherwise use static PDB
-      let targetPdb = pdbPath;
-      const trajectoryPath = state().viewer.trajectoryPath;
-      if (trajectoryPath) {
-        const tmpPath = `/tmp/ember_expand_frame_${Date.now()}.pdb`;
-        const exportResult = await api.exportTrajectoryFrame({
-          topologyPath: pdbPath,
-          trajectoryPath: trajectoryPath,
-          frameIndex: state().viewer.currentFrame,
-          outputPath: tmpPath,
-          stripWaters: true,
-        });
-        if (exportResult.ok) {
-          targetPdb = exportResult.value.pdbPath;
-        }
-      }
-
-      // Output dir: surfaces/pocket_map_static in the project, or next to the PDB
-      const pdbDir = pdbPath.replace(/\/[^/]+$/, '');
-      const projectDir = pdbDir.replace(/\/(simulations|docking)\/[^/]+$/, '');
-      const outputDir = projectDir !== pdbDir
-        ? `${projectDir}/surfaces/pocket_map_static`
-        : `${pdbDir}/pocket_map_static`;
-
-      const result = await api.mapBindingSite({
-        pdbPath: targetPdb,
-        ligandResname: ligand.resname,
-        ligandResnum: parseInt(ligand.resnum, 10),
-        outputDir,
-        sourcePdbPath: pdbPath,
-        sourceTrajectoryPath: trajectoryPath || undefined,
-      });
-
-      if (result.ok) {
-        const mapState = buildMapState(result.value);
-        setViewerBindingSiteMap(mapState);
-        await loadBindingSiteVolumes(mapState);
-      } else {
-        setError(`Binding site map failed: ${result.error?.message || 'Unknown error'}`);
-      }
-    } catch (err) {
-      setError(`Binding site map error: ${(err as Error).message}`);
-    } finally {
-      setViewerIsComputingBindingSiteMap(false);
-    }
-  };
-
   // Reactive effect: update volume representations when channel settings change
   createEffect(() => {
     const bsMap = state().viewer.bindingSiteMap;
@@ -3291,10 +3381,6 @@ const ViewerMode: Component = () => {
   };
   const hasLigandDisplayTarget = () => hasAnyLigand() || getStandaloneLigandPath() !== null || (!!ligandComponent && !proteinComponent);
   const hasProteinLigandContext = () => !!proteinComponent && hasAnyLigand();
-  const canSimulateCurrentView = () =>
-    !!state().viewer.pdbPath
-    && !isLigandLikePath(state().viewer.pdbPath)
-    && hasAnyLigand();
   const canExportCurrentView = () => !!state().viewer.pdbPath || !!state().viewer.ligandPath;
 
   // --- Multi-select alignment state ---
@@ -3393,6 +3479,17 @@ const ViewerMode: Component = () => {
     setHasAlignment(true);
   };
 
+  /** Apply a flat [x,y,z,...] coordinate array to an NGL component in-place. */
+  const applyAlignedCoords = (comp: NGL.Component, coords: number[]) => {
+    const structure = (comp as NGL.StructureComponent)?.structure;
+    if (!structure) return;
+    const n = structure.atomCount;
+    if (coords.length !== n * 3) return;
+    const arr = new Float32Array(coords);
+    structure.updatePosition(arr);
+    comp.updateRepresentations({ position: true });
+  };
+
   const handleAlignLigand = async () => {
     const ligands = selectedLigandRows();
     if (ligands.length < 2) return;
@@ -3407,19 +3504,10 @@ const ViewerMode: Component = () => {
       if (row.id === refRow.id) continue;
       const mobilePath = row.item.ligandPath || row.item.pdbPath;
       if (!mobilePath) continue;
-      const outPath = mobilePath.replace(/\.sdf(\.gz)?$/i, '_aligned.sdf');
-      const result = await api.alignMoleculesMcs(refPath, mobilePath, outPath);
+      const result = await api.alignMoleculesMcs(refPath, mobilePath);
       if (result.ok) {
-        // Reload the aligned SDF into the existing NGL component
         const comp = layerComponents.get(row.id);
-        if (comp && stage) {
-          stage.removeComponent(comp);
-          const newComp = await stage.loadFile(outPath, { defaultRepresentation: false, firstModelOnly: true });
-          if (newComp) {
-            layerComponents.set(row.id, newComp);
-            updateExternalLigandStyle(newComp);
-          }
-        }
+        if (comp) applyAlignedCoords(comp, result.value.coords);
       }
     }
     stage?.autoView();
@@ -3446,7 +3534,7 @@ const ViewerMode: Component = () => {
     if (!mobilePath) return;
 
     let scaffolds = detectedScaffolds();
-    let nextIndex = scaffoldCycleIndex();
+    let nextIndex: number;
 
     // First call: detect scaffolds
     if (scaffolds.length === 0) {
@@ -3467,18 +3555,10 @@ const ViewerMode: Component = () => {
       if (row.id === refRow.id) continue;
       const mp = row.item.ligandPath || row.item.pdbPath;
       if (!mp) continue;
-      const outPath = mp.replace(/\.sdf(\.gz)?$/i, `_ss${nextIndex}.sdf`);
-      const result = await api.alignByScaffold(refPath, mp, nextIndex, outPath);
+      const result = await api.alignByScaffold(refPath, mp, nextIndex);
       if (result.ok) {
         const comp = layerComponents.get(row.id);
-        if (comp && stage) {
-          stage.removeComponent(comp);
-          const newComp = await stage.loadFile(outPath, { defaultRepresentation: false, firstModelOnly: true });
-          if (newComp) {
-            layerComponents.set(row.id, newComp);
-            updateExternalLigandStyle(newComp);
-          }
-        }
+        if (comp) applyAlignedCoords(comp, result.value.coords);
       }
     }
 
@@ -3495,34 +3575,11 @@ const ViewerMode: Component = () => {
     setScaffoldCycleIndex(0);
   };
 
-  const handleSimulate = () => {
-    const pdbPath = state().viewer.pdbPath;
-    if (!pdbPath || !canSimulateCurrentView()) return;
-    const ligandPath = state().viewer.ligandPath;
-    const ligandName = ligandPath
-      ? ligandPath.split('/').pop()?.replace(/\.sdf(\.gz)?$/, '') || 'ligand'
-      : state().viewer.selectedLigandId || 'ligand';
-    setMdReceptorPdb(pdbPath);
-    setMdLigandSdf(ligandPath);
-    setMdLigandName(ligandName);
-    setMdPdbPath(pdbPath);
-    batch(() => {
-      setMode('md');
-      setMdStep('md-configure');
-    });
-  };
-
   // Transfer: single-select only, auto-detect what to pre-populate
   const hasSingleTransferSelection = () => {
     const pt = state().viewer.projectTable;
     if (!pt) return false;
     return (pt.selectedRowIds || []).length === 1;
-  };
-
-  const getActiveRow = () => {
-    const pt = state().viewer.projectTable;
-    if (!pt?.activeRowId) return null;
-    return pt.rows.find((r) => r.id === pt.activeRowId) ?? null;
   };
 
   const getTransferRow = () => {
@@ -3692,41 +3749,6 @@ const ViewerMode: Component = () => {
 
   return (
     <div class="h-full w-full min-w-0 flex flex-col gap-2">
-      {/* Detected Ligand Info */}
-      <Show when={hasAnyLigand()}>
-        <div class="card bg-base-200 p-2">
-          <div class="flex items-center gap-2">
-            <Show when={hasAutoDetectedLigand()}>
-              <div class="badge badge-success badge-sm gap-1" title="X-ray ligand detected in PDB">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-2 w-2" viewBox="0 0 20 20" fill="currentColor">
-                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                </svg>
-                Ligand
-              </div>
-            </Show>
-            <span class="text-xs text-base-content/90 flex-1 truncate">
-              <Show when={hasAutoDetectedLigand() && !hasExternalLigand()}>
-                {getDetectedLigandInfo()}
-              </Show>
-              <Show when={hasExternalLigand()}>
-                {state().viewer.ligandPath?.split('/').pop()}
-              </Show>
-            </span>
-            <Show when={hasViewerSession()}>
-              <button
-                class="btn btn-sm btn-error btn-outline ml-auto"
-                onClick={handleClearAll}
-                title="Close structure"
-                data-testid="viewer-close-button"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </Show>
-          </div>
-        </div>
-      </Show>
 
       {/* Trajectory Controls */}
       <Show when={hasTrajectory()}>
@@ -3756,7 +3778,7 @@ const ViewerMode: Component = () => {
       {/* NGL Viewer Canvas + Project Table */}
       <div class="flex-1 min-h-0 min-w-0 w-full flex gap-2">
         <div
-          ref={viewerCanvasShellRef}
+          ref={(el) => { viewerCanvasShellRef = el; }}
           class="flex-1 basis-0 min-w-0 w-full relative rounded-lg overflow-hidden border border-base-300 min-h-0"
         >
           <div
@@ -3790,7 +3812,7 @@ const ViewerMode: Component = () => {
 
         <Show when={state().projectReady}>
           <div
-            ref={projectTablePanelRef}
+            ref={(el) => { projectTablePanelRef = el; }}
             class="relative shrink-0 min-h-0 h-full"
             style={{ width: `${projectTableWidth()}px` }}
           >
@@ -3807,9 +3829,14 @@ const ViewerMode: Component = () => {
               onSelectRow={handleProjectTableRowSelect}
               onToggleRowSelection={handleToggleRowSelection}
               onToggleFamilyCollapsed={toggleViewerProjectFamilyCollapsed}
+              onToggleSectionCollapsed={toggleViewerProjectSectionCollapsed}
               onSortFamily={handleProjectTableSort}
               onPlayTrajectory={handleProjectTablePlayTrajectory}
               onRemoveFamily={(familyId) => { void handleRemoveProjectFamily(familyId); }}
+              onHideFamily={(familyId) => { hideViewerProjectFamily(familyId); }}
+              onUnhideFamily={(familyId) => { unhideViewerProjectFamily(familyId); }}
+              onHideRow={(rowId) => { hideViewerProjectRow(rowId); }}
+              onUnhideRow={(rowId) => { unhideViewerProjectRow(rowId); }}
               onRemoveRow={(rowId) => { void handleRemoveProjectRow(rowId); }}
               onRenameRow={renameViewerProjectRow}
               canNavigatePrevious={activeProjectRowIndex() > 0}

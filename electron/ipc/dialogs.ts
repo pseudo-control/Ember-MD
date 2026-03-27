@@ -341,4 +341,16 @@ export function register(): void {
       }
     }
   );
+
+  // Delete a directory (used for discarding simulation runs)
+  ipcMain.handle(IpcChannels.DELETE_DIRECTORY, async (_event, dirPath: string): Promise<Result<void, AppError>> => {
+    try {
+      if (fs.existsSync(dirPath)) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+      }
+      return Ok(undefined);
+    } catch (err) {
+      return Err({ type: 'DELETE_FAILED', message: (err as Error).message });
+    }
+  });
 }

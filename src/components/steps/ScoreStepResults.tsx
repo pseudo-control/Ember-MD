@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
 import { Component, For, Show, createSignal, createMemo } from 'solid-js';
-import { workflowStore, ScoreComplexEntry } from '../../stores/workflow';
+import { workflowStore } from '../../stores/workflow';
 import MoleculeDetailPanel from '../shared/MoleculeDetailPanel';
 import type { DetailScore } from '../shared/MoleculeDetailPanel';
 
@@ -102,16 +102,16 @@ const ScoreStepResults: Component = () => {
     })));
     const outputDir = state().score.outputDir;
     if (!outputDir) return;
-    const csvPath = outputDir.replace(/\/results$/, '') + '/score_results.csv';
+    const csvPath = `${outputDir}/results/score_results.csv`;
     try {
       await api.exportScoreCsv(entriesJson, csvPath);
-      api.openFolder(csvPath);
+      void api.openFolder(csvPath);
     } catch { /* ignore */ }
   };
 
   const handleOpenFolder = () => {
     const dir = state().score.outputDir;
-    if (dir) api.openFolder(dir);
+    if (dir) void api.openFolder(dir);
   };
 
   return (

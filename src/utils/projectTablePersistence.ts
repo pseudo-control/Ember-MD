@@ -1,7 +1,75 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import type { ViewerProjectTableState } from '../stores/workflow';
+import type {
+  ViewerProjectFamily,
+  ViewerProjectRow,
+  ViewerProjectTableState,
+  ViewerQueueItem,
+} from '../stores/workflow';
 
 const TABLE_FILENAME = 'project-table.json';
+
+type PersistedRow = Record<string, unknown> & {
+  id?: string;
+  familyId?: string;
+  label?: string;
+  rowKind?: ViewerProjectRow['rowKind'];
+  jobType?: ViewerProjectRow['jobType'];
+  item?: Record<string, unknown> & {
+    pdbPath?: string;
+    ligandPath?: string;
+    label?: string;
+    type?: ViewerQueueItem['type'];
+  };
+  loadKind?: ViewerProjectTableState['rows'][number]['loadKind'];
+  queueIndex?: number;
+  metrics?: ViewerProjectTableState['rows'][number]['metrics'];
+  trajectoryPath?: string | null;
+  pocketLigandPath?: string | null;
+  pocketSourcePdbPath?: string | null;
+};
+
+type PersistedFamily = Record<string, unknown> & {
+  id?: string;
+  title?: string;
+  jobType?: ViewerProjectTableState['families'][number]['jobType'];
+  collapsed?: boolean;
+  rowIds?: string[];
+  columns?: ViewerProjectTableState['families'][number]['columns'];
+  sortKey?: string | null;
+  sortDirection?: ViewerProjectTableState['families'][number]['sortDirection'];
+  trajectoryPath?: string | null;
+};
+
+const ROW_KINDS = new Set<ViewerProjectRow['rowKind']>([
+  'apo',
+  'holo',
+  'ligand',
+  'prepared-ligand',
+  'pose',
+  'input',
+  'conformer',
+  'initial-complex',
+  'cluster',
+]);
+
+const JOB_TYPES = new Set<ViewerProjectRow['jobType']>([
+  'import',
+  'docking',
+  'conformer',
+  'simulation',
+  'scoring',
+]);
+
+const LOAD_KINDS = new Set<ViewerProjectRow['loadKind']>([
+  'structure',
+  'standalone-ligand',
+  'queue',
+]);
+
+const SORT_DIRECTIONS = new Set<NonNullable<ViewerProjectFamily['sortDirection']>>([
+  'asc',
+  'desc',
+]);
 
 export function serializeProjectTable(table: ViewerProjectTableState): string {
   return JSON.stringify(table);
@@ -21,7 +89,7 @@ export async function deserializeAndValidateProjectTable(
   if (!Array.isArray(data.families) || !Array.isArray(data.rows)) return null;
 
   // Collect all unique paths to check in parallel
-  const rows = data.rows as any[];
+  const rows = data.rows as PersistedRow[];
   const pathSet = new Map<string, boolean>();
   for (const row of rows) {
     if (!row?.id || !row?.item?.pdbPath) continue;
@@ -41,24 +109,70 @@ export async function deserializeAndValidateProjectTable(
   for (const row of rows) {
     if (!row?.id || !row?.item?.pdbPath) continue;
     if (!pathSet.get(row.item.pdbPath)) continue;
+    if (typeof row.familyId !== 'string' || typeof row.label !== 'string') continue;
+    if (!ROW_KINDS.has(row.rowKind as ViewerProjectRow['rowKind'])) continue;
+    if (!JOB_TYPES.has(row.jobType as ViewerProjectRow['jobType'])) continue;
+    if (typeof row.item.label !== 'string') continue;
+    const rowKind = row.rowKind as ViewerProjectRow['rowKind'];
+    const jobType = row.jobType as ViewerProjectRow['jobType'];
     const ligandOk = !row.item.ligandPath || pathSet.get(row.item.ligandPath);
-    validRows.push(ligandOk ? row : { ...row, item: { ...row.item, ligandPath: undefined } });
+    const item: ViewerQueueItem = {
+      pdbPath: row.item.pdbPath,
+      label: row.item.label,
+      ...(ligandOk && row.item.ligandPath ? { ligandPath: row.item.ligandPath } : {}),
+      ...(row.item.type === 'protein' || row.item.type === 'ligand' || row.item.type === 'conformer'
+        ? { type: row.item.type }
+        : {}),
+    };
+    const normalized: ViewerProjectRow = {
+      id: row.id,
+      familyId: row.familyId,
+      label: row.label,
+      rowKind,
+      jobType,
+      item,
+      loadKind: LOAD_KINDS.has(row.loadKind as ViewerProjectRow['loadKind'])
+        ? row.loadKind as ViewerProjectRow['loadKind']
+        : 'structure',
+      ...(typeof row.queueIndex === 'number' ? { queueIndex: row.queueIndex } : {}),
+      metrics: row.metrics && typeof row.metrics === 'object' ? row.metrics : {},
+      ...(typeof row.trajectoryPath === 'string' || row.trajectoryPath === null ? { trajectoryPath: row.trajectoryPath } : {}),
+      ...(typeof row.pocketLigandPath === 'string' || row.pocketLigandPath === null ? { pocketLigandPath: row.pocketLigandPath } : {}),
+      ...(typeof row.pocketSourcePdbPath === 'string' || row.pocketSourcePdbPath === null ? { pocketSourcePdbPath: row.pocketSourcePdbPath } : {}),
+    };
+    validRows.push(normalized);
   }
 
   if (validRows.length === 0) return null;
 
   const validRowIds = new Set(validRows.map((r) => r.id));
 
-  // Prune families — remove dead rowIds, drop empty families
+  // Prune families — remove dead rowIds, drop empty families, default missing fields
   const validFamilies: ViewerProjectTableState['families'] = [];
-  for (const fam of data.families as any[]) {
+  for (const fam of data.families as PersistedFamily[]) {
     if (!fam?.id || !Array.isArray(fam.rowIds)) continue;
     const liveRowIds = fam.rowIds.filter((id: string) => validRowIds.has(id));
     if (liveRowIds.length === 0) continue;
-    validFamilies.push({ ...fam, rowIds: liveRowIds });
+    validFamilies.push({
+      id: fam.id,
+      title: typeof fam.title === 'string' ? fam.title : '',
+      jobType: JOB_TYPES.has(fam.jobType as ViewerProjectFamily['jobType'])
+        ? fam.jobType as ViewerProjectFamily['jobType']
+        : 'docking',
+      collapsed: typeof fam.collapsed === 'boolean' ? fam.collapsed : false,
+      rowIds: liveRowIds,
+      columns: Array.isArray(fam.columns) ? fam.columns : [],
+      sortKey: fam.sortKey ?? null,
+      sortDirection: SORT_DIRECTIONS.has(fam.sortDirection as NonNullable<ViewerProjectFamily['sortDirection']>)
+        ? fam.sortDirection as ViewerProjectFamily['sortDirection']
+        : undefined,
+      trajectoryPath: fam.trajectoryPath ?? null,
+    });
   }
 
   if (validFamilies.length === 0) return null;
+
+  const validFamilyIds = new Set(validFamilies.map((f) => f.id));
 
   const activeRowId = validRowIds.has(data.activeRowId as string)
     ? (data.activeRowId as string)
@@ -68,7 +182,16 @@ export async function deserializeAndValidateProjectTable(
     ? (data.selectedRowIds as string[]).filter((id) => validRowIds.has(id))
     : [];
 
-  return { families: validFamilies, rows: validRows, activeRowId, selectedRowIds };
+  // Filter hiddenFamilyIds against surviving families (prune orphaned refs from deleted families)
+  const hiddenFamilyIds = Array.isArray(data.hiddenFamilyIds)
+    ? (data.hiddenFamilyIds as string[]).filter((id) => validFamilyIds.has(id))
+    : [];
+
+  const hiddenRowIds = Array.isArray(data.hiddenRowIds)
+    ? (data.hiddenRowIds as string[]).filter((id) => validRowIds.has(id))
+    : [];
+
+  return { families: validFamilies, rows: validRows, activeRowId, selectedRowIds, hiddenFamilyIds, hiddenRowIds };
 }
 
 /**

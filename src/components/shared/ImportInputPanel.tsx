@@ -68,7 +68,7 @@ const ImportInputPanel: Component<ImportInputPanelProps> = (props) => (
 
     <button
       class={`btn btn-outline w-full ${props.compact ? 'btn-xs font-semibold' : 'btn-sm'}`}
-      onClick={props.onImport}
+      onClick={() => props.onImport()}
       disabled={props.importDisabled}
     >
       <Show when={props.importLoading} fallback={props.importButtonLabel}>

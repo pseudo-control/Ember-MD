@@ -78,7 +78,7 @@ export const HALOGENS = new Set(['CL', 'BR', 'I']);
 
 /** Collect atom data from an NGL structure within a selection */
 export const collectAtoms = (
-  structure: any, // NGL.Structure
+  structure: NGL.Structure,
   sele: string,
   isProteinSide: boolean,
 ): IxAtom[] => {
@@ -97,9 +97,9 @@ export const collectAtoms = (
       atomname: atom.atomname || '',
       resname: (atom.resname || '').toUpperCase(),
       resno: atom.resno || 0,
-      chainname: (atom as any).chainname || '',
-      isBackbone: isProteinSide ? !!(atom as any).isBackbone : false,
-      aromatic: !!(atom as any).aromatic,
+      chainname: atom.chainname || '',
+      isBackbone: isProteinSide ? atom.isBackbone() : false,
+      aromatic: Boolean(atom.aromatic),
       hasPolarBond,
       bonded,
     });

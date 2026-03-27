@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
 import { Component, Show, createSignal } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
+import { sanitizeConformOutputName } from '../../utils/jobName';
 
 const XrayStepLoad: Component = () => {
   const {
     state,
     setError,
+    setXrayDescriptor,
     setXrayInputDir,
     setXrayScanResult,
     setXrayOutputDir,
@@ -14,6 +16,12 @@ const XrayStepLoad: Component = () => {
   } = workflowStore;
   const api = window.electronAPI;
   const [isScanning, setIsScanning] = createSignal(false);
+  const runFolderPreview = () => {
+    const descriptor = state().xray.descriptor.trim();
+    return descriptor
+      ? `analyzed_xrays-${descriptor}-YYYYMMDD-HHMMSS`
+      : 'analyzed_xrays-YYYYMMDD-HHMMSS';
+  };
 
   const scanDirectory = async (dirPath: string) => {
     setIsScanning(true);
@@ -63,6 +71,22 @@ const XrayStepLoad: Component = () => {
                   {state().xray.inputDir}
                 </Show>
               </div>
+            </div>
+
+            <div class="space-y-2">
+              <label class="block">
+                <div class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Run descriptor</div>
+                <input
+                  type="text"
+                  class="input input-bordered input-sm w-full mt-1 font-mono"
+                  placeholder="optional descriptor"
+                  value={state().xray.descriptor}
+                  onInput={(e) => setXrayDescriptor(sanitizeConformOutputName(e.currentTarget.value))}
+                />
+              </label>
+              <p class="text-[11px] text-base-content/55 font-mono break-all">
+                Run folder: {runFolderPreview()}
+              </p>
             </div>
 
             <div class="flex gap-2">
