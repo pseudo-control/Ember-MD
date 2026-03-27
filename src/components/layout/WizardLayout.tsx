@@ -4,9 +4,10 @@ import { workflowStore, WorkflowMode } from '../../stores/workflow';
 import HelpModal from '../HelpModal';
 import AboutModal from '../AboutModal';
 import { formatJobCountLabel, generateJobName, sanitizeJobName } from '../../utils/jobName';
-import type { ProjectInfo } from '../../../shared/types/ipc';
+import type { JobType, ProjectInfo } from '../../../shared/types/ipc';
 import { theme, toggleTheme } from '../../utils/theme';
 import { checkForUpdate, UpdateInfo } from '../../utils/updateCheck';
+import { loadProjectJob } from '../../utils/projectJobLoader';
 
 interface StepInfo {
   id: string;
@@ -42,14 +43,51 @@ const conformSteps: StepInfo[] = [
 
 const scoreSteps: StepInfo[] = [
   { id: 'score-load', label: 'Load', icon: '1' },
-  { id: 'score-progress', label: 'Analyze', icon: '2' },
+  { id: 'score-progress', label: 'Score', icon: '2' },
   { id: 'score-results', label: 'Results', icon: '3' },
+];
+
+const xraySteps: StepInfo[] = [
+  { id: 'xray-load', label: 'Load', icon: '1' },
+  { id: 'xray-progress', label: 'Analyze', icon: '2' },
+  { id: 'xray-results', label: 'Results', icon: '3' },
+];
+
+const mapSteps: StepInfo[] = [
+  { id: 'map-load', label: 'Load', icon: '1' },
+  { id: 'map-configure', label: 'Configure', icon: '2' },
+  { id: 'map-progress', label: 'Generate', icon: '3' },
+  { id: 'map-results', label: 'Results', icon: '4' },
 ];
 
 const dockStepOrder = dockSteps.map((s) => s.id);
 const mdStepOrder = mdSteps.map((s) => s.id);
 const conformStepOrder = conformSteps.map((s) => s.id);
 const scoreStepOrder = scoreSteps.map((s) => s.id);
+const xrayStepOrder = xraySteps.map((s) => s.id);
+const mapStepOrder = mapSteps.map((s) => s.id);
+const modeTabs: [WorkflowMode, string][] = [
+  ['viewer', 'View'],
+  ['conform', 'MCMM'],
+  ['dock', 'Dock'],
+  ['xray', 'X-ray'],
+  ['score', 'Score'],
+  ['md', 'Simulate'],
+];
+
+const ModeStatusDot: Component<{ running: boolean; phase: string }> = (props) => (
+  <Show when={props.running} fallback={
+    <Show when={props.phase === 'complete'} fallback={
+      <Show when={props.phase === 'error'}>
+        <span class="ml-1 inline-block w-2 h-2 rounded-full bg-error" />
+      </Show>
+    }>
+      <span class="ml-1 inline-block w-2 h-2 rounded-full bg-success" />
+    </Show>
+  }>
+    <span class="ml-1 inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+  </Show>
+);
 
 type PickerView = 'list' | 'rename' | 'delete';
 
@@ -60,10 +98,11 @@ interface WizardLayoutProps {
 const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const {
     state, setMode, setJobName, setProjectReady, setProjectDir,
-    clearViewerSession,
+    clearViewerSession, setScoreStep, setCurrentPhase, clearLogs, setError,
   } = workflowStore;
   const [showHelp, setShowHelp] = createSignal(false);
   const [showAbout, setShowAbout] = createSignal(false);
+  const [showWhatsNew, setShowWhatsNew] = createSignal(false);
   const [updateInfo, setUpdateInfo] = createSignal<UpdateInfo | null>(null);
   const [showUpdateTooltip, setShowUpdateTooltip] = createSignal(false);
   const [copiedBrew, setCopiedBrew] = createSignal(false);
@@ -74,6 +113,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const [projects, setProjects] = createSignal<ProjectInfo[]>([]);
   const [isLoadingProjects, setIsLoadingProjects] = createSignal(true);
   const [newProjectName, setNewProjectName] = createSignal(generateJobName());
+  const [pickerError, setPickerError] = createSignal<string | null>(null);
 
   // Rename/delete state
   const [pickerView, setPickerView] = createSignal<PickerView>('list');
@@ -92,14 +132,38 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
       setProjects(result);
     } catch (err) {
       console.error('Failed to scan projects:', err);
+    } finally {
+      setIsLoadingProjects(false);
     }
-    setIsLoadingProjects(false);
+  };
+
+  const loadHomeDir = async () => {
+    try {
+      setHomeDir(await api.getHomeDir());
+    } catch (err) {
+      console.error('Failed to load home directory:', err);
+    }
   };
 
   onMount(() => {
     loadProjects();
-    api.getHomeDir().then(setHomeDir);
+    loadHomeDir();
     checkForUpdate().then(setUpdateInfo);
+    // Show "What's New" on first launch after update
+    (async () => {
+      try {
+        const [currentVersion, lastSeen] = await Promise.all([
+          api.getAppVersion(),
+          api.getLastSeenVersion(),
+        ]);
+        if (lastSeen && lastSeen !== currentVersion) {
+          setShowWhatsNew(true);
+          setShowAbout(true);
+        }
+        // Always update to current version (first launch or after viewing)
+        await api.setLastSeenVersion(currentVersion);
+      } catch { /* ignore */ }
+    })();
     // Close popover on outside click
     const handleClickAway = (e: MouseEvent) => {
       if (showProjectPopover() && !(e.target as HTMLElement).closest('[data-project-popover]')) {
@@ -112,15 +176,10 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
 
   const handleSelectProject = async (project: ProjectInfo) => {
     console.log(`[Nav] Select project: ${project.name} (${project.runs.length} runs)`);
+    setPickerError(null);
     clearViewerSession();
     setJobName(project.name);
-    // External projects already have a full path; local projects use ensureProject
-    if (project.external && project.path) {
-      setProjectDir(project.path);
-    } else {
-      const result = await api.ensureProject(project.name);
-      if (result.ok) setProjectDir(result.value);
-    }
+    setProjectDir(project.path);
     setProjectReady(true);
   };
 
@@ -128,10 +187,15 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     const name = newProjectName().trim();
     if (!name) return;
     console.log(`[Nav] New project: ${name}`);
+    setPickerError(null);
     clearViewerSession();
-    setJobName(name);
     const result = await api.ensureProject(name);
-    if (result.ok) setProjectDir(result.value);
+    if (!result.ok) {
+      setPickerError(result.error?.message || 'Failed to create project');
+      return;
+    }
+    setJobName(name);
+    setProjectDir(result.value);
     setProjectReady(true);
   };
 
@@ -159,32 +223,70 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     if (dir) api.openProjectFolder(dir);
   };
 
-  const handleMoveProject = async () => {
-    setShowProjectPopover(false);
-    const dir = state().projectDir;
-    const name = state().jobName;
-    if (!dir || !name) return;
-    const result = await api.moveProject(name, dir);
-    if (result.ok) {
-      setProjectDir(result.value);
-    }
-  };
-
   const handleImportExternalProject = async () => {
+    setPickerError(null);
     const result = await api.importExternalProject();
     if (result.ok) {
       const { name, path } = result.value;
+      clearViewerSession();
       setJobName(name);
       setProjectDir(path);
       setProjectReady(true);
+      void loadProjects();
+      return;
+    }
+    if (result.error?.type !== 'USER_CANCELLED') {
+      setPickerError(result.error?.message || 'Failed to import project');
     }
   };
 
   const handleSetHomeDir = async () => {
+    setPickerError(null);
     const result = await api.setHomeDir();
     if (result.ok) {
+      clearViewerSession();
+      setProjectDir(null);
+      setProjectReady(false);
       setHomeDir(result.value);
-      loadProjects();
+      resetPickerView();
+      void loadProjects();
+      return;
+    }
+    if (result.error?.type !== 'USER_CANCELLED') {
+      setPickerError(result.error?.message || 'Failed to set working directory');
+    }
+  };
+
+  const currentImportJobType = (): JobType | null => {
+    switch (state().mode) {
+      case 'viewer':
+      case 'map':
+        return null;
+      case 'dock':
+        return 'docking';
+      case 'md':
+        return 'simulation';
+      case 'conform':
+        return 'conformer';
+      case 'score':
+        return 'scoring';
+      case 'xray':
+        return 'xray';
+    }
+  };
+
+  const handleImportJob = async () => {
+    const projectDir = state().projectDir;
+    const expectedType = currentImportJobType();
+    if (!projectDir || !expectedType) return;
+    setError(null);
+    const result = await api.importProjectJob({ projectDir, expectedType });
+    if (result.ok) {
+      await loadProjectJob(result.value, api);
+      return;
+    }
+    if (result.error?.type !== 'USER_CANCELLED') {
+      setError(result.error?.message || 'Failed to import job');
     }
   };
 
@@ -195,6 +297,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     setRenameError(null);
     setDeleteConfirmText('');
     setDeleteFileCount(null);
+    setPickerError(null);
   };
 
   // Rename flow
@@ -215,7 +318,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
     setRenameError(null);
     setIsProcessing(true);
     try {
-      const result = await api.renameProject(project.name, newName);
+      const result = await api.renameProject(project.path, newName);
       if (result.ok) {
         resetPickerView();
         await loadProjects();
@@ -238,7 +341,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
 
     // Load file count in background
     try {
-      const info = await api.getProjectFileCount(project.name);
+      const info = await api.getProjectFileCount(project.path);
       setDeleteFileCount(info);
     } catch {
       setDeleteFileCount({ fileCount: 0, totalSizeMb: 0 });
@@ -251,7 +354,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
 
     setIsProcessing(true);
     try {
-      const result = await api.deleteProject(project.name);
+      const result = await api.deleteProject(project.path);
       if (result.ok) {
         resetPickerView();
         await loadProjects();
@@ -273,42 +376,45 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   };
 
   const getStepStatus = (stepId: string): 'done' | 'active' | 'pending' => {
-    if (state().mode === 'viewer') {
-      const hasPdb = state().viewer.pdbPath !== null;
-      if (stepId === 'viewer-load') return hasPdb ? 'done' : 'active';
-      if (stepId === 'viewer-view') return hasPdb ? 'active' : 'pending';
-      return 'pending';
+    switch (state().mode) {
+      case 'viewer': {
+        const hasPdb = state().viewer.pdbPath !== null;
+        if (stepId === 'viewer-load') return hasPdb ? 'done' : 'active';
+        if (stepId === 'viewer-view') return hasPdb ? 'active' : 'pending';
+        return 'pending';
+      }
+      case 'dock':
+        return getStepProgressStatus(dockStepOrder, state().dockStep, stepId);
+      case 'conform':
+        return getStepProgressStatus(conformStepOrder, state().conformStep, stepId);
+      case 'score':
+        return getStepProgressStatus(scoreStepOrder, state().scoreStep, stepId);
+      case 'xray':
+        return getStepProgressStatus(xrayStepOrder, state().xrayStep, stepId);
+      case 'map':
+        return getStepProgressStatus(mapStepOrder, state().map.step, stepId);
+      case 'md':
+        return getStepProgressStatus(mdStepOrder, state().mdStep, stepId);
     }
-    if (state().mode === 'dock') {
-      const currentStep = state().dockStep;
-      const currentIndex = dockStepOrder.indexOf(currentStep);
-      const stepIndex = dockStepOrder.indexOf(stepId);
-      if (stepIndex < currentIndex) return 'done';
-      if (stepIndex === currentIndex) return 'active';
-      return 'pending';
+  };
+
+  const currentSteps = (): StepInfo[] => {
+    switch (state().mode) {
+      case 'viewer':
+        return viewerSteps;
+      case 'dock':
+        return dockSteps;
+      case 'conform':
+        return conformSteps;
+      case 'score':
+        return scoreSteps;
+      case 'xray':
+        return xraySteps;
+      case 'map':
+        return mapSteps;
+      case 'md':
+        return mdSteps;
     }
-    if (state().mode === 'conform') {
-      const currentStep = state().conformStep;
-      const currentIndex = conformStepOrder.indexOf(currentStep);
-      const stepIndex = conformStepOrder.indexOf(stepId);
-      if (stepIndex < currentIndex) return 'done';
-      if (stepIndex === currentIndex) return 'active';
-      return 'pending';
-    }
-    if (state().mode === 'score') {
-      const currentStep = state().scoreStep;
-      const currentIndex = scoreStepOrder.indexOf(currentStep);
-      const stepIndex = scoreStepOrder.indexOf(stepId);
-      if (stepIndex < currentIndex) return 'done';
-      if (stepIndex === currentIndex) return 'active';
-      return 'pending';
-    }
-    const currentStep = state().mdStep;
-    const currentIndex = mdStepOrder.indexOf(currentStep);
-    const stepIndex = mdStepOrder.indexOf(stepId);
-    if (stepIndex < currentIndex) return 'done';
-    if (stepIndex === currentIndex) return 'active';
-    return 'pending';
   };
 
   const canSwitchMode = () => {
@@ -318,6 +424,12 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
   const handleModeSwitch = (newMode: WorkflowMode) => {
     if (canSwitchMode() && newMode !== state().mode) {
       console.log(`[Nav] Mode switch: ${state().mode} → ${newMode}`);
+      if (newMode === 'score') {
+        setScoreStep('score-load');
+        setCurrentPhase('idle');
+        clearLogs();
+        setError(null);
+      }
       setMode(newMode);
     }
   };
@@ -365,12 +477,13 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                 class="btn btn-ghost btn-sm btn-square join-item relative"
                 onClick={() => {
                   if (updateInfo()) {
-                    setShowUpdateTooltip(v => !v);
+                    setShowWhatsNew(true);
+                    setShowAbout(true);
                   } else {
                     setShowAbout(true);
                   }
                 }}
-                title={updateInfo() ? `Update available: ${updateInfo()!.version}` : 'About Ember'}
+                title={updateInfo() ? `See what's new in Ember ${updateInfo()!.version}` : 'About Ember'}
               >
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -382,10 +495,10 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
               <Show when={showUpdateTooltip() && updateInfo()}>
                 <div class="absolute top-full right-0 mt-2 z-50 w-72 bg-base-200 border border-base-300 rounded-lg shadow-lg p-3">
                   <div class="text-xs font-semibold mb-1.5">
-                    Update available ({updateInfo()!.version})
+                    See what's new in Ember {updateInfo()!.version}
                   </div>
                   <div class="text-[10px] text-base-content/70 mb-2">
-                    Paste this into your terminal to update:
+                    Update via Homebrew:
                   </div>
                   <button
                     class="w-full text-left font-mono text-[11px] bg-base-300 rounded px-2.5 py-1.5 hover:bg-base-content/10 transition-colors cursor-pointer select-all"
@@ -428,31 +541,20 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
             </button>
           </div>
           <div class="tabs tabs-boxed bg-base-300 p-0.5">
-            {([
-              ['viewer', 'View'],
-              ['score', 'Analyze X-ray'],
-              ['conform', 'MCMM'],
-              ['dock', 'Dock'],
-              ['md', 'Dynamics'],
-            ] as [WorkflowMode, string][]).map(([mode, label]) => (
-              <button
-                class={`tab tab-sm ${state().mode === mode ? 'tab-active' : ''}`}
-                onClick={() => handleModeSwitch(mode)}
-                disabled={!canSwitchMode()}
-              >
-                {label}
-                <Show when={state().runningMode === mode && state().mode !== mode}>
-                  {(() => {
-                    const phase = state().currentPhase;
-                    const running = state().isRunning;
-                    if (running) return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />;
-                    if (phase === 'complete') return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-success" />;
-                    if (phase === 'error') return <span class="ml-1 inline-block w-2 h-2 rounded-full bg-error" />;
-                    return null;
-                  })()}
-                </Show>
-              </button>
-            ))}
+            <For each={modeTabs}>
+              {([mode, label]) => (
+                <button
+                  class={`tab tab-xs min-h-8 px-2.5 font-semibold tracking-tight ${state().mode === mode ? 'tab-active' : ''}`}
+                  onClick={() => handleModeSwitch(mode)}
+                  disabled={!canSwitchMode()}
+                >
+                  {label}
+                  <Show when={state().runningMode === mode && state().mode !== mode}>
+                    <ModeStatusDot running={state().isRunning} phase={state().currentPhase} />
+                  </Show>
+                </button>
+              )}
+            </For>
           </div>
         </div>
 
@@ -486,17 +588,6 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                   </button>
                   <button
                     class="btn btn-ghost btn-xs w-full justify-start gap-2 font-normal"
-                    onClick={handleMoveProject}
-                    disabled={state().isRunning}
-                  >
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                    </svg>
-                    Move Project...
-                  </button>
-                  <div class="divider my-0.5 h-0" />
-                  <button
-                    class="btn btn-ghost btn-xs w-full justify-start gap-2 font-normal"
                     onClick={handleSwitchProject}
                     disabled={state().isRunning}
                   >
@@ -511,103 +602,30 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
           </div>
         </Show>
 
-        {/* Right: Step indicators (all modes) */}
-        <div class="flex-shrink-0">
-        {/* Step indicators — dock mode */}
-        <Show when={state().mode === 'dock' && state().projectReady}>
-          <ul class="steps steps-horizontal">
-            <For each={dockSteps}>{(step) => {
-              const status = () => getStepStatus(step.id);
-              return (
-                <li
-                  class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
-                  data-content={status() === 'done' ? '✓' : step.icon}
-                >
-                  <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            }}</For>
-          </ul>
-        </Show>
-
-        {/* Step indicators — Conform mode */}
-        <Show when={state().mode === 'conform' && state().projectReady}>
-          <ul class="steps steps-horizontal">
-            <For each={conformSteps}>{(step) => {
-              const status = () => getStepStatus(step.id);
-              return (
-                <li
-                  class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
-                  data-content={status() === 'done' ? '✓' : step.icon}
-                >
-                  <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            }}</For>
-          </ul>
-        </Show>
-
-        {/* Step indicators — MD mode */}
-        <Show when={state().mode === 'md' && state().projectReady}>
-          <ul class="steps steps-horizontal">
-            <For each={mdSteps}>{(step) => {
-              const status = () => getStepStatus(step.id);
-              return (
-                <li
-                  class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
-                  data-content={status() === 'done' ? '✓' : step.icon}
-                >
-                  <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            }}</For>
-          </ul>
-        </Show>
-
-        {/* Step indicators — Score mode */}
-        <Show when={state().mode === 'score' && state().projectReady}>
-          <ul class="steps steps-horizontal">
-            <For each={scoreSteps}>{(step) => {
-              const status = () => getStepStatus(step.id);
-              return (
-                <li
-                  class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
-                  data-content={status() === 'done' ? '✓' : step.icon}
-                >
-                  <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            }}</For>
-          </ul>
-        </Show>
-
-        {/* Step indicators — View mode */}
-        <Show when={state().mode === 'viewer' && state().projectReady}>
-          <ul class="steps steps-horizontal">
-            <For each={viewerSteps}>{(step) => {
-              const status = () => getStepStatus(step.id);
-              return (
-                <li
-                  class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
-                  data-content={status() === 'done' ? '✓' : step.icon}
-                >
-                  <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            }}</For>
-          </ul>
-        </Show>
-
+        {/* Right: mode actions + step indicators */}
+        <div class="flex-shrink-0 flex items-center gap-3">
+          <Show when={state().projectReady && currentImportJobType()}>
+            <button class="btn btn-ghost btn-xs" onClick={handleImportJob}>
+              Import Job...
+            </button>
+          </Show>
+          <Show when={state().projectReady}>
+            <ul class="steps steps-horizontal">
+              <For each={currentSteps()}>{(step) => {
+                const status = () => getStepStatus(step.id);
+                return (
+                  <li
+                    class={`step step-sm ${status() === 'done' || status() === 'active' ? 'step-primary' : ''}`}
+                    data-content={status() === 'done' ? '✓' : step.icon}
+                  >
+                    <span class={`text-xs ${status() === 'active' ? 'font-semibold' : 'text-base-content/90'}`}>
+                      {step.label}
+                    </span>
+                  </li>
+                );
+              }}</For>
+            </ul>
+          </Show>
         </div>
       </header>
 
@@ -633,6 +651,12 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                       <p class="text-sm text-base-content/60">GPU-accelerated molecular dynamics</p>
                     </div>
 
+                    <Show when={pickerError()}>
+                      <div class="alert alert-error alert-soft text-sm mb-4">
+                        <span>{pickerError()}</span>
+                      </div>
+                    </Show>
+
                     {/* Recent projects */}
                     <Show when={projects().length > 0}>
                       <p class="text-xs text-base-content/70 font-semibold uppercase tracking-wider mb-2">Recent Projects</p>
@@ -647,9 +671,14 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                                 <svg class="w-5 h-5 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                                 </svg>
-                                <div class="flex-1 min-w-0 flex items-baseline gap-1.5">
-                                  <span class="text-sm font-semibold truncate">{project.name}</span>
-                                  <span class="text-xs text-base-content/50 flex-shrink-0">({formatJobCountLabel(project.runs.length)})</span>
+                                <div class="flex-1 min-w-0">
+                                  <div class="flex items-baseline gap-1.5 min-w-0">
+                                    <span class="text-sm font-semibold truncate">{project.name}</span>
+                                    <span class="text-xs text-base-content/50 flex-shrink-0">({formatJobCountLabel(project.runs.length)})</span>
+                                  </div>
+                                  <p class="text-[10px] text-base-content/45 font-mono truncate mt-0.5">
+                                    {project.path}
+                                  </p>
                                 </div>
                                 <span class="text-xs text-base-content/60 flex-shrink-0 mr-1">
                                   {formatDate(project.lastModified)}
@@ -723,9 +752,12 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                           Create
                         </button>
                       </div>
+                      <p class="text-[9px] text-base-content/35 font-mono truncate mt-1.5 px-0.5">
+                        Saves to: {homeDir() || 'No working directory'}
+                      </p>
                     </div>
 
-                    {/* Import + Home Directory */}
+                    {/* Import + Working Directory */}
                     <div class="border-t border-base-300 pt-2 mt-2 space-y-1">
                       <button
                         class="btn btn-ghost btn-xs w-full justify-start gap-2 text-base-content/60 hover:text-base-content"
@@ -743,7 +775,7 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4" />
                         </svg>
-                        Set Home Directory...
+                        Set Working Directory...
                       </button>
                       <p class="text-[9px] text-base-content/40 font-mono truncate px-1">{homeDir()}</p>
                     </div>
@@ -839,11 +871,24 @@ const WizardLayout: Component<WizardLayoutProps> = (props) => {
       {/* About Modal */}
       <AboutModal
         isOpen={showAbout()}
-        onClose={() => setShowAbout(false)}
+        onClose={() => { setShowAbout(false); setShowWhatsNew(false); }}
         updateInfo={updateInfo()}
+        showWhatsNew={showWhatsNew()}
       />
     </div>
   );
 };
 
 export default WizardLayout;
+
+function getStepProgressStatus(
+  stepOrder: string[],
+  currentStep: string,
+  stepId: string,
+): 'done' | 'active' | 'pending' {
+  const currentIndex = stepOrder.indexOf(currentStep);
+  const stepIndex = stepOrder.indexOf(stepId);
+  if (stepIndex < currentIndex) return 'done';
+  if (stepIndex === currentIndex) return 'active';
+  return 'pending';
+}

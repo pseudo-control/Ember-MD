@@ -5,6 +5,8 @@
     "module": "CommonJS",
     "moduleResolution": "node",
     "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
     "outDir": "./electron-dist",
     "rootDir": ".",
     "esModuleInterop": true,

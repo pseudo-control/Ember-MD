@@ -1,8 +1,10 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, For, createSignal, createMemo, createEffect, onMount, onCleanup, batch } from 'solid-js';
+import { Component, Show, For, createSignal, createMemo, createEffect, on, onMount, onCleanup, batch } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
 import { buildDockingProjectTable, buildDockingViewerQueue } from '../../utils/viewerQueue';
 import path from 'path';
+import type { MoleculeDetailsResult } from '../../../shared/types/ipc';
+import type { DockResult } from '../../../shared/types/dock';
 
 type SortField = 'ligandName' | 'vinaAffinity' | 'xtbEnergyKcal' | 'cordialPHighAffinity' | 'cordialPVeryHighAffinity' | 'qed';
 type SortDirection = 'asc' | 'desc';
@@ -10,7 +12,7 @@ type SortDirection = 'asc' | 'desc';
 const PAGE_SIZE = 25;
 
 const DockStepResults: Component = () => {
-  const { state, openViewerSession, addViewerProjectFamily, setMode, setMdStep, setMdReceptorPdb, setMdLigandSdf, setMdLigandName, setMdPdbPath, setMdConfig, resetDock } = workflowStore;
+  const { state, openViewerSession, addViewerProjectFamily, setMode, setMdStep, setMdReceptorPdb, setMdLigandSdf, setMdLigandName, setMdPdbPath, resetDock } = workflowStore;
   const api = window.electronAPI;
 
   const results = () => state().dock.results;
@@ -20,16 +22,31 @@ const DockStepResults: Component = () => {
   const [sortDirection, setSortDirection] = createSignal<SortDirection>(cordialScored() ? 'desc' : 'asc');
   const [selectedIndex, setSelectedIndex] = createSignal<number | null>(0);
   const [currentPage, setCurrentPage] = createSignal(0);
-  const [bestOnly, setBestOnly] = createSignal(false);
+  const [bestOnly] = createSignal(false);
   const [thumbnailUrl, setThumbnailUrl] = createSignal<string | null>(null);
   const dockedResults = createMemo(() => results().filter(r => !r.isReferencePose));
   const referenceCount = createMemo(() => results().filter(r => r.isReferencePose).length);
   const uniqueLigandCount = createMemo(() => new Set(dockedResults().map(r => r.ligandName)).size);
   const outputDir = () => state().dock.dockingOutputDir;
-  const scoreValue = (row: any) => row.vinaAffinity ?? row.vinaScoreOnlyAffinity ?? null;
-  const formatScore = (row: any) => {
+  const scoreValue = (row: DockResult) => row.vinaAffinity ?? row.vinaScoreOnlyAffinity ?? null;
+  const formatScore = (row: DockResult) => {
     const value = scoreValue(row);
     return value == null ? '-' : value.toFixed(1);
+  };
+  const sortableMetricValue = (
+    row: DockResult,
+    field: Exclude<SortField, 'ligandName' | 'vinaAffinity'>,
+  ): number => {
+    switch (field) {
+      case 'xtbEnergyKcal':
+        return row.xtbEnergyKcal ?? 0;
+      case 'cordialPHighAffinity':
+        return row.cordialPHighAffinity ?? 0;
+      case 'cordialPVeryHighAffinity':
+        return row.cordialPVeryHighAffinity ?? 0;
+      case 'qed':
+        return row.qed ?? 0;
+    }
   };
 
   const receptorPdb = () => {
@@ -69,9 +86,7 @@ const DockStepResults: Component = () => {
         const vb = scoreValue(b) ?? Number.POSITIVE_INFINITY;
         cmp = va - vb;
       } else {
-        const va = (a as any)[field] ?? 0;
-        const vb = (b as any)[field] ?? 0;
-        cmp = (va as number) - (vb as number);
+        cmp = sortableMetricValue(a, field) - sortableMetricValue(b, field);
       }
       return dir === 'asc' ? cmp : -cmp;
     });
@@ -93,19 +108,30 @@ const DockStepResults: Component = () => {
   });
 
   // Generate thumbnail when selection changes
-  // eslint-disable-next-line solid/reactivity
-  createEffect(async () => {
-    const pose = selectedPose();
-    if (!pose) {
+  createEffect(on(
+    () => selectedPose()?.outputSdf,
+    async (sdfPath) => {
+      if (!sdfPath) { setThumbnailUrl(null); return; }
       setThumbnailUrl(null);
-      return;
-    }
-    setThumbnailUrl(null);
-    const url = await api.generateThumbnail(pose.outputSdf);
-    if (selectedPose()?.outputSdf === pose.outputSdf) {
-      setThumbnailUrl(url);
-    }
-  });
+      const url = await api.generateThumbnail(sdfPath);
+      if (selectedPose()?.outputSdf === sdfPath) setThumbnailUrl(url);
+    },
+  ));
+
+  // Lazy-load RMSD + centroid for selected pose
+  const [poseMolDetails, setPoseMolDetails] = createSignal<MoleculeDetailsResult | null>(null);
+  createEffect(on(
+    () => selectedPose()?.outputSdf,
+    async (sdfPath) => {
+      setPoseMolDetails(null);
+      if (!sdfPath) return;
+      try {
+        const refPath = state().dock.referenceLigandPath || undefined;
+        const result = await api.getMoleculeDetails(sdfPath, refPath);
+        if (result.ok) setPoseMolDetails(result.value);
+      } catch { /* ignore */ }
+    },
+  ));
 
   const selectIndex = (idx: number) => {
     setSelectedIndex(idx);
@@ -172,7 +198,7 @@ const DockStepResults: Component = () => {
 
   const handleOpenFolder = () => {
     const dir = outputDir();
-    if (dir) api.openFolder(dir);
+    if (dir) void api.openFolder(dir);
   };
 
   const handleNewDocking = () => {
@@ -199,10 +225,6 @@ const DockStepResults: Component = () => {
     const projectTable = buildDockingProjectTable({
       familyId: `dock:${state().jobName || 'current'}`,
       title: outputDir()?.split('/').pop() || 'Docking job',
-      receptorPdb: viewerReceptor,
-      holoPdb: state().dock.receptorPdbPath,
-      preparedLigandPath: state().dock.preparedLigandPath || null,
-      referenceLigandPath: state().dock.referenceLigandPath,
       poses: allResults,
       poseQueue: queue,
       selectedQueueIndex: selIdx !== null && selIdx >= 0 ? selIdx : 0,
@@ -432,6 +454,18 @@ const DockStepResults: Component = () => {
                     <span class="text-base-content/60">QED</span>
                     <span class="font-mono font-semibold">{pose().qed.toFixed(2)}</span>
                   </div>
+                  <Show when={poseMolDetails()?.rmsd != null}>
+                    <div class="flex justify-between text-xs">
+                      <span class="text-base-content/60">RMSD</span>
+                      <span class="font-mono font-semibold">{poseMolDetails()!.rmsd!.toFixed(2)} A</span>
+                    </div>
+                  </Show>
+                  <Show when={poseMolDetails()?.centroid != null}>
+                    <div class="flex justify-between text-xs">
+                      <span class="text-base-content/60">Centroid</span>
+                      <span class="font-mono font-semibold text-[10px]">({poseMolDetails()!.centroid!.x.toFixed(1)}, {poseMolDetails()!.centroid!.y.toFixed(1)}, {poseMolDetails()!.centroid!.z.toFixed(1)})</span>
+                    </div>
+                  </Show>
                 </div>
 
                 {/* Actions */}

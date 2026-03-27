@@ -5,7 +5,7 @@ import { workflowStore } from '../../stores/workflow';
 import { useMdOutput } from '../../hooks/useElectronApi';
 import { MDStage } from '../../../shared/types/md';
 import { buildMdRunFolderName, estimateChargeTime } from '../../utils/jobName';
-import { projectPaths } from '../../utils/projectPaths';
+import { projectPathsFromProjectDir } from '../../utils/projectPaths';
 import TerminalOutput from '../shared/TerminalOutput';
 
 interface StageInfo {
@@ -41,6 +41,7 @@ const MDStepProgress: Component = () => {
     setMdClusteringResultsFromIpc,
     setMdClusterScores,
     setMdTorsionAnalysis,
+    setMdOutputDir,
     setIsRunning,
     setIsPaused,
     setCurrentPhase,
@@ -52,6 +53,20 @@ const MDStepProgress: Component = () => {
   const [productionNs, setProductionNs] = createSignal<{ current: number; total: number; nsPerDay?: number; etaSeconds?: number; timestamp?: string } | null>(null);
   const [chargeEstimate, setChargeEstimate] = createSignal<string | null>(null);
   const [showPrepHint, setShowPrepHint] = createSignal(false);
+
+  // Pause/resume transition state
+  const [pauseTransition, setPauseTransition] = createSignal<'idle' | 'pausing' | 'resuming'>('idle');
+  let lastOutputTime = Date.now();
+  let awaitingResume = false;
+
+  // Stop modal state
+  const [showStopModal, setShowStopModal] = createSignal(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = createSignal(false);
+  const [isStopping, setIsStopping] = createSignal(false);
+
+  // Extend state
+  const [extendAmount, setExtendAmount] = createSignal(5);
+  const [isExtending, setIsExtending] = createSignal(false);
 
   // After 8s in building/parameterizing, show a "this is normal" hint
   let prepHintTimer: ReturnType<typeof setTimeout> | undefined;
@@ -71,6 +86,14 @@ const MDStepProgress: Component = () => {
   // Parse progress from MD output
   useMdOutput((data) => {
     appendLog(data.data);
+    lastOutputTime = Date.now();
+
+    // If we're waiting for resume confirmation, first PROGRESS line confirms it
+    if (awaitingResume && data.data.includes('PROGRESS:')) {
+      awaitingResume = false;
+      setIsPaused(false);
+      setPauseTransition('idle');
+    }
 
     // Parse PROGRESS:stage:value lines
     // Production format: PROGRESS:production:1.5/10.0 (current_ns/total_ns)
@@ -149,7 +172,7 @@ const MDStepProgress: Component = () => {
       setMdResult(mdResult);
 
       // Auto-trigger clustering + scoring + report
-      runPostSimulation(mdResult.systemPdbPath, trajectoryPath, outputDir);
+      void runPostSimulation(mdResult.systemPdbPath, trajectoryPath, outputDir);
     }
 
     // Parse post-simulation scoring progress
@@ -303,10 +326,14 @@ const MDStepProgress: Component = () => {
     setMdStageProgress(0);
 
     // Use global job name as project folder, run folder inside simulations/
-    const globalJobName = state().jobName.trim();
-    const defaultDir = await api.getDefaultOutputDir();
-    const baseOutputDir = state().customOutputDir || defaultDir;
-    const paths = projectPaths(baseOutputDir, globalJobName);
+    const projectDir = state().projectDir;
+    if (!projectDir) {
+      setError('No project selected');
+      setCurrentPhase('error');
+      setIsRunning(false);
+      return;
+    }
+    const paths = projectPathsFromProjectDir(projectDir);
 
     const compoundId = state().md.config.compoundId?.trim() || '';
     const runFolder = buildMdRunFolderName({
@@ -314,6 +341,7 @@ const MDStepProgress: Component = () => {
       temperatureK: state().md.config.temperatureK,
       productionNs: state().md.config.productionNs,
       compoundId,
+      inputMode: state().md.inputMode,
     });
 
     // Deduplicate: append _run2, _run3, etc. if folder exists
@@ -324,6 +352,7 @@ const MDStepProgress: Component = () => {
       finalRunFolder = `${runFolder}_run${n}`;
     }
     const outputDir = paths.simulations(finalRunFolder).root;
+    setMdOutputDir(outputDir);
 
     try {
       console.log(`[MD] Starting simulation: ${state().md.config.forceFieldPreset}, ${state().md.config.productionNs}ns → ${outputDir}`);
@@ -354,9 +383,10 @@ const MDStepProgress: Component = () => {
   };
 
   onMount(() => {
-    if (!state().isRunning && !hasStarted()) {
+    const phase = state().currentPhase;
+    if (!state().isRunning && !hasStarted() && phase !== 'complete' && phase !== 'error') {
       setHasStarted(true);
-      runSimulation();
+      void runSimulation();
     }
   });
 
@@ -430,15 +460,25 @@ const MDStepProgress: Component = () => {
           {state().isRunning && (
             <>
               <Show
-                when={!state().isPaused}
+                when={!state().isPaused && pauseTransition() !== 'pausing'}
                 fallback={
                   <button
                     class="btn btn-circle btn-xs btn-info"
                     title="Resume"
+                    disabled={pauseTransition() !== 'idle'}
                     onClick={async () => {
+                      setPauseTransition('resuming');
+                      awaitingResume = true;
                       await window.electronAPI.resumeMdSimulation();
-                      setIsPaused(false);
                       appendLog('\n--- Simulation resumed ---\n');
+                      // Fallback: if no PROGRESS line arrives within 2s, assume resumed
+                      setTimeout(() => {
+                        if (awaitingResume) {
+                          awaitingResume = false;
+                          setIsPaused(false);
+                          setPauseTransition('idle');
+                        }
+                      }, 2000);
                     }}
                   >
                     <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -450,10 +490,28 @@ const MDStepProgress: Component = () => {
                 <button
                   class="btn btn-circle btn-xs btn-ghost"
                   title="Pause"
+                  disabled={pauseTransition() !== 'idle'}
                   onClick={async () => {
+                    setPauseTransition('pausing');
                     await window.electronAPI.pauseMdSimulation();
-                    setIsPaused(true);
                     appendLog('\n--- Simulation paused ---\n');
+                    // Confirm pause by detecting output silence (300ms no new output)
+                    const checkPaused = () => {
+                      if (Date.now() - lastOutputTime >= 300) {
+                        setIsPaused(true);
+                        setPauseTransition('idle');
+                      } else {
+                        setTimeout(checkPaused, 100);
+                      }
+                    };
+                    // Fallback: 2s timeout forces state regardless
+                    setTimeout(() => {
+                      if (pauseTransition() === 'pausing') {
+                        setIsPaused(true);
+                        setPauseTransition('idle');
+                      }
+                    }, 2000);
+                    setTimeout(checkPaused, 300);
                   }}
                 >
                   <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -464,13 +522,7 @@ const MDStepProgress: Component = () => {
               <button
                 class="btn btn-circle btn-xs btn-ghost text-error"
                 title="Stop"
-                onClick={async () => {
-                  await window.electronAPI.cancelMdSimulation();
-                  setIsRunning(false);
-                  setIsPaused(false);
-                  setCurrentPhase('idle');
-                  appendLog('\n--- Simulation cancelled by user ---\n');
-                }}
+                onClick={() => setShowStopModal(true)}
               >
                 <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M6 6h12v12H6z" />
@@ -478,10 +530,16 @@ const MDStepProgress: Component = () => {
               </button>
             </>
           )}
-          {state().isRunning && !state().isPaused && (
+          {state().isRunning && pauseTransition() === 'pausing' && (
+            <span class="badge badge-warning badge-sm animate-pulse">Pausing...</span>
+          )}
+          {state().isRunning && pauseTransition() === 'resuming' && (
+            <span class="badge badge-info badge-sm animate-pulse">Resuming...</span>
+          )}
+          {state().isRunning && !state().isPaused && pauseTransition() === 'idle' && (
             <span class="loading loading-spinner loading-sm text-primary" />
           )}
-          {state().isPaused && (
+          {state().isPaused && pauseTransition() === 'idle' && (
             <span class="badge badge-warning badge-sm">Paused</span>
           )}
           {state().currentPhase === 'complete' && (
@@ -586,6 +644,35 @@ const MDStepProgress: Component = () => {
             </Show>
           </div>
         </Show>
+        <Show when={state().isRunning && state().md.currentStage === 'production' && productionNs()}>
+          <div class="flex items-center gap-2 mt-1.5">
+            <span class="text-[10px] text-base-content/50">Extend:</span>
+            <input
+              type="number"
+              class="input input-xs input-bordered w-16 text-xs"
+              min={0.1}
+              step={1}
+              value={extendAmount()}
+              onInput={(e) => setExtendAmount(parseFloat(e.currentTarget.value) || 1)}
+            />
+            <span class="text-[10px] text-base-content/50">ns</span>
+            <button
+              class="btn btn-xs btn-outline btn-primary"
+              disabled={isExtending() || extendAmount() <= 0}
+              onClick={async () => {
+                const prod = productionNs();
+                if (!prod) return;
+                setIsExtending(true);
+                const newTotal = prod.total + extendAmount();
+                await window.electronAPI.extendMdSimulation(newTotal);
+                appendLog(`\n--- Extended simulation to ${newTotal.toFixed(1)} ns ---\n`);
+                setIsExtending(false);
+              }}
+            >
+              +{extendAmount()} ns
+            </button>
+          </div>
+        </Show>
       </div>
 
       {/* Error message */}
@@ -626,13 +713,134 @@ const MDStepProgress: Component = () => {
               clearLogs();
               setError(null);
               setHasStarted(false);
-              runSimulation();
+              void runSimulation();
             }}
           >
             Retry
           </button>
         )}
       </div>
+
+      {/* Stop confirmation modal */}
+      <Show when={showStopModal()}>
+        <div class="modal modal-open">
+          <div class="modal-box max-w-sm">
+            <h3 class="font-bold text-sm mb-3">Stop Simulation?</h3>
+
+            <Show when={!showDiscardConfirm()}>
+              <Show when={state().md.currentStage === 'production'}>
+                <p class="text-xs text-base-content/70 mb-3">
+                  The trajectory written so far can be analyzed for partial results.
+                </p>
+                <button
+                  class="btn btn-primary btn-sm w-full mb-2"
+                  disabled={isStopping()}
+                  onClick={async () => {
+                    setIsStopping(true);
+                    // Resume if paused — macOS won't deliver SIGTERM to a SIGSTOP'd process
+                    if (state().isPaused) {
+                      await window.electronAPI.resumeMdSimulation();
+                    }
+                    await window.electronAPI.cancelMdSimulation();
+                    appendLog('\n--- Simulation stopped: collecting partial results ---\n');
+                    setIsRunning(false);
+                    setIsPaused(false);
+                    setShowStopModal(false);
+                    setIsStopping(false);
+
+                    // Collect results from partial trajectory
+                    const outputDir = state().md.outputDir;
+                    if (outputDir) {
+                      const systemPdb = path.join(outputDir, 'system.pdb');
+                      const trajectory = path.join(outputDir, 'trajectory.dcd');
+                      const [sysExists, trajExists] = await Promise.all([
+                        api.fileExists(systemPdb),
+                        api.fileExists(trajectory),
+                      ]);
+
+                      if (sysExists && trajExists) {
+                        const mdResult = {
+                          systemPdbPath: systemPdb,
+                          trajectoryPath: trajectory,
+                          equilibratedPdbPath: path.join(outputDir, 'equilibrated.pdb'),
+                          finalPdbPath: '',
+                          energyCsvPath: path.join(outputDir, 'energy.csv'),
+                        };
+                        setMdResult(mdResult);
+                        void runPostSimulation(mdResult.systemPdbPath, trajectory, outputDir);
+                      } else {
+                        setCurrentPhase('idle');
+                      }
+                    } else {
+                      setCurrentPhase('idle');
+                    }
+                  }}
+                >
+                  Collect Results
+                </button>
+              </Show>
+
+              <Show when={state().md.currentStage !== 'production'}>
+                <p class="text-xs text-base-content/70 mb-3">
+                  No production data has been written yet.
+                </p>
+              </Show>
+
+              <button
+                class="btn btn-error btn-sm w-full mb-2"
+                disabled={isStopping()}
+                onClick={() => setShowDiscardConfirm(true)}
+              >
+                Discard
+              </button>
+
+              <div class="modal-action">
+                <button class="btn btn-sm" onClick={() => { setShowStopModal(false); setShowDiscardConfirm(false); }}>
+                  Cancel
+                </button>
+              </div>
+            </Show>
+
+            <Show when={showDiscardConfirm()}>
+              <p class="text-sm text-error mb-3">
+                Are you sure? All simulation data will be deleted.
+              </p>
+              <div class="modal-action">
+                <button class="btn btn-sm" onClick={() => setShowDiscardConfirm(false)}>
+                  Back
+                </button>
+                <button
+                  class="btn btn-error btn-sm"
+                  disabled={isStopping()}
+                  onClick={async () => {
+                    setIsStopping(true);
+                    if (state().isPaused) {
+                      await window.electronAPI.resumeMdSimulation();
+                    }
+                    await window.electronAPI.cancelMdSimulation();
+                    appendLog('\n--- Simulation discarded ---\n');
+
+                    const outputDir = state().md.outputDir;
+                    if (outputDir) {
+                      await window.electronAPI.deleteDirectory(outputDir);
+                    }
+
+                    setIsRunning(false);
+                    setIsPaused(false);
+                    setCurrentPhase('idle');
+                    setShowStopModal(false);
+                    setShowDiscardConfirm(false);
+                    setIsStopping(false);
+                  }}
+                >
+                  Delete Run
+                </button>
+              </div>
+            </Show>
+          </div>
+          <div class="modal-backdrop" onClick={() => { setShowStopModal(false); setShowDiscardConfirm(false); }} />
+        </div>
+      </Show>
     </div>
   );
 };

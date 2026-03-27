@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, createMemo, createSignal, onCleanup, For } from 'solid-js';
+import { Component, Show, createMemo, createSignal, onCleanup, onMount, For } from 'solid-js';
 import { workflowStore } from '../../stores/workflow';
-import { DockMolecule, LigandSource } from '../../../shared/types/dock';
-import { projectPaths, DockingPaths } from '../../utils/projectPaths';
+import { DockMolecule } from '../../../shared/types/dock';
+import { projectPathsFromProjectDir, DockingPaths, ProjectPaths } from '../../utils/projectPaths';
 import { buildDockFolderName } from '../../utils/jobName';
 import ImportInputPanel from '../shared/ImportInputPanel';
 import DropZone from '../shared/DropZone';
@@ -17,7 +17,6 @@ const DockStepLoad: Component = () => {
     setDockReferenceLigandId,
     setDockReferenceLigandPath,
     setDockDetectedLigands,
-    setDockLigandSource,
     setDockLigandSdfPaths,
     setDockLigandMolecules,
     setError,
@@ -30,18 +29,15 @@ const DockStepLoad: Component = () => {
   const [statusText, setStatusText] = createSignal<string | null>(null);
   const [pdbIdText, setPdbIdText] = createSignal('');
   const [receptorThumbnail, setReceptorThumbnail] = createSignal<string | null>(null);
-  const [structureFilePaths, setStructureFilePaths] = createSignal<string[]>([]);
-  const [csvFilePath, setCsvFilePath] = createSignal<string | null>(null);
   const [smilesText, setSmilesText] = createSignal('');
   const [showCancelConfirm, setShowCancelConfirm] = createSignal(false);
 
-  // Subscribe to live prep progress from main process
-  const cleanupPrepProgress = api.onPrepProgress((message: string) => {
-    if (isPreparing()) {
+  onMount(() => {
+    const cleanupPrepProgress = api.onPrepProgress((message: string) => {
       setStatusText(`Preparing receptor: ${message}`);
-    }
+    });
+    onCleanup(cleanupPrepProgress);
   });
-  onCleanup(cleanupPrepProgress);
 
   const detectedSmiles = createMemo(() => {
     const lines = smilesText().split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -54,10 +50,14 @@ const DockStepLoad: Component = () => {
   const referenceLigandId = () => dock().referenceLigandId;
   const referenceLigandPath = () => dock().referenceLigandPath;
   const detectedLigands = () => dock().detectedLigands;
-  const ligandSource = () => dock().ligandSource;
   const ligandMolecules = () => dock().ligandMolecules;
+  const getProjectPaths = (): ProjectPaths => {
+    const projectDir = state().projectDir;
+    if (!projectDir) throw new Error('No project selected');
+    return projectPathsFromProjectDir(projectDir);
+  };
 
-  const getDockPaths = (paths: ReturnType<typeof projectPaths>): DockingPaths => {
+  const getDockPaths = (paths: ProjectPaths): DockingPaths => {
     const dockFolder = buildDockFolderName({ referenceLigandId: referenceLigandId() });
     return paths.docking(dockFolder);
   };
@@ -92,8 +92,8 @@ const DockStepLoad: Component = () => {
       } else {
         setError(result.error?.message || 'Failed to fetch PDB');
       }
-    } catch (err: any) {
-      setError(`PDB fetch error: ${err.message}`);
+    } catch (err: unknown) {
+      setError(`PDB fetch error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsLoading(false);
     }
@@ -142,9 +142,7 @@ const DockStepLoad: Component = () => {
     setIsLoading(true);
     setStatusText('Extracting reference ligand...');
 
-    const defaultDir = await api.getDefaultOutputDir();
-    const baseOutputDir = state().customOutputDir || defaultDir;
-    const paths = projectPaths(baseOutputDir, state().jobName);
+    const paths = getProjectPaths();
     const dockPaths = paths.docking(buildDockFolderName({ referenceLigandId: ligandId }));
 
     const extractResult = await api.extractXrayLigand(currentPdb, ligandId, dockPaths.prep);
@@ -203,8 +201,6 @@ const DockStepLoad: Component = () => {
   const resetLigandInput = () => {
     setDockLigandSdfPaths([]);
     setDockLigandMolecules([]);
-    setStructureFilePaths([]);
-    setCsvFilePath(null);
     setSmilesText('');
     setError(null);
   };
@@ -216,9 +212,7 @@ const DockStepLoad: Component = () => {
     setIsLoadingLigands(true);
     setError(null);
 
-    const defaultDir = await api.getDefaultOutputDir();
-    const baseOutputDir = state().customOutputDir || defaultDir;
-    const paths = projectPaths(baseOutputDir, state().jobName);
+    const paths = getProjectPaths();
     const dockPaths = getDockPaths(paths);
 
     const result = await api.convertSmilesList(smiles, dockPaths.inputsLigands);
@@ -232,25 +226,17 @@ const DockStepLoad: Component = () => {
     }
   };
 
-  const handleSourceChange = (source: LigandSource) => {
-    setDockLigandSource(source);
-    resetLigandInput();
-  };
-
   const importLigandFiles = async (filePaths: string[]) => {
     setIsLoadingLigands(true);
     setError(null);
 
-    const defaultDir = await api.getDefaultOutputDir();
-    const baseOutputDir = state().customOutputDir || defaultDir;
-    const paths = projectPaths(baseOutputDir, state().jobName);
+    const paths = getProjectPaths();
     const dockPaths = getDockPaths(paths);
 
     const result = await api.importMoleculeFiles(filePaths, dockPaths.inputsLigands);
     setIsLoadingLigands(false);
 
     if (result.ok) {
-      setStructureFilePaths(filePaths);
       setDockLigandMolecules(result.value);
       setDockLigandSdfPaths(result.value.map((m: DockMolecule) => m.sdfPath));
     } else {
@@ -264,42 +250,11 @@ const DockStepLoad: Component = () => {
     importLigandFiles(filePaths);
   };
 
-  const handleSelectCsvFile = async () => {
-    const filePath = await api.selectCsvFile();
-    if (!filePath) return;
-
-    setIsLoadingLigands(true);
-    setCsvFilePath(filePath);
-    setError(null);
-
-    const defaultDir = await api.getDefaultOutputDir();
-    const baseOutputDir = state().customOutputDir || defaultDir;
-    const paths = projectPaths(baseOutputDir, state().jobName);
-    const dockPaths = getDockPaths(paths);
-
-    const result = await api.parseSmilesCsv(filePath, dockPaths.inputsLigands);
-    setIsLoadingLigands(false);
-
-    if (result.ok) {
-      setDockLigandMolecules(result.value);
-      setDockLigandSdfPaths(result.value.map((m: DockMolecule) => m.sdfPath));
-    } else {
-      setError(result.error?.message || 'Failed to parse CSV');
-    }
-  };
-
   const canContinue = createMemo(() => (
     receptorPrepared() !== null &&
     referenceLigandPath() !== null &&
     ligandMolecules().length > 0
   ));
-
-  const importedStructureLabel = createMemo(() => {
-    const files = structureFilePaths();
-    if (files.length === 0) return '';
-    if (files.length === 1) return path.basename(files[0]);
-    return `${files.length} files selected`;
-  });
 
   const handleContinue = () => {
     if (canContinue()) {

@@ -11,10 +11,11 @@ function getInitialTheme(): Theme {
   return 'wireframe';
 }
 
-const [theme, setThemeSignal] = createSignal<Theme>(getInitialTheme());
+const initialTheme = getInitialTheme();
+const [theme, setThemeSignal] = createSignal<Theme>(initialTheme);
 
 // Apply immediately (before first render) to avoid flash
-document.documentElement.setAttribute('data-theme', theme());
+document.documentElement.setAttribute('data-theme', initialTheme);
 
 export { theme };
 
