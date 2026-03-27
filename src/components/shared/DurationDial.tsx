@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
-import { Component, Show, createSignal, createEffect, onCleanup } from 'solid-js';
+import { Component, For, Show, createSignal, createEffect, onCleanup } from 'solid-js';
 
 interface DurationDialProps {
   value: number;
@@ -224,7 +224,7 @@ const DurationDial: Component<DurationDialProps> = (props) => {
   return (
     <div class="flex flex-col items-center select-none relative">
       <svg
-        ref={svgRef}
+        ref={(el) => { svgRef = el; }}
         viewBox="-20 -20 220 220"
         width="210"
         height="210"
@@ -251,49 +251,53 @@ const DurationDial: Component<DurationDialProps> = (props) => {
         />
 
         {/* Minor ticks for smoother visual guidance (filtered to dial range) */}
-        {MINOR_TICKS.filter(v => v >= min() && v <= max()).map((v) => {
-          const angle = valueToAngle(v);
-          const inner = polarToXY(angle, RADIUS - TRACK_WIDTH / 2 - 1);
-          const outer = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 1);
-          return (
-            <line
-              x1={inner.x} y1={inner.y}
-              x2={outer.x} y2={outer.y}
-              stroke="oklch(var(--bc) / 0.22)"
-              stroke-width="1"
-            />
-          );
-        })}
-
-        {/* Major tick marks and labels (filtered to dial range) */}
-        {MAJOR_TICK_LABELS.filter(v => v >= min() && v <= max()).map((v) => {
-          const angle = valueToAngle(v);
-          const inner = polarToXY(angle, RADIUS - TRACK_WIDTH / 2 - 2);
-          const outer = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 2);
-          const labelPos = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 16);
-          return (
-            <>
+        <For each={MINOR_TICKS.filter((v) => v >= min() && v <= max())}>
+          {(v) => {
+            const angle = valueToAngle(v);
+            const inner = polarToXY(angle, RADIUS - TRACK_WIDTH / 2 - 1);
+            const outer = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 1);
+            return (
               <line
                 x1={inner.x} y1={inner.y}
                 x2={outer.x} y2={outer.y}
-                stroke="oklch(var(--bc) / 0.3)"
+                stroke="oklch(var(--bc) / 0.22)"
                 stroke-width="1"
               />
-              <text
-                x={labelPos.x}
-                y={labelPos.y}
-                text-anchor="middle"
-                dominant-baseline="central"
-                fill="oklch(var(--bc) / 0.85)"
-                font-size="10"
-                font-weight="600"
-                font-family="monospace"
-              >
-                {formatTickLabel(v)}
-              </text>
-            </>
-          );
-        })}
+            );
+          }}
+        </For>
+
+        {/* Major tick marks and labels (filtered to dial range) */}
+        <For each={MAJOR_TICK_LABELS.filter((v) => v >= min() && v <= max())}>
+          {(v) => {
+            const angle = valueToAngle(v);
+            const inner = polarToXY(angle, RADIUS - TRACK_WIDTH / 2 - 2);
+            const outer = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 2);
+            const labelPos = polarToXY(angle, RADIUS + TRACK_WIDTH / 2 + 16);
+            return (
+              <>
+                <line
+                  x1={inner.x} y1={inner.y}
+                  x2={outer.x} y2={outer.y}
+                  stroke="oklch(var(--bc) / 0.3)"
+                  stroke-width="1"
+                />
+                <text
+                  x={labelPos.x}
+                  y={labelPos.y}
+                  text-anchor="middle"
+                  dominant-baseline="central"
+                  fill="oklch(var(--bc) / 0.85)"
+                  font-size="10"
+                  font-weight="600"
+                  font-family="monospace"
+                >
+                  {formatTickLabel(v)}
+                </text>
+              </>
+            );
+          }}
+        </For>
 
         {/* Thumb */}
         <circle
@@ -352,7 +356,7 @@ const DurationDial: Component<DurationDialProps> = (props) => {
           style={{ top: '50%', left: '50%', transform: 'translate(-50%, -60%)' }}
         >
           <input
-            ref={inputRef}
+            ref={(el) => { inputRef = el; }}
             type="number"
             class="input input-bordered input-sm w-20 text-center font-mono text-lg font-bold p-0 h-8"
             value={editText()}

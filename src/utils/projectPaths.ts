@@ -2,21 +2,16 @@
 /**
  * Centralized path construction for the project directory layout.
  *
- * ~/Ember/{projectName}/
- *   .ember-project        — Project ID file
- *   structures/            — Imported structure files (.pdb/.cif/.sdf/.mol/.mol2) + prepared copies
+ * {project}/
+ *   .ember-project         — Project ID file
+ *   structures/            — User-imported structure files only
  *   surfaces/              — Computed surface caches
- *   surfaces/binding_site_map/ — Interaction grids (OpenDX)
- *   docking/{run}/         — Self-contained docking jobs
- *     inputs/              — receptor.pdb, reference_ligand.sdf, ligands/
- *     prep/                — Intermediates (extraction, protonation, conformers)
- *     results/             — all_docked.sdf, cordial_scores.json, poses/
- *   simulations/{run}/     — Self-contained MD simulation jobs
- *     inputs/              — receptor.pdb, ligand.sdf
- *     results/             — system.pdb, trajectory.dcd, final.pdb, energy.csv
- *     analysis/            — clustering/, rmsd/, rmsf/, hbonds/, contacts/
- *   xray/{run}/            — X-ray pose validation jobs
- *     reports/             — xray_analysis_*.pdf outputs
+ *   .ember/support/        — Internal scratch/support files
+ *   docking/{run}/         — inputs/, prep/, results/
+ *   simulations/{run}/     — inputs/, results/, analysis/
+ *   conformers/{run}/      — inputs/, results/
+ *   scoring/{run}/         — inputs/, entries/, results/, analysis/
+ *   xray/{run}/            — inputs/, results/
  *   fep/                   — FEP scoring results
  */
 
@@ -39,12 +34,49 @@ export interface SimulationPaths {
   analysisClustering: string;
 }
 
-export function projectPaths(baseDir: string, projectName: string) {
+export interface ConformerPaths {
+  root: string;
+  inputs: string;
+  results: string;
+}
+
+export interface ScoringPaths {
+  root: string;
+  inputs: string;
+  entries: string;
+  results: string;
+  analysis: string;
+}
+
+export interface XrayPaths {
+  root: string;
+  inputs: string;
+  results: string;
+}
+
+export interface ProjectPaths {
+  root: string;
+  structures: string;
+  surfaces: string;
+  internal: string;
+  support: string;
+  bindingSiteMap: string;
+  docking: (runFolder: string) => DockingPaths;
+  simulations: (runFolder: string) => SimulationPaths;
+  conformers: (runFolder: string) => ConformerPaths;
+  scoring: (runFolder: string) => ScoringPaths;
+  xray: (runFolder: string) => XrayPaths;
+  fep: string;
+}
+
+export function projectPaths(baseDir: string, projectName: string): ProjectPaths {
   const root = path.join(baseDir, projectName);
   return {
     root,
     structures: path.join(root, 'structures'),
     surfaces: path.join(root, 'surfaces'),
+    internal: path.join(root, '.ember'),
+    support: path.join(root, '.ember', 'support'),
     bindingSiteMap: path.join(root, 'surfaces', 'binding_site_map'),
     docking: (runFolder: string): DockingPaths => {
       const base = path.join(root, 'docking', runFolder);
@@ -67,20 +99,36 @@ export function projectPaths(baseDir: string, projectName: string) {
         analysisClustering: path.join(base, 'analysis', 'clustering'),
       };
     },
-    conformers: (runFolder: string) => path.join(root, 'conformers', runFolder),
-    xray: (runFolder: string) => path.join(root, 'xray', runFolder),
-    fep: path.join(root, 'fep'),
-
-    // === Legacy aliases (for reading old projects) ===
-    /** @deprecated Use structures instead */
-    raw: path.join(root, 'raw'),
-    /** @deprecated Receptors now live in each job's inputs/ */
-    prepared: path.join(root, 'prepared'),
-    /** @deprecated Ligands now live in each docking job's inputs/ligands/ and prep/ */
-    ligands: {
-      sdf: path.join(root, 'ligands', 'sdf'),
-      smiles: path.join(root, 'ligands', 'smiles'),
-      images: path.join(root, 'ligands', 'images'),
+    conformers: (runFolder: string): ConformerPaths => {
+      const base = path.join(root, 'conformers', runFolder);
+      return {
+        root: base,
+        inputs: path.join(base, 'inputs'),
+        results: path.join(base, 'results'),
+      };
     },
+    scoring: (runFolder: string): ScoringPaths => {
+      const base = path.join(root, 'scoring', runFolder);
+      return {
+        root: base,
+        inputs: path.join(base, 'inputs'),
+        entries: path.join(base, 'entries'),
+        results: path.join(base, 'results'),
+        analysis: path.join(base, 'analysis'),
+      };
+    },
+    xray: (runFolder: string): XrayPaths => {
+      const base = path.join(root, 'xray', runFolder);
+      return {
+        root: base,
+        inputs: path.join(base, 'inputs'),
+        results: path.join(base, 'results'),
+      };
+    },
+    fep: path.join(root, 'fep'),
   };
+}
+
+export function projectPathsFromProjectDir(projectDir: string): ProjectPaths {
+  return projectPaths(path.dirname(projectDir), path.basename(projectDir));
 }

@@ -7,17 +7,17 @@ test.describe('App boot', () => {
     expect(title).toBeTruthy();
   });
 
-  test('header shows all five mode tabs', async ({ window }) => {
-    const tabs = window.locator('.tabs-boxed .tab.tab-sm');
-    await expect(tabs).toHaveCount(5);
+  test('header shows all mode tabs', async ({ window }) => {
+    const tabs = window.locator('header .tabs-boxed .tab.tab-xs');
+    await expect(tabs).toHaveCount(6);
 
     const labels = await tabs.allTextContents();
-    expect(labels).toEqual(['View', 'Analyze X-ray', 'MCMM', 'Dock', 'Simulate']);
+    expect(labels).toEqual(['View', 'MCMM', 'Dock', 'X-ray', 'Score', 'Simulate']);
   });
 
-  test('View tab is active by default', async ({ window }) => {
-    const viewTab = window.locator('.tab', { hasText: 'View' });
-    await expect(viewTab).toHaveClass(/tab-active/);
+  test('mode tabs are gated until a project is selected', async ({ window }) => {
+    const tabs = window.locator('header .tabs-boxed .tab.tab-xs');
+    await expect(tabs.first()).toBeDisabled();
   });
 
   test('no console errors on boot', async ({ app }) => {

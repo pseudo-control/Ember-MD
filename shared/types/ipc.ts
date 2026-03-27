@@ -146,6 +146,7 @@ export const IpcChannels = {
   FILE_EXISTS: 'file-exists',
   GET_FILE_INFO: 'get-file-info',
   CREATE_DIRECTORY: 'create-directory',
+  DELETE_DIRECTORY: 'fs:delete-directory',
   LIST_SDF_FILES: 'list-sdf-files',
   OPEN_FOLDER: 'open-folder',
   GET_AVAILABLE_DEVICES: 'get-available-devices',
@@ -201,6 +202,7 @@ export const IpcChannels = {
   CANCEL_MD_SIMULATION: 'md:cancel',
   PAUSE_MD_SIMULATION: 'md:pause',
   RESUME_MD_SIMULATION: 'md:resume',
+  EXTEND_MD_SIMULATION: 'md:extend',
 
   // Trajectory viewer channels
   SELECT_DCD_FILE: 'select-dcd-file',
@@ -216,6 +218,7 @@ export const IpcChannels = {
   GENERATE_MD_REPORT: 'generate-md-report',
   SCAN_XRAY_DIRECTORY: 'xray:scan-directory',
   RUN_XRAY_ANALYSIS: 'xray:run-analysis',
+  CANCEL_XRAY: 'xray:cancel',
   SCORE_MD_CLUSTERS: 'md:score-clusters',
   LOAD_MD_TORSION_ANALYSIS: 'md:load-torsion-analysis',
   SCORE_COMPLEX: 'score-complex',
@@ -239,9 +242,8 @@ export const IpcChannels = {
   DELETE_PROJECT: 'delete-project',
   GET_PROJECT_FILE_COUNT: 'get-project-file-count',
   SCAN_PROJECT_ARTIFACTS: 'scan-project-artifacts',
-  SELECT_EMBER_JOB_FOLDER: 'select-ember-job-folder',
+  IMPORT_PROJECT_JOB: 'import-project-job',
   OPEN_PROJECT_FOLDER: 'open-project-folder',
-  MOVE_PROJECT: 'move-project',
   IMPORT_EXTERNAL_PROJECT: 'import-external-project',
   GET_HOME_DIR: 'get-home-dir',
   SET_HOME_DIR: 'set-home-dir',
@@ -253,9 +255,23 @@ export const IpcChannels = {
 
   // Conformer generation (standalone)
   RUN_CONFORM_GENERATION: 'conform:generate',
+  CANCEL_CONFORM: 'conform:cancel',
 
   // Receptor preparation cancellation
   CANCEL_PREP: 'cancel-prep',
+
+  // Score tab channels
+  SCORE_BATCH: 'score:batch',
+  SCORE_TRAJECTORY: 'score:trajectory',
+  CANCEL_SCORE_BATCH: 'score:cancel',
+  EXPORT_SCORE_CSV: 'score:export-csv',
+
+  // Molecule details (lazy, on-demand)
+  GET_MOLECULE_DETAILS: 'get-molecule-details',
+
+  // Settings: last seen version (for changelog popup)
+  GET_LAST_SEEN_VERSION: 'get-last-seen-version',
+  SET_LAST_SEEN_VERSION: 'set-last-seen-version',
 
   // Send channels (main -> renderer)
   PREP_OUTPUT: 'prep-output',
@@ -265,6 +281,7 @@ export const IpcChannels = {
   MD_OUTPUT: 'md:output',
   CONFORM_OUTPUT: 'conform:output',
   XRAY_OUTPUT: 'xray:output',
+  SCORE_OUTPUT: 'score:output',
   PREP_PROGRESS: 'prep:progress',
 } as const;
 
@@ -402,6 +419,63 @@ export interface XrayDirectoryScanResult {
   unpairedPdbCount: number;
 }
 
+// === Molecule detail types (lazy, on-demand) ===
+
+export interface MoleculeDetailsResult {
+  thumbnail: string | null;
+  centroid: { x: number; y: number; z: number } | null;
+  rmsd: number | null;
+  qed: number;
+  mw: number;
+  logp: number;
+  smiles: string | null;
+}
+
+// === Score tab types ===
+
+export interface BatchScoreEntry {
+  id: string;
+  name: string;
+  pdbPath: string;
+  ligandId: string | null;
+  isPrepared: boolean;
+}
+
+export interface BatchScoreRequest {
+  entries: BatchScoreEntry[];
+  jobDir: string;
+}
+
+export interface ScoreTrajectoryRequest {
+  trajectoryPath: string;
+  topologyPath: string;
+  ligandSdfPath: string;
+  numClusters: number;
+  jobDir: string;
+}
+
+export interface BatchScoreEntryResult {
+  id: string;
+  pdbPath: string;
+  name: string;
+  ligandId: string | null;
+  isPrepared: boolean;
+  preparedReceptorPath: string | null;
+  extractedLigandSdfPath: string | null;
+  vinaScore: number | null;
+  cordialExpectedPkd: number | null;
+  cordialPHighAffinity: number | null;
+  qed: number | null;
+  status: 'done' | 'error';
+  errorMessage: string | null;
+}
+
+export interface BatchScoreResult {
+  entries: BatchScoreEntryResult[];
+  outputDir: string;
+  cordialAvailable: boolean;
+}
+
 export interface MdReportOptions {
   topologyPath: string;
   trajectoryPath: string;
@@ -537,6 +611,7 @@ export interface ProjectRunInfo {
   lastModified: number;
   hasTrajectory: boolean;
   hasFinalPdb: boolean;
+  type?: JobType;
 }
 
 export interface ProjectInfo {
@@ -544,7 +619,6 @@ export interface ProjectInfo {
   path: string;
   runs: ProjectRunInfo[];
   lastModified: number;
-  external?: boolean;
 }
 
 export interface RunFilesResult {
@@ -563,25 +637,40 @@ export interface ProjectJobPose {
   affinity?: number;
 }
 
+export type JobType = 'docking' | 'simulation' | 'conformer' | 'scoring' | 'xray';
+export type JobStatus = 'running' | 'complete' | 'error' | 'cancelled';
+export type ScoringJobMode = 'batch' | 'trajectory';
+
+export interface JobArtifactMap {
+  [key: string]: string | string[] | null | undefined;
+}
+
+export interface JobMetadata {
+  schemaVersion: 1;
+  type: JobType;
+  mode?: ScoringJobMode;
+  folderName: string;
+  descriptor: string;
+  createdAt: string;
+  appVersion: string;
+  status: JobStatus;
+  artifacts: JobArtifactMap;
+}
+
 export interface ProjectJob {
-  id: string;               // Unique key: "dock:Vina_HWF" or "sim:ff19sb-OPC_MD-300K-1ns"
-  type: 'docking' | 'docking-pose' | 'simulation' | 'conformer' | 'map';
-  folder: string;           // Run folder name (e.g., "Vina_HWF")
-  label: string;            // Display name
-  path: string;             // Root path of the job directory
-  parentId?: string;
-  parentLabel?: string;
-  sortKey?: number;
+  id: string;
+  type: JobType;
+  folder: string;
+  label: string;
+  path: string;
   lastModified?: number;
+  metadata: JobMetadata;
 
   // Docking-specific
   receptorPdb?: string;
   poses?: ProjectJobPose[];
-  ligandPath?: string;
-  poseIndex?: number;
   preparedLigandPath?: string;
   referenceLigandPath?: string;
-  holoPdb?: string;
 
   // Simulation-specific
   systemPdb?: string;
@@ -596,17 +685,17 @@ export interface ProjectJob {
   conformerPaths?: string[];
   conformerCount?: number;
 
-  // Map-specific
-  mapMethod?: PocketMapMethod;
-  mapResultJson?: string;
-  mapPdb?: string;
-  mapTrajectoryDcd?: string;
-  hotspotCount?: number;
+  // Scoring-specific
+  scoreResultsJson?: string;
+
+  // X-ray-specific
+  xrayReportPaths?: string[];
 }
 
-// Keep legacy alias for backward compat during transition
-export type ProjectArtifact = ProjectJob;
-export type ProjectArtifactPose = ProjectJobPose;
+export interface ImportProjectJobRequest {
+  projectDir: string;
+  expectedType: JobType;
+}
 
 // === Binding site interaction map types ===
 

@@ -62,14 +62,13 @@ const MDStepConfigure: Component = () => {
       temperatureK: state().md.config.temperatureK,
       productionNs: state().md.config.productionNs,
       compoundId: state().md.config.compoundId,
+      inputMode: state().md.inputMode,
     });
-    return `${state().jobName}/${runFolder}`;
+    return `simulations/${runFolder}`;
   });
 
   const isLigandOnly = () => state().md.inputMode === 'ligand_only';
   const isApo = () => state().md.inputMode === 'apo';
-  const hasProtein = () => !isLigandOnly();
-
   // Set smart default duration on first render if still at initial default
   onMount(() => {
     if (state().md.config.productionNs === 10) {
@@ -119,9 +118,9 @@ const MDStepConfigure: Component = () => {
 
     try {
       // Create temp output dir for benchmark using working directory
-      const defaultDir = await api.getDefaultOutputDir();
-      const baseOutputDir = state().customOutputDir || defaultDir;
-      const benchmarkDir = `${baseOutputDir}/${state().jobName}/.md_benchmark_temp`;
+      const projectDir = state().projectDir;
+      if (!projectDir) throw new Error('No project selected');
+      const benchmarkDir = `${projectDir}/simulations/.md_benchmark_temp`;
 
       console.log('[Benchmark] Starting with:', {
         receptorPdb: state().md.receptorPdb,

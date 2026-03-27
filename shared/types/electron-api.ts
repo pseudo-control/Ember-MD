@@ -56,6 +56,11 @@ import type {
   FepScoringOptions,
   FepScoringResult,
   ProjectJob,
+  BatchScoreRequest,
+  BatchScoreResult,
+  ScoreTrajectoryRequest,
+  MoleculeDetailsResult,
+  ImportProjectJobRequest,
 } from './ipc';
 
 export interface ElectronAPI {
@@ -67,6 +72,7 @@ export interface ElectronAPI {
   fileExists: (path: string) => Promise<boolean>;
   getFileInfo: (path: string) => Promise<FileInfo>;
   createDirectory: (dirPath: string) => Promise<Result<void, AppError>>;
+  deleteDirectory: (dirPath: string) => Promise<Result<void, AppError>>;
   listSdfFiles: (dirPath: string) => Promise<string[]>;
   listPdbInDirectory: (dirPath: string) => Promise<string[]>;
   scanXrayDirectory: (dirPath: string) => Promise<Result<XrayDirectoryScanResult, AppError>>;
@@ -206,6 +212,7 @@ export interface ElectronAPI {
     mcmmOptions?: { steps: number; temperature: number; sampleAmides: boolean; xtbRerank?: boolean }
   ) => Promise<Result<{ conformerPaths: string[]; parentMapping: Record<string, string>; conformerEnergies: Record<string, number> }, AppError>>;
   onConformOutput: (callback: (data: OutputData) => void) => () => void;
+  cancelConformGeneration: () => Promise<void>;
 
   // Post-dock pocket refinement
   refinePoses: (
@@ -259,10 +266,25 @@ export interface ElectronAPI {
   cancelMdSimulation: () => Promise<void>;
   pauseMdSimulation: () => Promise<void>;
   resumeMdSimulation: () => Promise<void>;
+  extendMdSimulation: (newTotalNs: number) => Promise<void>;
 
   // MD event listener
   onMdOutput: (callback: (data: OutputData) => void) => () => void;
   onXrayOutput: (callback: (data: OutputData) => void) => () => void;
+
+  // Score tab operations
+  scoreBatch: (request: BatchScoreRequest) => Promise<Result<BatchScoreResult, AppError>>;
+  cancelScoreBatch: () => Promise<void>;
+  onScoreOutput: (callback: (data: OutputData) => void) => () => void;
+  scoreTrajectory: (request: ScoreTrajectoryRequest) => Promise<Result<BatchScoreResult, AppError>>;
+  exportScoreCsv: (entries: string, csvPath: string) => Promise<Result<string, AppError>>;
+
+  // Molecule details (lazy, on-demand for detail panels)
+  getMoleculeDetails: (sdfPath: string, referenceSdfPath?: string) => Promise<Result<MoleculeDetailsResult, AppError>>;
+
+  // Settings: last seen version for changelog
+  getLastSeenVersion: () => Promise<string | null>;
+  setLastSeenVersion: (version: string) => Promise<void>;
 
   // Trajectory viewer operations
   selectDcdFile: () => Promise<string | null>;
@@ -287,6 +309,7 @@ export interface ElectronAPI {
   analyzeTrajectory: (options: AnalysisOptions) => Promise<Result<AnalysisResult, AppError>>;
   generateMdReport: (options: MdReportOptions) => Promise<Result<MdReportResult, AppError>>;
   runXrayAnalysis: (inputDir: string, outputDir: string) => Promise<Result<XrayAnalysisResult, AppError>>;
+  cancelXrayAnalysis: () => Promise<void>;
   loadMdTorsionAnalysis: (options: LoadMdTorsionAnalysisOptions) => Promise<Result<MdTorsionAnalysis | null, AppError>>;
   scoreMdClusters: (options: ScoreMdClustersOptions) => Promise<Result<ScoreMdClustersResult, AppError>>;
   mapBindingSite: (options: BindingSiteMapOptions) => Promise<Result<BindingSiteMapResult, AppError>>;
@@ -298,9 +321,9 @@ export interface ElectronAPI {
   cancelFepScoring: () => Promise<void>;
 
   // Molecule alignment
-  alignMoleculesMcs: (refSdf: string, mobileSdf: string, outPath: string) => Promise<Result<{ output: string }, AppError>>;
+  alignMoleculesMcs: (refSdf: string, mobileSdf: string) => Promise<Result<{ coords: number[] }, AppError>>;
   alignDetectScaffolds: (refSdf: string, mobileSdf: string) => Promise<Result<{ scaffolds: Array<{ label: string; refAtomIndices: number[]; mobileAtomIndices: number[] }> }, AppError>>;
-  alignByScaffold: (refSdf: string, mobileSdf: string, scaffoldIndex: number, outPath: string) => Promise<Result<{ output: string; scaffoldIndex: number }, AppError>>;
+  alignByScaffold: (refSdf: string, mobileSdf: string, scaffoldIndex: number) => Promise<Result<{ scaffoldIndex: number; coords: number[] }, AppError>>;
 
   // Image reading
   readImageAsDataUrl: (imagePath: string) => Promise<string | null>;
@@ -320,16 +343,15 @@ export interface ElectronAPI {
   scanRunFiles: (runDir: string) => Promise<RunFilesResult>;
   importStructure: (sourcePath: string, projectDir: string) => Promise<Result<string, AppError>>;
   fetchPdb: (pdbId: string, projectDir: string) => Promise<Result<string, AppError>>;
-  renameProject: (oldName: string, newName: string) => Promise<Result<void, AppError>>;
-  deleteProject: (projectName: string) => Promise<Result<void, AppError>>;
-  getProjectFileCount: (projectName: string) => Promise<{ fileCount: number; totalSizeMb: number }>;
+  renameProject: (projectDir: string, newName: string) => Promise<Result<void, AppError>>;
+  deleteProject: (projectDir: string) => Promise<Result<void, AppError>>;
+  getProjectFileCount: (projectDir: string) => Promise<{ fileCount: number; totalSizeMb: number }>;
   prepareForViewing: (rawPdbPath: string, preparedPath: string) => Promise<Result<string, AppError>>;
-  scanProjectArtifacts: (projectName: string) => Promise<ProjectJob[]>;
-  selectEmberJobFolder: () => Promise<ProjectJob | null>;
+  scanProjectArtifacts: (projectDir: string) => Promise<ProjectJob[]>;
+  importProjectJob: (request: ImportProjectJobRequest) => Promise<Result<ProjectJob, AppError>>;
   prepareLigandForViewing: (inputSdf: string, outputSdf: string) => Promise<Result<string, AppError>>;
   getPathForFile: (file: File) => string;
   openProjectFolder: (projectDir: string) => Promise<void>;
-  moveProject: (projectName: string, projectDir: string) => Promise<Result<string, AppError>>;
   importExternalProject: () => Promise<Result<{ name: string; path: string }, AppError>>;
   getHomeDir: () => Promise<string>;
   setHomeDir: () => Promise<Result<string, AppError>>;

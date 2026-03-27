@@ -9,12 +9,17 @@ import * as fs from 'fs';
 import { Ok, Err, Result } from '../../shared/types/result';
 import { AppError } from '../../shared/types/errors';
 import * as appState from '../app-state';
+import { ChildProcess } from 'child_process';
 import { childProcesses } from '../spawn';
 import { getXtbPath } from '../paths';
+import { IpcChannels } from '../../shared/types/ipc';
+import { createJobMetadata, inferDescriptorFromFolderName, updateJobStatus, writeJobMetadata } from '../job-metadata';
+
+let currentConformProcess: ChildProcess | null = null;
 
 export function register(): void {
   ipcMain.handle(
-    'conform:generate',
+    IpcChannels.RUN_CONFORM_GENERATION,
     async (
       event,
       ligandSdfPath: string,
@@ -39,7 +44,7 @@ export function register(): void {
 
         const scriptPath = path.join(appState.fraggenRoot, 'generate_conformers.py');
         if (!fs.existsSync(scriptPath)) {
-          event.sender.send('conform:output', {
+          event.sender.send(IpcChannels.CONFORM_OUTPUT, {
             type: 'stdout',
             data: 'Warning: generate_conformers.py not found, skipping conformer generation\n'
           });
@@ -53,7 +58,25 @@ export function register(): void {
 
         fs.mkdirSync(outputDir, { recursive: true });
 
-        const ligandSdfPaths = [ligandSdfPath];
+        const runRoot = path.dirname(outputDir);
+        const inputsDir = path.join(runRoot, 'inputs');
+        fs.mkdirSync(inputsDir, { recursive: true });
+        writeJobMetadata(runRoot, createJobMetadata({
+          jobDir: runRoot,
+          type: 'conformer',
+          descriptor: inferDescriptorFromFolderName(path.basename(runRoot), 'conformers'),
+          status: 'running',
+          artifacts: {
+            inputsDir: 'inputs',
+            resultsDir: 'results',
+          },
+        }));
+        const stagedLigandPath = path.join(inputsDir, path.basename(ligandSdfPath));
+        if (path.resolve(stagedLigandPath) !== path.resolve(ligandSdfPath)) {
+          fs.copyFileSync(ligandSdfPath, stagedLigandPath);
+        }
+
+        const ligandSdfPaths = [stagedLigandPath];
         const ligandListPath = path.join(outputDir, 'ligand_list_for_conformers.json');
         fs.writeFileSync(ligandListPath, JSON.stringify(ligandSdfPaths, null, 2));
 
@@ -104,16 +127,17 @@ export function register(): void {
             : xtbPath
               ? (shouldRerank ? 'xTB reranking: enabled' : 'xTB reranking: disabled')
               : 'xTB reranking: unavailable';
-        event.sender.send('conform:output', {
+        event.sender.send(IpcChannels.CONFORM_OUTPUT, {
           type: 'stdout',
           data: `${methodLabel} conformer search — ${maxConformers} max, ${rmsdCutoff} Å cutoff, ${xtbStatus}\n`
         });
 
-        console.log(`[Conform] Starting ${methodLabel} conformer generation for ${path.basename(ligandSdfPath)}`);
+        console.log(`[Conform] Starting ${methodLabel} conformer generation for ${path.basename(stagedLigandPath)}`);
         console.log(`[Conform] Args: ${args.slice(1).join(' ')}`);
 
         const python = spawn(appState.condaPythonPath, args);
         childProcesses.add(python);
+        currentConformProcess = python;
 
         let stdout = '';
         let stderr = '';
@@ -135,31 +159,40 @@ export function register(): void {
           }
           // Only surface warnings/errors to user
           if (text.includes('Warning') || text.includes('ERROR')) {
-            event.sender.send('conform:output', { type: 'stderr', data: text });
+            event.sender.send(IpcChannels.CONFORM_OUTPUT, { type: 'stderr', data: text });
           }
         });
 
         python.on('close', (code: number | null) => {
           childProcesses.delete(python);
+          currentConformProcess = null;
           if (code === 0) {
             try {
               const lines = stdout.trim().split('\n');
               const lastLine = lines[lines.length - 1];
               if (lastLine && lastLine.startsWith('{')) {
                 const result = JSON.parse(lastLine);
+                updateJobStatus(runRoot, 'complete', {
+                  inputsDir: 'inputs',
+                  resultsDir: 'results',
+                });
                 resolve(Ok({
                   conformerPaths: result.conformer_paths || [],
                   parentMapping: result.parent_mapping || {},
                   conformerEnergies: result.conformer_energies || {},
                 }));
               } else {
-                event.sender.send('conform:output', {
+                event.sender.send(IpcChannels.CONFORM_OUTPUT, {
                   type: 'stdout',
                   data: 'Warning: No conformer output, using original molecule\n'
                 });
                 const name = path.basename(ligandSdfPath, '.sdf');
+                updateJobStatus(runRoot, 'complete', {
+                  inputsDir: 'inputs',
+                  resultsDir: 'results',
+                });
                 resolve(Ok({
-                  conformerPaths: [ligandSdfPath],
+                  conformerPaths: [stagedLigandPath],
                   parentMapping: { [name]: name },
                   conformerEnergies: {},
                 }));
@@ -173,10 +206,13 @@ export function register(): void {
           } else {
             const errMsg = stderr.slice(0, 200).trim() || `exit code ${code}`;
             console.error(`[Conform] CONFORMER_FAILED: ${errMsg}`);
-            event.sender.send('conform:output', {
+            event.sender.send(IpcChannels.CONFORM_OUTPUT, {
               type: 'stderr',
               data: `Error [CONFORMER_FAILED]: ${errMsg}\n`
             });
+            try {
+              updateJobStatus(runRoot, 'error');
+            } catch { /* ignore metadata update failures */ }
             resolve(Err({
               type: 'CONFORMER_FAILED',
               message: `Conformer generation failed: ${errMsg}`,
@@ -186,6 +222,10 @@ export function register(): void {
 
         python.on('error', (error: Error) => {
           childProcesses.delete(python);
+          currentConformProcess = null;
+          try {
+            updateJobStatus(runRoot, 'error');
+          } catch { /* ignore metadata update failures */ }
           resolve(Err({
             type: 'CONFORMER_FAILED',
             message: error.message,
@@ -194,4 +234,12 @@ export function register(): void {
       });
     }
   );
+
+  // Cancel running conformer generation
+  ipcMain.handle(IpcChannels.CANCEL_CONFORM, async (): Promise<void> => {
+    if (currentConformProcess && !currentConformProcess.killed) {
+      currentConformProcess.kill('SIGTERM');
+      currentConformProcess = null;
+    }
+  });
 }

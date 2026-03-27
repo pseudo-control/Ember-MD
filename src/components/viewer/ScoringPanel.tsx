@@ -1,6 +1,5 @@
 // Copyright (c) 2026 Ember Contributors. MIT License.
 import { Component, Show, createSignal } from 'solid-js';
-import { workflowStore } from '../../stores/workflow';
 
 interface ScoringPanelProps {
   pdbPath: string;
@@ -49,7 +48,7 @@ const ScoringPanel: Component<ScoringPanelProps> = (props) => {
     <div class="bg-base-200 rounded-lg p-3 text-xs">
       <div class="flex items-center justify-between mb-2">
         <span class="font-semibold text-sm">Score Complex</span>
-        <button class="btn btn-ghost btn-xs" onClick={props.onClose}>
+        <button class="btn btn-ghost btn-xs" onClick={() => props.onClose()}>
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
           </svg>
