@@ -364,7 +364,17 @@ def select_ligand_atoms(universe: Any, custom_selection: Optional[str] = None) -
 def apply_pbc_transforms(universe: Any, protein: Any = None, ligand: Any = None) -> None:
     """Apply PBC unwrapping and centering transformations.
 
-    Applies: unwrap → center_in_box → wrap workflow.
+    Applies: unwrap → center_in_box (no re-wrap).
+    The wrap step is intentionally omitted — it re-wraps individual bonded
+    fragments into the primary box, which can split residues at the boundary
+    when MDAnalysis bond detection is incomplete (e.g. flexible sidechain H
+    atoms on ARG/LYS, or ligand H atoms, end up on the opposite side of the
+    box from their parent heavy atoms).
+
+    unwrap alone makes all molecules whole, and center_in_box positions the
+    protein at the box center.  Atoms may extend slightly beyond the box
+    boundary, but all coordinates are correct relative to each other.
+
     Handles protein-ligand, protein-only, and ligand-only systems.
     Silently continues if transforms fail (e.g., missing box dimensions).
     """
@@ -379,7 +389,6 @@ def apply_pbc_transforms(universe: Any, protein: Any = None, ligand: Any = None)
             workflow = [
                 trans.unwrap(complex_group),
                 trans.center_in_box(protein, center='mass'),
-                trans.wrap(complex_group, compound='fragments'),
             ]
             universe.trajectory.add_transformations(*workflow)
             print("Applied PBC unwrapping and centering transformations")
@@ -387,7 +396,6 @@ def apply_pbc_transforms(universe: Any, protein: Any = None, ligand: Any = None)
             workflow = [
                 trans.unwrap(ligand),
                 trans.center_in_box(ligand, center='mass'),
-                trans.wrap(ligand, compound='fragments'),
             ]
             universe.trajectory.add_transformations(*workflow)
             print("Applied PBC unwrapping and centering transformations (ligand-only)")

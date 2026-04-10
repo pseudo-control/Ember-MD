@@ -283,20 +283,29 @@ const buildProjectJobFromMetadata = (jobDir: string, metadata: JobMetadata): Pro
 
   if (metadata.type === 'simulation') {
     const resultsDir = resolveArtifactPath(jobDir, (metadata.artifacts.resultsDir as string) || 'results') || path.join(jobDir, 'results');
-    const systemPdb = path.join(resultsDir, 'system.pdb');
-    const trajectoryDcd = path.join(resultsDir, 'trajectory.dcd');
-    const finalPdb = path.join(resultsDir, 'final.pdb');
+    // Resolve each file: try metadata resultsDir first, fall back to jobDir root
+    // (files may be directly in the run directory instead of a results/ subdirectory)
+    const resolveSimFile = (name: string): string | undefined => {
+      const inResults = path.join(resultsDir, name);
+      if (fs.existsSync(inResults)) return inResults;
+      const inRoot = path.join(jobDir, name);
+      if (fs.existsSync(inRoot)) return inRoot;
+      return undefined;
+    };
+    const systemPdb = resolveSimFile('system.pdb');
+    const trajectoryDcd = resolveSimFile('trajectory.dcd');
+    const finalPdb = resolveSimFile('final.pdb');
     const { clusterCount, clusterDirPath, clusteringResultsPath } = getSimulationClusterArtifacts(jobDir);
     const parts = [];
-    if (fs.existsSync(trajectoryDcd)) parts.push('trajectory');
+    if (trajectoryDcd) parts.push('trajectory');
     if (clusterCount > 0) parts.push(`${clusterCount} clusters`);
     return {
       ...base,
       label: parts.length > 0 ? `${folder} (${parts.join(', ')})` : folder,
-      systemPdb: fs.existsSync(systemPdb) ? systemPdb : undefined,
-      trajectoryDcd: fs.existsSync(trajectoryDcd) ? trajectoryDcd : undefined,
-      finalPdb: fs.existsSync(finalPdb) ? finalPdb : undefined,
-      hasTrajectory: fs.existsSync(trajectoryDcd),
+      systemPdb,
+      trajectoryDcd,
+      finalPdb,
+      hasTrajectory: !!trajectoryDcd,
       clusterCount,
       clusterDir: clusterDirPath,
       clusteringResultsPath,

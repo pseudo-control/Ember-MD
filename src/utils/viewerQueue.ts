@@ -349,6 +349,23 @@ export function buildProjectTableFromJobs(
         metrics: {},
         trajectoryPath: job.trajectoryDcd || null,
       });
+      // Add cluster centroid rows when clustering data exists
+      if (job.clusterDir && job.clusterCount && job.clusterCount > 0) {
+        for (let i = 0; i < job.clusterCount; i++) {
+          const centroidPath = `${job.clusterDir}/cluster_${i}_centroid.pdb`;
+          rows.push({
+            id: `${familyId}:cluster:${i}`,
+            familyId,
+            label: `Cluster ${i + 1}`,
+            rowKind: 'cluster',
+            jobType: 'simulation',
+            item: { pdbPath: centroidPath, label: `Cluster ${i + 1}` },
+            loadKind: rows.length > 1 ? 'queue' : 'structure',
+            queueIndex: i,
+            metrics: {},
+          });
+        }
+      }
     } else {
       rows.push(summaryRow);
     }
